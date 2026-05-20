@@ -5,6 +5,7 @@ const {
   accessMock, writeFileMock, unlinkMock, readFileMock, readdirMock, spawnMock, execFileMock,
   cfgEnsureLoaded, cfgGetProjectPath, cfgGetPackagePath, cfgGetContext,
   cfgGetCustomPackagesPath, cfgGetMicrosoftPackagesPath,
+  cfgGetActiveXppConfig, cfgGetModelName,
 } = vi.hoisted(() => {
   const accessMock = vi.fn();
   const writeFileMock = vi.fn().mockResolvedValue(undefined);
@@ -22,10 +23,13 @@ const {
   const cfgGetContext = vi.fn().mockReturnValue({});
   const cfgGetCustomPackagesPath = vi.fn().mockResolvedValue(null);
   const cfgGetMicrosoftPackagesPath = vi.fn().mockResolvedValue(null);
+  const cfgGetActiveXppConfig = vi.fn().mockResolvedValue(null);
+  const cfgGetModelName = vi.fn().mockReturnValue(null);
   return {
     accessMock, writeFileMock, unlinkMock, readFileMock, readdirMock, spawnMock, execFileMock,
     cfgEnsureLoaded, cfgGetProjectPath, cfgGetPackagePath, cfgGetContext,
     cfgGetCustomPackagesPath, cfgGetMicrosoftPackagesPath,
+    cfgGetActiveXppConfig, cfgGetModelName,
   };
 });
 
@@ -50,6 +54,8 @@ vi.mock('../../src/utils/configManager.js', () => ({
     getContext: cfgGetContext,
     getCustomPackagesPath: cfgGetCustomPackagesPath,
     getMicrosoftPackagesPath: cfgGetMicrosoftPackagesPath,
+    getActiveXppConfig: cfgGetActiveXppConfig,
+    getModelName: cfgGetModelName,
   }),
 }));
 vi.mock('../../src/utils/operationLocks.js', () => ({
@@ -95,6 +101,8 @@ describe('build_d365fo_project', () => {
     cfgGetContext.mockReturnValue({});
     cfgGetCustomPackagesPath.mockResolvedValue(null);
     cfgGetMicrosoftPackagesPath.mockResolvedValue(null);
+    cfgGetActiveXppConfig.mockResolvedValue(null);
+    cfgGetModelName.mockReturnValue(null);
     execFileMock.mockImplementation((_file: string, _args: string[], _opts: any, cb: Function) => {
       cb(null, { stdout: '', stderr: '' });
     });
@@ -169,13 +177,13 @@ describe('build_d365fo_project', () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
-  it('returns error when project path is missing', async () => {
-    cfgGetProjectPath.mockResolvedValue('');
+  it('returns error when model name cannot be determined', async () => {
+    allowPaths([PKG, XPPC]);
 
     const result = await buildProjectTool({}, {});
 
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain('Cannot determine project path');
+    expect(result.content[0].text).toContain('Cannot determine model name');
   });
 
   it('returns in-progress status when build is already running', async () => {
@@ -306,5 +314,136 @@ describe('build_d365fo_project', () => {
     // A new build was started
     expect(spawnMock).toHaveBeenCalledTimes(1);
     expect(result.content[0].text).toContain('Build started');
+  });
+
+  it('marks build as failed when xppc exits 0 but log contains Compile Error', async () => {
+    let closeCallback: ((code: number | null) => void) | undefined;
+    const child = {
+      pid: 42,
+      unref: vi.fn(),
+      on: vi.fn().mockImplementation((event: string, cb: any) => {
+        if (event === 'close') closeCallback = cb;
+      }),
+    };
+    spawnMock.mockReturnValue(child);
+    allowPaths([XPPC, PKG]);
+    cfgGetModelName.mockReturnValue(MODEL_NAME);
+
+    await buildProjectTool({ modelName: MODEL_NAME }, {});
+    expect(closeCallback).toBeDefined();
+
+    readFileMock.mockImplementation(async (p: string) => {
+      if (p.endsWith('.xppc.err')) return "Compile Error: Class Method dynamics://MyModel/MyClass/myMethod: [(28,27),(28,28)]: ';' expected.";
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    await closeCallback!(0);
+
+    const lastStateWrite = writeFileMock.mock.calls
+      .filter((c: any[]) => c[0].includes('d365build_state'))
+      .at(-1);
+    expect(lastStateWrite).toBeDefined();
+    const state = JSON.parse(lastStateWrite![1]);
+    expect(state.status).toBe('failed');
+    expect(state.exitCode).toBe(0);
+  });
+
+  it('marks build as succeeded when xppc exits 0 and log has no Compile Error', async () => {
+    let closeCallback: ((code: number | null) => void) | undefined;
+    const child = {
+      pid: 42,
+      unref: vi.fn(),
+      on: vi.fn().mockImplementation((event: string, cb: any) => {
+        if (event === 'close') closeCallback = cb;
+      }),
+    };
+    spawnMock.mockReturnValue(child);
+    allowPaths([XPPC, PKG]);
+    cfgGetModelName.mockReturnValue(MODEL_NAME);
+
+    await buildProjectTool({ modelName: MODEL_NAME }, {});
+    expect(closeCallback).toBeDefined();
+
+    readFileMock.mockImplementation(async (p: string) => {
+      if (p.endsWith('.xppc.err')) return 'Compile Warning: MyClass: potential issue.';
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    await closeCallback!(0);
+
+    const lastStateWrite = writeFileMock.mock.calls
+      .filter((c: any[]) => c[0].includes('d365build_state'))
+      .at(-1);
+    expect(lastStateWrite).toBeDefined();
+    const state = JSON.parse(lastStateWrite![1]);
+    expect(state.status).toBe('succeeded');
+    expect(state.exitCode).toBe(0);
+  });
+
+  it('buildJobKey is case-insensitive: MYMODEL and mymodel resolve same state file path', async () => {
+    const readPaths: string[] = [];
+
+    // First call: no state, spawns build — record which state path was attempted
+    const child = makeFakeChild(42);
+    spawnMock.mockReturnValue(child);
+    allowPaths([XPPC, PKG]);
+    cfgGetModelName.mockReturnValue(null);
+
+    readFileMock.mockImplementation(async (p: string) => {
+      if (p.includes('d365build_state')) { readPaths.push(p); throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    await buildProjectTool({ modelName: 'mymodel' }, {});
+    const firstPath = readPaths[0];
+    expect(firstPath).toBeDefined();
+
+    // Second call: uppercase model — should hit the same state file path
+    vi.resetAllMocks();
+    writeFileMock.mockResolvedValue(undefined);
+    unlinkMock.mockResolvedValue(undefined);
+    readdirMock.mockRejectedValue(new Error('not found'));
+    cfgGetActiveXppConfig.mockResolvedValue(null);
+    cfgGetModelName.mockReturnValue(null);
+    cfgGetCustomPackagesPath.mockResolvedValue(null);
+    cfgGetMicrosoftPackagesPath.mockResolvedValue(null);
+    cfgGetPackagePath.mockReturnValue(null);
+    cfgGetContext.mockReturnValue({});
+    allowPaths([XPPC, PKG]);
+
+    const runningState = JSON.stringify({
+      pid: 42, modelName: 'mymodel', tool: 'xppc.exe',
+      startTime: new Date().toISOString(), logFile: 'C:\\Temp\\log.log', status: 'running',
+    });
+    const readPaths2: string[] = [];
+    readFileMock.mockImplementation(async (p: string) => {
+      if (p.includes('d365build_state')) { readPaths2.push(p); return runningState; }
+      if (p.includes('d365build_log')) return 'Compiling...';
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    vi.spyOn(process, 'kill').mockReturnValue(true as any);
+
+    const result = await buildProjectTool({ modelName: 'MYMODEL' }, {});
+    const secondPath = readPaths2[0];
+    expect(secondPath).toBeDefined();
+    expect(result.content[0].text).toContain('in progress');
+    expect(firstPath).toBe(secondPath);
+
+    vi.restoreAllMocks();
+  });
+
+  it('uses explicit modelName param without requiring projectPath or rnrproj', async () => {
+    const child = makeFakeChild(77);
+    spawnMock.mockReturnValue(child);
+    allowPaths([XPPC, PKG]);
+    cfgGetModelName.mockReturnValue(null);
+
+    const result = await buildProjectTool({ modelName: 'ExplicitModel' }, {});
+
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    const [, args] = spawnMock.mock.calls[0];
+    expect(args).toContain('-modelmodule=ExplicitModel');
+    expect(result.content[0].text).toContain('Build started');
+    expect(result.isError).toBeFalsy();
   });
 });

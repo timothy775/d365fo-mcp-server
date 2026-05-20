@@ -40,6 +40,9 @@ function assertSafePath(value: string, label: string): void {
   }
 }
 
+// xppc.exe writes this prefix on error lines in the -log file (standalone/non-VS mode)
+const XPPC_COMPILE_ERROR_RE = /^Compile Error:/m;
+
 // ---------------------------------------------------------------------------
 // Async build state management
 // State and log files live in os.tmpdir(), keyed by a hash of modelName+metadataPath.
@@ -245,7 +248,7 @@ async function launchXppcBackground(
       xppcErrorContent = await readFile(xppcErrorLog, 'utf-8');
     } catch { /* no -log file = no diagnostics */ }
 
-    const hasCompileErrors = /^Compile Error:/m.test(xppcErrorContent);
+    const hasCompileErrors = XPPC_COMPILE_ERROR_RE.test(xppcErrorContent);
     // A build succeeds only when xppc exits 0 AND no compile errors were logged.
     // xppc may exit 0 even when it emits errors (observed in UDE standalone mode).
     const succeeded = exitCode === 0 && !hasCompileErrors;

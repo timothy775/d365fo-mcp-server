@@ -107,8 +107,8 @@ export class XppConfigProvider {
           description: json.Description,
           fullFilename: entry.name.replace(/\.json$/, ''),
         });
-      } catch {
-        // Skip malformed files
+      } catch (err) {
+        console.warn(`[XppConfigProvider] Skipping malformed config "${entry.name}":`, err instanceof SyntaxError ? 'invalid JSON' : String(err));
       }
     }
 
