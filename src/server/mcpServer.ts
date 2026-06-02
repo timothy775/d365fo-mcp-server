@@ -1886,7 +1886,8 @@ SourceCode format for classes: class declaration with member vars inside { }, me
           type: 'object',
           properties: {
             projectPath: { type: 'string', description: 'Absolute path to the .rnrproj file to analyze. Auto-detected from .mcp.json if omitted.' },
-            targetFilter: { type: 'string', description: 'Optional: filter results to a specific class, table, or object name' },
+            targetFilter: { type: 'string', description: 'Optional: filter results to a specific object name (class, table, form, enum, ...).' },
+            targetElementType: { type: 'string', description: 'Element type for the filter when using xppbp 10.0.24+ (equals-style CLI). Common values: class, table, form, enum, view, query. Defaults to "class" when targetFilter is set but this is omitted.' },
             modelName: { type: 'string', description: 'Model name to check. Auto-detected from .mcp.json if omitted.' },
             packagePath: { type: 'string', description: 'PackagesLocalDirectory root path. Auto-detected from .mcp.json if omitted.' },
           },

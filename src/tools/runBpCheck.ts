@@ -16,7 +16,8 @@ export const runBpCheckToolDefinition = {
   description: 'Runs xppbp.exe against the project to enforce Microsoft Best Practices.',
   parameters: z.object({
     projectPath: z.string().optional().describe('The absolute path to the .rnrproj file to check. Auto-detected from .mcp.json if omitted.'),
-    targetFilter: z.string().optional().describe('Optional: filter results to a specific class, table, or object name'),
+    targetFilter: z.string().optional().describe('Optional: filter results to a specific object name (class, table, form, enum, ...).'),
+    targetElementType: z.string().optional().describe('Element type for the filter, used with xppbp 10.0.24+ (equals-style CLI). Common values: class, table, form, enum, view, query. Defaults to "class" when targetFilter is set but targetElementType is omitted.'),
     modelName: z.string().optional().describe('Model name to check. Auto-detected from .mcp.json if omitted.'),
     packagePath: z.string().optional().describe('PackagesLocalDirectory root. Auto-detected if omitted.')
   })
@@ -34,7 +35,7 @@ async function tryXppbp(xppbpPath: string, args: string[]): Promise<{ stdout: st
 }
 
 export const runBpCheckTool = async (params: any, _context: any) => {
-  const { targetFilter } = params;
+  const { targetFilter, targetElementType } = params;
   try {
     const configManager = getConfigManager();
     await configManager.ensureLoaded();
@@ -110,7 +111,7 @@ export const runBpCheckTool = async (params: any, _context: any) => {
       return a;
     };
 
-    // Style B — equals separator (xppbp positional element filter: "class:Name")
+    // Style B — equals separator (xppbp 10.0.24+: positional "<type>:<Name>" filter, no leading dash)
     const buildArgsEqStyle = (): string[] => {
       const a: string[] = [
         `-metadata=${metadataPath}`,
@@ -119,8 +120,12 @@ export const runBpCheckTool = async (params: any, _context: any) => {
         `-packagesRoot=${packagesRootPath}`,
         `-all`,
       ];
-      // Element-type filter: positional "class:Name" — no leading dash
-      if (targetFilter) a.push(`class:${targetFilter}`);
+      // Positional element filter: "<type>:<Name>" — type comes from targetElementType
+      // (defaults to 'class' when omitted for backwards compatibility).
+      if (targetFilter) {
+        const elemType = (targetElementType ?? 'class').toLowerCase();
+        a.push(`${elemType}:${targetFilter}`);
+      }
       return a;
     };
 
