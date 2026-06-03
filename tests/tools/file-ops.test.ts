@@ -26,8 +26,12 @@ vi.mock('fs/promises', () => ({
   }),
   writeFile: vi.fn(async () => {}),
   mkdir: vi.fn(async () => {}),
-  access: vi.fn(async () => {}),
-  stat: vi.fn(async () => ({ isFile: () => true, isDirectory: () => false })),
+  // Drive/root paths exist; individual files do not (prevents false "file already exists" errors).
+  access: vi.fn(async (p: string) => {
+    if (/^[A-Za-z]:[\\\/]?$/.test(p) || p === '/') return; // drive root or fs root
+    throw Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' });
+  }),
+  stat: vi.fn(async () => ({ isFile: () => true, isDirectory: () => false, size: 1024 })),
   readdir: vi.fn(async () => []),
 }));
 
@@ -403,6 +407,25 @@ describe('verify_d365fo_project', () => {
 // ─── create_d365fo_file ──────────────────────────────────────────────────────
 
 describe('create_d365fo_file', () => {
+  beforeEach(async () => {
+    // Reset access mock: verify_d365fo_project tests override it; restore the
+    // default that makes drive roots accessible but individual files absent.
+    const fsMod = await import('fs/promises');
+    (fsMod.access as any).mockImplementation(async (p: string) => {
+      if (/^[A-Za-z]:[\\\/]?$/.test(p) || p === '/') return;
+      throw Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' });
+    });
+    (fsMod.readFile as any).mockImplementation(async (p: string) => {
+      if (p.endsWith('.rnrproj')) {
+        return `<Project><ItemGroup><Content Include="AxClass\\ExistingClass.xml" /></ItemGroup></Project>`;
+      }
+      if (p.endsWith('.xml')) {
+        return `<?xml version="1.0"?><AxClass><Name>ExistingClass</Name></AxClass>`;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+  });
+
   it('creates a class file and reports success', async () => {
     const result = await handleCreateD365File(
       req('create_d365fo_file', {
@@ -437,7 +460,7 @@ describe('create_d365fo_file', () => {
       }),
     );
     // Non-Windows: creation fails (needs Windows) and is correctly reported as isError.
-    expect((result as any).isError).toBe(process.platform !== 'win32');
+    expect(!!(result as any).isError).toBe(process.platform !== 'win32');
   });
 
   it('auto-converts bare extension name to dot-notation (Case C fix)', async () => {
@@ -539,7 +562,7 @@ describe('create_d365fo_file', () => {
       }),
     );
     // Non-Windows: creation fails (needs Windows) and is correctly reported as isError.
-    expect((result as any).isError).toBe(process.platform !== 'win32');
+    expect(!!(result as any).isError).toBe(process.platform !== 'win32');
   });
 
   it('returns error when objectType is missing', async () => {
