@@ -39,7 +39,7 @@ EXTRACT_MODE=custom
 In UDE environments, custom models are **auto-detected** from the custom packages path (`ModelStoreFolder` in your XPP config file). You do not need to set `CUSTOM_MODELS`:
 
 ```env
-DEV_ENVIRONMENT_TYPE=ude
+D365FO_DEV_ENVIRONMENT_TYPE=ude
 XPP_CONFIG_NAME=MyConfig    # name from %LOCALAPPDATA%\Microsoft\Dynamics365\XppConfig\
 EXTENSION_PREFIX=ISV_
 ```

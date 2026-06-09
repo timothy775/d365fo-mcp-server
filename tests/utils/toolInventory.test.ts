@@ -29,8 +29,8 @@ describe('tool inventory contract', () => {
   });
 
   it('exposes the expected total tool count', () => {
-    expect(mcpServerToolNames).toHaveLength(54);
-    expect(startupCatalogToolNames).toHaveLength(54);
+    expect(mcpServerToolNames).toHaveLength(56);
+    expect(startupCatalogToolNames).toHaveLength(56);
   });
 
   it('keeps local-only tool set aligned with the published tool inventory', () => {
@@ -40,7 +40,7 @@ describe('tool inventory contract', () => {
     }
 
     expect(LOCAL_TOOLS.size).toBe(25);
-    expect(mcpServerToolNames.filter(name => !LOCAL_TOOLS.has(name))).toHaveLength(29);
+    expect(mcpServerToolNames.filter(name => !LOCAL_TOOLS.has(name))).toHaveLength(31);
   });
 
   it('includes critical diagnostics and SDLC tools in both inventories', () => {

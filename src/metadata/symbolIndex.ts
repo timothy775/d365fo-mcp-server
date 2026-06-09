@@ -2668,9 +2668,17 @@ export class XppSymbolIndex {
       return this.searchLabelsLike(query, opts);
     }
 
-    // Sanitize query for FTS5 (escape special chars)
+    // Sanitize query for FTS5 (strip chars that would cause a syntax error)
     const ftsQuery = query.replace(/['"*()]/g, ' ').trim();
-    if (!ftsQuery) return [];
+    // Route to LIKE when FTS5 would silently return 0 results:
+    // • '_' and '%' — word separators in the unicode61 tokenizer (also LIKE wildcards);
+    //   literal underscore/percent searches must go through LIKE with proper escaping.
+    // • Any query whose alphanumeric content disappears after sanitization (e.g. '-',
+    //   '.', '@', ':', '@SYS:') produces zero FTS5 tokens and no exception to trigger
+    //   the catch-based fallback below.
+    if (/[_%]/.test(query) || !/[a-zA-Z0-9]/.test(ftsQuery)) {
+      return this.searchLabelsLike(query, opts);
+    }
 
     // Cache statement keyed by which optional filters are active (4 variants)
     const stmtKey = `searchLabels_${model ? 'model' : 'nomodel'}_${labelFileId ? 'lfid' : 'nolfid'}`;
@@ -2710,7 +2718,10 @@ export class XppSymbolIndex {
     opts: { language?: string; model?: string; labelFileId?: string; limit?: number } = {},
   ): any[] {
     const { language = 'en-US', model, labelFileId, limit = 30 } = opts;
-    const pattern = `%${query}%`;
+    // Escape LIKE special characters so the query is treated as a literal substring.
+    // '\' is the escape character declared in the SQL ESCAPE clause below.
+    const escaped = query.replace(/[\\%_]/g, '\\$&');
+    const pattern = `%${escaped}%`;
 
     const stmtKey = `searchLabelsLike_${model ? 'model' : 'nomodel'}_${labelFileId ? 'lfid' : 'nolfid'}`;
     let stmt = this.labelsStmtCache.get(stmtKey);
@@ -2718,7 +2729,7 @@ export class XppSymbolIndex {
       let sql = `
         SELECT label_id, label_file_id, model, language, text, comment, file_path, 0 as rank
         FROM labels
-        WHERE (text LIKE ? OR label_id LIKE ?)
+        WHERE (text LIKE ? ESCAPE '\\' OR label_id LIKE ? ESCAPE '\\')
           AND LOWER(language) = LOWER(?)`;
       if (model)       sql += `\n          AND model = ?`;
       if (labelFileId) sql += `\n          AND label_file_id = ?`;

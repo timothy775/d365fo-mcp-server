@@ -503,7 +503,7 @@ export async function tryBridgeSearch(
 ): Promise<ToolResult | null> {
   if (!bridge?.isReady || !bridge.metadataAvailable) return null;
   try {
-    const sr = await bridge.searchObjects(query, objectType);
+    const sr = await bridge.searchObjects(query, objectType, maxResults);
     if (!sr || sr.results.length === 0) return null;
 
     let out = `# Search: "${query}"${objectType ? ` (type: ${objectType})` : ''}\n\n`;

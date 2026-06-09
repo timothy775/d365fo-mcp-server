@@ -348,7 +348,7 @@ const ModifyD365FileArgsSchema = z.object({
   propertyValue: z.string().optional().describe('New property value'),
   
   // Options
-  createBackup: z.boolean().optional().default(false).describe('Create backup before modification (default: false)'),
+  createBackup: z.boolean().optional().default(false).describe('Create a .bak backup of the file before modifying it (default: false). Changes can also be reverted with undo_last_modification (git checkout) without a backup. Set true when the file is not under source control.'),
   modelName: z.string().optional().describe('Model name (auto-detected if not provided). Pass this if the file was just created and is not yet indexed.'),
   packageName: z.string().optional().describe('Package name. Auto-resolved if omitted.'),
   workspacePath: z.string().optional().describe('Path to workspace for finding file'),
@@ -413,6 +413,7 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
               `**Candidates** (${resolution.multiple.length}):\n${candidateList}\n\n` +
               `Re-call \`add-control\` with the exact \`parentControl\` name from the list above.`,
           }],
+          isError: true,
         };
       }
 
@@ -1059,7 +1060,13 @@ async function findD365File(
     // which are never accessible at runtime.  Relative paths (e.g. "ContosoExt/ContosoExt/AxClass/Foo.xml")
     // also come from this source and cannot be used directly.
     // Fall through to findD365FileOnDisk which builds the correct absolute path from config.
-    if (dbResult && path.isAbsolute(dbResult)) {
+    //
+    // Use cross-platform absolute detection so that Windows-style drive paths (C:\...)
+    // are recognised as absolute even when the server runs on Linux/macOS (path.isAbsolute
+    // returns false for Windows paths on POSIX hosts, causing spurious fallback loops).
+    const isAbsoluteXPlat = (p: string) =>
+      path.isAbsolute(p) || /^[a-zA-Z]:[\\/]/.test(p) || /^\\\\/.test(p);
+    if (dbResult && isAbsoluteXPlat(dbResult)) {
       try {
         await import('fs').then(m => m.promises.access(dbResult!));
         return dbResult;

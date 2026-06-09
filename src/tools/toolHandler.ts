@@ -58,6 +58,8 @@ import { extensionStrategyAdvisorTool } from './extensionStrategyAdvisor.js';
 import { undoLastModificationTool } from './undoLastModification.js';
 import { xppKnowledgeTool } from './xppKnowledge.js';
 import { d365foErrorHelpTool } from './d365foErrorHelp.js';
+import { validateXppTool } from './validateXpp.js';
+import { prepareChangeTool } from './prepareChange.js';
 import { recordToolStart, startMetricsLogging } from '../utils/toolMetrics.js';
 import { buildProgressMessage } from '../utils/toolProgressMessage.js';
 
@@ -207,7 +209,9 @@ export function registerToolHandler(server: Server, context: XppServerContext): 
     }
 
     const finishMetrics = recordToolStart(toolName);
-    const result = await (async () => {
+    let result: any;
+    try {
+    result = await (async () => {
       // Build the progress description for this tool call.
       const args = request.params.arguments as Record<string, any> | undefined;
       const progressMsg = buildProgressMessage(toolName, args);
@@ -386,6 +390,10 @@ export function registerToolHandler(server: Server, context: XppServerContext): 
         return d365foErrorHelpTool(request);
       case 'get_xpp_knowledge':
         return xppKnowledgeTool(request);
+      case 'validate_xpp':
+        return validateXppTool(request);
+      case 'prepare_change':
+        return prepareChangeTool(request, context);
       case 'get_workspace_info': {
         const args = (request as any).params?.arguments || {};
 
@@ -416,7 +424,7 @@ export function registerToolHandler(server: Server, context: XppServerContext): 
           }
         }
 
-        const { modelName, modelSource, projectPath, projectSource, packagePath, packageSource } =
+        const { modelName, modelSource, isModelSourceAutoDetected, projectPath, projectSource, packagePath, packageSource } =
           await configManager.getWorkspaceInfoDiagnostics();
         const envType = await configManager.getDevEnvironmentType();
         const frameworkDirectory = await configManager.getMicrosoftPackagesPath();
@@ -439,10 +447,17 @@ export function registerToolHandler(server: Server, context: XppServerContext): 
           'fleetmanagementunittests', 'tutorial',
         ]);
         const isPlaceholder = !modelName || PLACEHOLDER_NAMES.has(modelName.toLowerCase());
+        // The "Microsoft standard model" warning only makes sense for an AUTO-DETECTED
+        // model: its whole premise is that a .rnrproj scan landed on a standard/demo
+        // model because the developer forgot to change the VS new-project wizard default.
+        // An explicitly configured model (D365FO_MODEL_NAME env var or a modelName key
+        // in .mcp.json) was named deliberately, so second-guessing it produces false
+        // positives — e.g. a model whose ISV prefix is only an abbreviation of its name.
+        const isAutoDetectedSource = isModelSourceAutoDetected;
         // Also flag when auto-detection found a Microsoft standard model name
         // that isn't in the PLACEHOLDER_NAMES set but is not a custom model.
         const isStandardMsModel = modelName
-          ? !isCustomModel(modelName) && !isPlaceholder
+          ? !isCustomModel(modelName) && !isPlaceholder && isAutoDetectedSource
           : false;
 
         const lines: string[] = [
@@ -623,6 +638,20 @@ export function registerToolHandler(server: Server, context: XppServerContext): 
         };
     } })();
     })();
+    } catch (err) {
+      // Central safety net: convert ANY thrown error (incl. zod validation,
+      // bridge failures, unexpected exceptions) into a proper tool result with
+      // isError:true so the agent SEES the failure and can react/retry, instead
+      // of it surfacing as an opaque JSON-RPC protocol error. Individual tools
+      // may still return their own richer isError messages; this only catches
+      // what escapes them.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[toolHandler] ❌ ${toolName} threw: ${message}`);
+      result = {
+        content: [{ type: 'text', text: `❌ ${toolName} failed: ${message}` }],
+        isError: true,
+      };
+    }
 
     const capped = capToolResponse(toolName, result);
     // Record metrics: detect empty result (no content or first text item is empty)

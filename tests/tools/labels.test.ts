@@ -3,7 +3,7 @@
  * Covers: search_labels, get_label_info, create_label, rename_label
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { searchLabelsTool } from '../../src/tools/searchLabels';
 import { getLabelInfoTool } from '../../src/tools/getLabelInfo';
 import { createLabelTool } from '../../src/tools/createLabel';
@@ -227,6 +227,18 @@ describe('create_label', () => {
   let ctx: XppServerContext;
 
   beforeEach(() => { ctx = buildContext(); });
+
+  // Tests below override the shared fs mocks (some with persistent mockResolvedValue).
+  // Restore them to the factory defaults after each test so state never leaks into the
+  // rename_label suite that follows.
+  afterEach(async () => {
+    const fsMock = await import('fs');
+    (fsMock.promises.readFile as any).mockImplementation(async () => '; Label file\nMyExistingLabel=Existing label text\n');
+    (fsMock.promises.writeFile as any).mockImplementation(async () => {});
+    (fsMock.promises.mkdir as any).mockImplementation(async () => {});
+    (fsMock.promises.access as any).mockImplementation(async () => {});
+    (fsMock.promises.readdir as any).mockImplementation(async () => []);
+  });
 
   it('creates label with multiple translations', async () => {
     // Simulate label not existing yet
@@ -454,6 +466,141 @@ describe('create_label', () => {
   it('returns error when required fields are missing', async () => {
     const result = await createLabelTool(req('create_label', { labelId: 'Foo' }), ctx);
     expect(result.isError).toBe(true);
+  });
+
+  it('writes to every existing model language when `languages` is omitted (default fan-out)', async () => {
+    const fsMock = await import('fs');
+    const writes: { path: string; content: string }[] = [];
+    (fsMock.promises.writeFile as any).mockImplementation(async (p: string, content: string) => {
+      writes.push({ path: p, content });
+    });
+    // LabelResources is shared across the model: lt / nb-NO exist only because sibling
+    // label files ship them, but the default behavior still writes to all of them.
+    (fsMock.promises.readdir as any).mockResolvedValue(['en-US', 'fi', 'lt', 'nb-NO']);
+    (fsMock.promises.readFile as any).mockResolvedValue('﻿');
+
+    const result = await createLabelTool(
+      req('create_label', {
+        labelId: 'NewFeatureLabel',
+        labelFileId: 'MyModel',
+        model: 'MyModel',
+        updateIndex: false,
+        addToProject: false,
+        translations: [{ language: 'en-US', text: 'New feature' }],
+      }),
+      ctx,
+    );
+    expect(result.isError).toBeFalsy();
+    expect(writes.some(w => w.path.endsWith('MyModel.en-US.label.txt'))).toBe(true);
+    expect(writes.some(w => w.path.endsWith('MyModel.fi.label.txt'))).toBe(true);
+    expect(writes.some(w => w.path.endsWith('MyModel.lt.label.txt'))).toBe(true);
+    expect(writes.some(w => w.path.endsWith('MyModel.nb-NO.label.txt'))).toBe(true);
+  });
+
+  it('writes ONLY the requested locales when `languages` is provided', async () => {
+    const fsMock = await import('fs');
+    const writes: { path: string; content: string }[] = [];
+    (fsMock.promises.writeFile as any).mockImplementation(async (p: string, content: string) => {
+      writes.push({ path: p, content });
+    });
+    // Model has 4 locale folders, but this customization only needs en-US.
+    (fsMock.promises.readdir as any).mockResolvedValue(['en-US', 'fi', 'lt', 'nb-NO']);
+    (fsMock.promises.readFile as any).mockResolvedValue('﻿');
+
+    const result = await createLabelTool(
+      req('create_label', {
+        labelId: 'NewFeatureLabel',
+        labelFileId: 'MyModel',
+        model: 'MyModel',
+        updateIndex: false,
+        addToProject: false,
+        languages: ['en-US'],
+        translations: [{ language: 'en-US', text: 'New feature' }],
+      }),
+      ctx,
+    );
+    expect(result.isError).toBeFalsy();
+    // en-US written; fi / lt / nb-NO must NOT be touched (no stray placeholder files)
+    expect(writes.some(w => w.path.endsWith('MyModel.en-US.label.txt'))).toBe(true);
+    expect(writes.some(w => w.path.endsWith('MyModel.fi.label.txt'))).toBe(false);
+    expect(writes.some(w => w.path.endsWith('MyModel.lt.label.txt'))).toBe(false);
+    expect(writes.some(w => w.path.endsWith('MyModel.nb-NO.label.txt'))).toBe(false);
+    // and no orphaned XML descriptors for the unrequested locales
+    expect(writes.some(w => w.path.endsWith('MyModel_lt.xml'))).toBe(false);
+    expect(writes.some(w => w.path.endsWith('MyModel_nb-NO.xml'))).toBe(false);
+  });
+
+  it('creates a missing locale folder when requested via `languages`', async () => {
+    const fsMock = await import('fs');
+    const writes: { path: string; content: string }[] = [];
+    (fsMock.promises.writeFile as any).mockImplementation(async (p: string, content: string) => {
+      writes.push({ path: p, content });
+    });
+    // Model currently only has en-US; caller explicitly wants en-US + sv (new locale).
+    (fsMock.promises.readdir as any).mockResolvedValue(['en-US']);
+    (fsMock.promises.readFile as any).mockResolvedValue('﻿');
+    // descriptor / new-file existence checks should report "missing" so they get created
+    (fsMock.promises.access as any).mockRejectedValue(new Error('ENOENT'));
+
+    const result = await createLabelTool(
+      req('create_label', {
+        labelId: 'NewFeatureLabel',
+        labelFileId: 'MyModel',
+        model: 'MyModel',
+        updateIndex: false,
+        addToProject: false,
+        languages: ['en-US', 'sv'],
+        translations: [
+          { language: 'en-US', text: 'New feature' },
+          { language: 'sv', text: 'Ny funktion' },
+        ],
+      }),
+      ctx,
+    );
+    expect(result.isError).toBeFalsy();
+    expect(writes.some(w => w.path.endsWith('MyModel.en-US.label.txt'))).toBe(true);
+    expect(writes.some(w => w.path.endsWith('MyModel.sv.label.txt'))).toBe(true);
+    // fi / lt / nb-NO never requested and not present — must not appear
+    expect(writes.some(w => w.path.endsWith('MyModel.fi.label.txt'))).toBe(false);
+  });
+
+  it('resolves to on-disk casing when `languages` locale differs in case (Linux unzip)', async () => {
+    // Scenario: MS packages were unzipped on Linux — locale directories are lowercase (en-us, de).
+    // The caller passes standard BCP-47 values (en-US, de).
+    // The tool must write to the existing on-disk paths, NOT create new en-US/ de/ sibling folders.
+    const fsMock = await import('fs');
+    const writes: { path: string; content: string }[] = [];
+    (fsMock.promises.writeFile as any).mockImplementation(async (p: string, content: string) => {
+      writes.push({ path: p, content });
+    });
+    // On-disk the folders are lowercase (Linux unzip behaviour)
+    (fsMock.promises.readdir as any).mockResolvedValue(['en-us', 'de']);
+    (fsMock.promises.readFile as any).mockResolvedValue('\uFEFF');
+
+    const result = await createLabelTool(
+      req('create_label', {
+        labelId: 'CaseMismatchLabel',
+        labelFileId: 'MyModel',
+        model: 'MyModel',
+        updateIndex: false,
+        addToProject: false,
+        // Caller uses standard BCP-47 casing
+        languages: ['en-US', 'de'],
+        translations: [
+          { language: 'en-US', text: 'Case test' },
+          { language: 'de', text: 'Groß-Klein-Test' },
+        ],
+      }),
+      ctx,
+    );
+    expect(result.isError).toBeFalsy();
+
+    // Must write into the existing lowercase directory names, not create new mixed-case ones
+    expect(writes.some(w => /[/\\]en-us[/\\]/.test(w.path))).toBe(true);
+    expect(writes.some(w => /[/\\]de[/\\]/.test(w.path))).toBe(true);
+
+    // Must NOT create a second en-US/ folder alongside en-us/
+    expect(writes.some(w => /[/\\]en-US[/\\]/.test(w.path))).toBe(false);
   });
 
   it('defaults description to VS project name when no comment is provided', async () => {

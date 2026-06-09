@@ -489,6 +489,10 @@ export function createXppMcpServer(context: XppServerContext): Server {
           name: 'create_d365fo_file',
           description: `Create D365FO AOT object file (.xml) in the correct PackagesLocalDirectory location with proper XML structure and UTF-8 BOM. Auto-adds to VS project (.rnrproj).
 
+⚠️ THIS IS THE WRITE/COMPLETION STEP. Analysis tools (analyze_code_patterns, search, get_class_info/get_table_info, generate_code/generate_smart_*) only PREPARE the design — they do NOT create anything on disk. Once the design is known, you MUST CALL create_d365fo_file to actually write the file. Do NOT stop after analysis or after presenting generated code: the task is incomplete until this tool has run and returned success (isError=false).
+
+On error this tool returns isError=true with a message (e.g. file already exists, Microsoft model blocked). Read it and fix/retry — never treat a ⚠️/❌ response as success.
+
 Object types: class, table, enum, form, query, view, data-entity, report, edt, security-privilege, security-duty, security-role, menu-item-display/action/output, menu, table/class/form/enum/edt/data-entity-extension, menu-item-*-extension, menu-extension, business-event, tile, kpi.
 
 For extensions: objectName="BaseObject.PrefixExtension" (e.g. "CustTable.ContosoExtension").
@@ -666,7 +670,7 @@ SourceCode format for classes: class declaration with member vars inside { }, me
         },
         {
           name: 'modify_d365fo_file',
-          description: '⚠️ WINDOWS ONLY: Safely modifies an existing D365FO XML file (class, table, enum, form, query, view). Supports adding/removing/modifying methods and fields, modifying properties. Validates XML after modification. IMPORTANT: This tool MUST run locally on Windows D365FO VM - it CANNOT work through Azure HTTP proxy (Linux).',
+          description: '⚠️ WINDOWS ONLY: Safely modifies an existing D365FO XML file (class, table, enum, form, query, view). Supports adding/removing/modifying methods and fields, modifying properties. Validates XML after modification. IMPORTANT: This tool MUST run locally on Windows D365FO VM - it CANNOT work through Azure HTTP proxy (Linux).\n\n⚠️ APPLIES IMMEDIATELY — there is NO dry-run/preview mode. The moment this tool is called it writes the change to disk via IMetadataProvider.Update(). Therefore: BEFORE calling, describe the exact change you intend to make in chat and let the user confirm; only then call this tool to apply it. To revert, use undo_last_modification (git checkout), or pass createBackup=true to also keep a .bak copy. On success the response reports the applied operation. On error the response has isError=true with a message — read it and fix/retry; never treat a ⚠️/❌ response as success.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -1817,11 +1821,35 @@ SourceCode format for classes: class declaration with member vars inside { }, me
       },
       {
         name: 'build_d365fo_project',
-        description: 'Run MSBuild compilation on a D365FO Visual Studio project (.rnrproj) to capture X++ compiler errors without opening Visual Studio. Returns build output including errors and warnings.',
+        description:
+          'Builds a D365FO model using the X++ compiler (xppc.exe). ' +
+          'Compiles the ENTIRE MODEL — not just one project file. ' +
+          'Runs in the background: first call starts the build; call again to poll status and see output. ' +
+          'Use fullBuild:true when xppc reports "model element has not been successfully compiled since it was last changed" (stale symbol error). ' +
+          'Use buildReferencedModels:true to also build custom/ISV dependencies first (reads <ModuleReferences> from the model descriptor; skips Microsoft standard models; topological order).',
         inputSchema: {
           type: 'object',
           properties: {
-            projectPath: { type: 'string', description: 'Absolute path to the .rnrproj file (e.g. K:\\\\repos\\\\MySolution\\\\MyProject\\\\MyProject.rnrproj). Auto-detected from .mcp.json if omitted.' },
+            modelName: {
+              type: 'string',
+              description: 'D365FO model name to build (e.g. MyCustomModel). Auto-detected from workspace if omitted.',
+            },
+            projectPath: {
+              type: 'string',
+              description: '(Legacy) Absolute path to a .rnrproj file — used only to extract the model name when modelName is not provided.',
+            },
+            force: {
+              type: 'boolean',
+              description: 'Kill any running build processes for this model and restart.',
+            },
+            fullBuild: {
+              type: 'boolean',
+              description: 'Full recompile of the TARGET model only (deps stay incremental). Use when xppc reports stale symbol errors.',
+            },
+            buildReferencedModels: {
+              type: 'boolean',
+              description: 'Also build all custom/ISV models this model depends on before building the target. Skips Microsoft standard models.',
+            },
           },
           required: [],
         },
@@ -1858,7 +1886,8 @@ SourceCode format for classes: class declaration with member vars inside { }, me
           type: 'object',
           properties: {
             projectPath: { type: 'string', description: 'Absolute path to the .rnrproj file to analyze. Auto-detected from .mcp.json if omitted.' },
-            targetFilter: { type: 'string', description: 'Optional: filter results to a specific class, table, or object name' },
+            targetFilter: { type: 'string', description: 'Optional: filter results to a specific object name (class, table, form, enum, ...).' },
+            targetElementType: { type: 'string', description: 'Element type for the filter when using xppbp 10.0.24+ (equals-style CLI). Common values: class, table, form, enum, view, query. Defaults to "class" when targetFilter is set but this is omitted.' },
             modelName: { type: 'string', description: 'Model name to check. Auto-detected from .mcp.json if omitted.' },
             packagePath: { type: 'string', description: 'PackagesLocalDirectory root path. Auto-detected from .mcp.json if omitted.' },
           },
@@ -1952,6 +1981,76 @@ SourceCode format for classes: class declaration with member vars inside { }, me
             },
           },
           required: ['topic'],
+        },
+      },
+      {
+        name: 'validate_xpp',
+        description:
+          'Offline X++ / XML best-practice validator (<50 ms, all-platform, no xppbp.exe needed). ' +
+          'Returns structured violations {rule, severity, line, excerpt, fix}. ' +
+          'Call AFTER generating code and BEFORE write operations to catch BP issues in the same turn. ' +
+          'Rules: today() deprecated (SEL001), forceLiterals banned (SEL002), crossCompany placement (SEL003), ' +
+          'nested while-select (SEL004), function in where clause (SEL005), ' +
+          '[ExtensionOf] class not final (COC002), class not ending _Extension (COC003), ' +
+          'CoC default param values (COC001), hardcoded strings in info/warning/error (BP001), ' +
+          'doInsert/doUpdate/doDelete misuse (BP002), generic doc-comments (BP003), ' +
+          'missing AlternateKey on table XML (XML001).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            code: {
+              type: 'string',
+              description: 'X++ source code or XML metadata to validate. Paste the full generated text.',
+            },
+            codeType: {
+              type: 'string',
+              enum: ['xpp', 'xml-table', 'xml-any'],
+              default: 'xpp',
+              description: '"xpp" for X++ source (default), "xml-table" for AxTable XML, "xml-any" for other XML.',
+            },
+            context: {
+              type: 'string',
+              description: 'Optional: owning class/table name, used in diagnostic messages.',
+            },
+          },
+          required: ['code'],
+        },
+      },
+      {
+        name: 'prepare_change',
+        description:
+          'Single-round context aggregator for D365FO extension work. ' +
+          'Returns in ONE call: exact method signature, existing CoC wrappers, CoC eligibility, ' +
+          'recommended extension strategy, naming validation, and code patterns from the index. ' +
+          'Replaces the 4-step analyze→search→info→generate workflow with a single parallel call. ' +
+          'Returns a grounding token (30-min TTL) that proves the AI used real codebase data. ' +
+          'When GROUNDING_ENFORCE=true the token is required for extension generate_code and create_d365fo_file calls.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            goal: {
+              type: 'string',
+              description: 'One-sentence description of the intended change. Example: "Add CoC on CustTable.validateWrite to enforce a custom rule."',
+            },
+            objectName: {
+              type: 'string',
+              description: 'Name of the D365FO object to extend or modify. Example: "CustTable", "SalesFormLetter".',
+            },
+            methodName: {
+              type: 'string',
+              description: 'Target method name when the change involves a specific method (CoC or event handlers). Example: "validateWrite".',
+            },
+            objectType: {
+              type: 'string',
+              enum: ['class', 'table', 'form', 'query', 'view', 'enum', 'edt', 'data-entity', 'map', 'report'],
+              description: 'D365FO object type. Auto-detected from the symbol index when omitted.',
+            },
+            proposedName: {
+              type: 'string',
+              description: 'Proposed name for the new extension class/object. When provided, naming validation runs.',
+            },
+          },
+          required: ['goal', 'objectName'],
         },
       },
     ],

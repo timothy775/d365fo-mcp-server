@@ -62,6 +62,18 @@ const CreateLabelArgsSchema = z.object({
       'Label text for each language. At minimum provide en-US. ' +
         'For languages without a translation the en-US text is used as fallback.',
     ),
+  languages: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Restrict which language .label.txt files are written/created. ' +
+        'When provided, the label is created ONLY for these locales (e.g. ["en-US"] for an ' +
+        'English-only customization), creating the folders if needed. This avoids leaking the ' +
+        'label into locales that exist only because OTHER label files in the same model ship ' +
+        'them (LabelResources is shared across the whole model). ' +
+        'When omitted or empty, the label is written to every language folder already present ' +
+        'in the model (default behavior).',
+    ),
   description: z
     .string()
     .optional()
@@ -318,10 +330,16 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
     }
     const enUsText = translationMap.get('en-US')?.text ?? translations[0].text;
 
-    // 2. Discover existing language folders
-    let existingLanguages: string[] = [];
+    // 2. Discover the language folders that already exist in the model.
+    //    NOTE: LabelResources/ is shared by EVERY label file in the model, so this lists
+    //    locales owned by sibling label files too. The `languages` arg scopes the writes.
+    const requestedLanguages = (args.languages ?? [])
+      .map(l => l.trim())
+      .filter(Boolean);
+
+    let discoveredLanguages: string[] = [];
     try {
-      existingLanguages = await fs.readdir(labelResourcesDir);
+      discoveredLanguages = await fs.readdir(labelResourcesDir);
     } catch {
       // LabelResources dir does not exist yet
     }
@@ -342,33 +360,58 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
       }
     };
 
-    // 3. If no existing languages, decide whether to create
-    if (existingLanguages.length === 0) {
-      if (!createLabelFileIfMissing) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text:
-                `AxLabelFile "${labelFileId}" not found in model "${model}" ` +
-                `(expected path: ${labelResourcesDir}).\n\n` +
-                `Set createLabelFileIfMissing=true to create the label file from scratch, ` +
-                `or use create_d365fo_file to scaffold the label file first.`,
-            },
-          ],
-          isError: true,
-        };
-      }
+    // 3. Determine the target language set and create any missing folders.
+    //    A brand-new label file (no locales at all anywhere in the model) is still guarded
+    //    by createLabelFileIfMissing regardless of which mode we're in.
+    const labelFileMissing = discoveredLanguages.length === 0;
+    if (labelFileMissing && !createLabelFileIfMissing) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text:
+              `AxLabelFile "${labelFileId}" not found in model "${model}" ` +
+              `(expected path: ${labelResourcesDir}).\n\n` +
+              `Set createLabelFileIfMissing=true to create the label file from scratch, ` +
+              `or use create_d365fo_file to scaffold the label file first.`,
+          },
+        ],
+        isError: true,
+      };
+    }
 
-      // Create the LabelResources directory structure
+    let existingLanguages: string[];
+
+    if (requestedLanguages.length > 0) {
+      // Explicit scope: write ONLY to the requested locales, creating folders as needed.
+      // Prevents the label from leaking into locales owned by sibling label files.
+      //
+      // Use a case-insensitive map from lowercase → actual on-disk name so that
+      // callers passing BCP-47 standard casing (en-US) match Linux-unzipped
+      // directories stored in lowercase (en-us). Without this, the write path
+      // would build LabelResources/en-US/... next to an existing en-us/ folder,
+      // creating a duplicate locale tree on case-sensitive filesystems.
+      const discoveredMap = new Map(discoveredLanguages.map(l => [l.toLowerCase(), l]));
+      for (const lang of requestedLanguages) {
+        if (!discoveredMap.has(lang.toLowerCase())) {
+          await createLangDirectory(lang);
+          discoveredMap.set(lang.toLowerCase(), lang);
+        }
+      }
+      // Resolve each requested locale to its actual on-disk name; fall back to the
+      // caller-provided value for newly-created folders (not yet on disk).
+      existingLanguages = requestedLanguages.map(l => discoveredMap.get(l.toLowerCase()) ?? l);
+    } else if (labelFileMissing) {
+      // No explicit scope and nothing exists yet — seed the folders from the translations.
+      existingLanguages = [];
       for (const [lang] of translationMap) {
         await createLangDirectory(lang);
         existingLanguages.push(lang);
       }
     } else {
-      // Label file already has some languages.
-      // Always create directories for languages in translationMap that don't exist yet.
-      // createLabelFileIfMissing only guards the "no languages at all" case above.
+      // No explicit scope — default behavior: write to every language folder that already
+      // exists in the model, plus any new languages supplied via translations.
+      existingLanguages = [...discoveredLanguages];
       const existingSet = new Set(existingLanguages.map(l => l.toLowerCase()));
       for (const [lang] of translationMap) {
         if (!existingSet.has(lang.toLowerCase())) {
@@ -564,7 +607,8 @@ export const createLabelToolDefinition = {
   name: 'create_label',
   description:
     'Add a new label to an existing AxLabelFile in a custom D365FO model. ' +
-    'Writes the label into every language .label.txt file that exists in the model, ' +
+    'Writes the label into every language .label.txt file that exists in the model ' +
+    '(or only the locales listed in `languages`), ' +
     'inserts in alphabetical order, and updates the MCP index. ' +
     'Always call search_labels first to check if a suitable label already exists.',
   inputSchema: {
@@ -594,6 +638,14 @@ export const createLabelToolDefinition = {
           },
           required: ['language', 'text'],
         },
+      },
+      languages: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'Restrict which language .label.txt files are written/created (e.g. ["en-US"] for an ' +
+          'English-only customization). When omitted or empty, the label is written to every ' +
+          'language folder already present in the model (default).',
       },
       defaultComment: {
         type: 'string',
