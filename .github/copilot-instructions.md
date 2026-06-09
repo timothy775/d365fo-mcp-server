@@ -38,6 +38,7 @@ PowerShell / any terminal command **WILL HANG** in VS 2022 / VS 2026 MCP integra
 
 1. Model name comes from `.mcp.json` — never infer from search results
 2. `modify_d365fo_file`/`create_d365fo_file` APPLY IMMEDIATELY (no dry-run) — describe the change and confirm in chat first; revert with `undo_last_modification` (or pass `createBackup=true`)
+2a. **NEVER** use `replace_string_in_file`, `edit_file`, `apply_patch`, or any built-in file-write tool on `.xml`/`.xpp` files — **not even as a fallback** when `modify_d365fo_file` fails. These bypass IMetadataProvider and corrupt VS 2022's in-memory model. If `modify_d365fo_file` errors, STOP and report the error verbatim.
 3. Never run `build_d365fo_project()` automatically — only on explicit user request
 4. Never copy default parameter values into CoC wrapper signatures
 5. Never use `today()` — use `DateTimeUtil::getToday(DateTimeUtil::getUserPreferredTimeZone())`

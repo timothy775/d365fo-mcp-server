@@ -1060,7 +1060,13 @@ async function findD365File(
     // which are never accessible at runtime.  Relative paths (e.g. "ContosoExt/ContosoExt/AxClass/Foo.xml")
     // also come from this source and cannot be used directly.
     // Fall through to findD365FileOnDisk which builds the correct absolute path from config.
-    if (dbResult && path.isAbsolute(dbResult)) {
+    //
+    // Use cross-platform absolute detection so that Windows-style drive paths (C:\...)
+    // are recognised as absolute even when the server runs on Linux/macOS (path.isAbsolute
+    // returns false for Windows paths on POSIX hosts, causing spurious fallback loops).
+    const isAbsoluteXPlat = (p: string) =>
+      path.isAbsolute(p) || /^[a-zA-Z]:[\\/]/.test(p) || /^\\\\/.test(p);
+    if (dbResult && isAbsoluteXPlat(dbResult)) {
       try {
         await import('fs').then(m => m.promises.access(dbResult!));
         return dbResult;

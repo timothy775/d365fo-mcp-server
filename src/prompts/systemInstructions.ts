@@ -157,7 +157,9 @@ For .xml/.xpp files, use MCP tools instead of built-in tools:
 - \`search\` instead of \`code_search\`/\`file_search\` (avoids 350+ model folder scan)
 - \`get_class_info\`/\`get_table_info\` instead of \`read_file\`
 - \`create_d365fo_file\` instead of \`create_file\`
-- \`modify_d365fo_file\` instead of \`edit_file\`/\`apply_patch\`
+- \`modify_d365fo_file\` instead of \`edit_file\`/\`apply_patch\`/\`replace_string_in_file\`/\`str_replace_editor\`
+
+⛔ **NEVER** use \`replace_string_in_file\`, \`edit_file\`, \`apply_patch\`, \`str_replace_editor\`, or any built-in file-write tool on .xml or .xpp files — even as a fallback when \`modify_d365fo_file\` fails. These tools do not understand D365FO XML structure, bypass IMetadataProvider, and corrupt VS 2022's in-memory model. **If \`modify_d365fo_file\` returns an error, STOP and report the error verbatim. Do NOT attempt a workaround.**
 
 ### 6. Terminal/Scripts Prohibition
 PowerShell and Python scripts hang indefinitely in VS 2022 MCP integration. When \`modify_d365fo_file\` errors:
