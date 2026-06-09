@@ -63,7 +63,7 @@ describe('update_symbol_index label file reconciliation', () => {
     const filePath = 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxLabelFile\\LabelResources\\en-US\\MyLabels.en-US.label.txt';
 
     existsSyncMock.mockReturnValue(true);
-    readFileSyncMock.mockReturnValue('Existing=Existing text\\n');
+    readFileSyncMock.mockReturnValue('Existing=Existing text\n');
     (context.symbolIndex.removeLabelsByFile as any).mockReturnValue(2);
 
     const result = await updateSymbolIndexTool({ filePath }, context);
