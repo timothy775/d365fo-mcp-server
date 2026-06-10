@@ -18,6 +18,13 @@
  *   BP002   doInsert/doUpdate/doDelete outside explicit migration comment
  *   BP003   Generic doc-comment (/// Foo class. / /// methodName.)
  *   XML001  AxTable XML missing an index with <AlternateKey>Yes</AlternateKey>
+ *
+ * Data-driven property rules (thresholds mined from STANDARD models into the
+ * property_stats table during build-database; static defaults when no stats):
+ *   XML002  AxTable missing <Label>
+ *   XML003  AxTable missing <TableGroup> (suggests the most common standard values)
+ *   XML004  AxTableField without <ExtendedDataType>/<EnumType>
+ *   XML005  AxTable missing <ClusteredIndex> (only when standard usage ≥ threshold)
  */
 
 import { z } from 'zod';
@@ -46,7 +53,9 @@ export const validateXppToolDefinition = {
     'Rules: today() deprecated, forceLiterals banned, crossCompany placement, ' +
     'nested while-select, function in where, CoC/ExtensionOf correctness, ' +
     'hardcoded strings, doInsert/doUpdate/doDelete misuse, generic doc-comments, ' +
-    'missing AlternateKey on table XML.',
+    'missing AlternateKey on table XML. ' +
+    'Plus data-driven property rules (XML002-XML005: Label, TableGroup, field EDT, ClusteredIndex) ' +
+    'with thresholds mined from your standard models during build-database.',
   inputSchema: validateXppArgsSchema,
 };
 
@@ -432,6 +441,133 @@ function checkMissingAlternateKey(code: string): ValidationViolation[] {
   return violations;
 }
 
+// ── Data-driven property rules (XML002–XML005) ──────────────────────────────
+
+/**
+ * Provider of mined property statistics — implemented by XppSymbolIndex.
+ * When unavailable (offline use, stats not built), the rules fall back to
+ * STATIC_PROPERTY_DEFAULTS.
+ */
+export interface PropertyStatsProvider {
+  getPropertyPresenceRatio(nodeType: string, property: string): { present: number; total: number; ratio: number };
+  getPropertyValueDistribution(nodeType: string, property: string, limit?: number): Array<{ value: string; count: number }>;
+}
+
+/** A property rule fires when the standard platform sets it at least this often. */
+const PROPERTY_RULE_THRESHOLD = 0.8;
+
+/** Behaviour when no mined statistics are available. */
+const STATIC_PROPERTY_DEFAULTS: Record<string, boolean> = {
+  'AxTable.Label': true,
+  'AxTable.TableGroup': true,
+  'AxTableField.ExtendedDataType': true,
+  'AxTable.ClusteredIndex': false, // only enforced when stats prove standard usage
+};
+
+/** Decide whether a property rule applies + build its evidence string. */
+function propertyRuleApplies(
+  stats: PropertyStatsProvider | undefined,
+  nodeType: string,
+  property: string,
+): { applies: boolean; evidence: string } {
+  if (stats) {
+    try {
+      const r = stats.getPropertyPresenceRatio(nodeType, property);
+      if (r.total > 0) {
+        return {
+          applies: r.ratio >= PROPERTY_RULE_THRESHOLD,
+          evidence: `${Math.round(r.ratio * 100)}% of ${r.total.toLocaleString('en-US')} standard ${nodeType} nodes set this property`,
+        };
+      }
+    } catch { /* stats unavailable — fall through to defaults */ }
+  }
+  return {
+    applies: STATIC_PROPERTY_DEFAULTS[`${nodeType}.${property}`] ?? false,
+    evidence: 'static default (no mined statistics available — run build-database to mine standard models)',
+  };
+}
+
+/** Extract the table-level header segment (before <Fields>) of an AxTable XML. */
+function tableHeaderSegment(code: string): string {
+  const fieldsIdx = code.search(/<Fields\b/i);
+  return fieldsIdx === -1 ? code : code.slice(0, fieldsIdx);
+}
+
+/** XML002/XML003/XML005 — table-level property presence. */
+function checkTableProperties(code: string, stats?: PropertyStatsProvider): ValidationViolation[] {
+  const violations: ValidationViolation[] = [];
+  if (!/<AxTable[\s>]/i.test(code)) return violations;
+  const header = tableHeaderSegment(code);
+
+  const label = propertyRuleApplies(stats, 'AxTable', 'Label');
+  if (label.applies && !/<Label>[^<]+<\/Label>/i.test(header)) {
+    violations.push({
+      rule: 'XML002',
+      severity: 'error',
+      excerpt: '<AxTable> — missing <Label>',
+      fix: `Add <Label>@YourModel:TableLabel</Label> to the table header (create the label first via create_label). Evidence: ${label.evidence}.`,
+    });
+  }
+
+  const tableGroup = propertyRuleApplies(stats, 'AxTable', 'TableGroup');
+  if (tableGroup.applies && !/<TableGroup>[^<]+<\/TableGroup>/i.test(header)) {
+    let suggestion = 'Main (master data), Transaction (postings), Parameter (settings), Group (groupings)';
+    if (stats) {
+      try {
+        const dist = stats.getPropertyValueDistribution('AxTable', 'TableGroup', 4);
+        if (dist.length > 0) {
+          const total = dist.reduce((s, d) => s + d.count, 0);
+          suggestion = dist
+            .map(d => `${d.value} (${Math.round((d.count / total) * 100)}%)`)
+            .join(', ');
+        }
+      } catch { /* keep static suggestion */ }
+    }
+    violations.push({
+      rule: 'XML003',
+      severity: 'error',
+      excerpt: '<AxTable> — missing <TableGroup>',
+      fix: `Add <TableGroup> to the table header. Most common standard values: ${suggestion}. Evidence: ${tableGroup.evidence}.`,
+    });
+  }
+
+  const clustered = propertyRuleApplies(stats, 'AxTable', 'ClusteredIndex');
+  if (clustered.applies && !/<ClusteredIndex>[^<]+<\/ClusteredIndex>/i.test(header)) {
+    violations.push({
+      rule: 'XML005',
+      severity: 'warning',
+      excerpt: '<AxTable> — missing <ClusteredIndex>',
+      fix: `Set <ClusteredIndex> to the primary index name for predictable physical ordering. Evidence: ${clustered.evidence}.`,
+    });
+  }
+
+  return violations;
+}
+
+/** XML004 — every AxTableField should carry an EDT (or EnumType for enums). */
+function checkFieldEdt(code: string, stats?: PropertyStatsProvider): ValidationViolation[] {
+  const violations: ValidationViolation[] = [];
+  if (!/<AxTableField[\s>]/i.test(code)) return violations;
+  const rule = propertyRuleApplies(stats, 'AxTableField', 'ExtendedDataType');
+  if (!rule.applies) return violations;
+
+  const fieldBlocks = code.split(/<AxTableField[\s>]/i).slice(1);
+  for (const block of fieldBlocks) {
+    const body = block.split(/<\/AxTableField>/i)[0] ?? block;
+    if (/<ExtendedDataType>[^<]+<\/ExtendedDataType>/i.test(body)) continue;
+    if (/<EnumType>[^<]+<\/EnumType>/i.test(body)) continue;
+    const name = /<Name>([^<]+)<\/Name>/i.exec(body)?.[1] ?? '(unnamed)';
+    violations.push({
+      rule: 'XML004',
+      severity: 'warning',
+      excerpt: `<AxTableField> ${name} — no <ExtendedDataType> or <EnumType>`,
+      fix: `Base field "${name}" on an EDT (use suggest_edt to find one) or an enum. ` +
+        `Primitive-typed fields lose label, help text, and length governance. Evidence: ${rule.evidence}.`,
+    });
+  }
+  return violations;
+}
+
 // ── Runner ────────────────────────────────────────────────────────────────────
 
 const XPP_RULES = [
@@ -452,9 +588,15 @@ const XML_RULES = [
   checkMissingAlternateKey,
 ];
 
+const XML_PROPERTY_RULES = [
+  checkTableProperties,
+  checkFieldEdt,
+];
+
 function runRules(
   code: string,
   codeType: 'xpp' | 'xml-table' | 'xml-any',
+  stats?: PropertyStatsProvider,
 ): ValidationViolation[] {
   const violations: ValidationViolation[] = [];
   if (codeType === 'xpp') {
@@ -465,9 +607,15 @@ function runRules(
     for (const rule of [...XPP_RULES, ...XML_RULES]) {
       violations.push(...rule(code));
     }
+    for (const rule of XML_PROPERTY_RULES) {
+      violations.push(...rule(code, stats));
+    }
   } else {
     for (const rule of XML_RULES) {
       violations.push(...rule(code));
+    }
+    for (const rule of XML_PROPERTY_RULES) {
+      violations.push(...rule(code, stats));
     }
   }
   return violations;
@@ -475,7 +623,10 @@ function runRules(
 
 // ── Tool handler ──────────────────────────────────────────────────────────────
 
-export async function validateXppTool(request: any): Promise<any> {
+export async function validateXppTool(
+  request: any,
+  serverContext?: { symbolIndex?: PropertyStatsProvider },
+): Promise<any> {
   const raw = request?.params?.arguments ?? request;
   const parsed = validateXppArgsSchema.safeParse(raw);
   if (!parsed.success) {
@@ -486,7 +637,10 @@ export async function validateXppTool(request: any): Promise<any> {
   }
 
   const { code, codeType = 'xpp', context } = parsed.data;
-  const violations = runRules(code, codeType);
+  const stats = typeof serverContext?.symbolIndex?.getPropertyPresenceRatio === 'function'
+    ? serverContext.symbolIndex
+    : undefined;
+  const violations = runRules(code, codeType, stats);
 
   const errors = violations.filter(v => v.severity === 'error');
   const warnings = violations.filter(v => v.severity === 'warning');
@@ -496,7 +650,8 @@ export async function validateXppTool(request: any): Promise<any> {
       content: [{
         type: 'text',
         text: `✅ validate_xpp: no violations found${context ? ` in ${context}` : ''}.\n` +
-          `Checked ${XPP_RULES.length + (codeType !== 'xpp' ? XML_RULES.length : 0)} rules.`,
+          `Checked ${XPP_RULES.length + (codeType !== 'xpp' ? XML_RULES.length + XML_PROPERTY_RULES.length : 0)} rule groups` +
+          `${codeType !== 'xpp' && stats ? ' (property rules driven by mined standard-model statistics)' : ''}.`,
       }],
     };
   }

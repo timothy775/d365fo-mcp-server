@@ -2008,7 +2008,9 @@ SourceCode format for classes: class declaration with member vars inside { }, me
           '[ExtensionOf] class not final (COC002), class not ending _Extension (COC003), ' +
           'CoC default param values (COC001), hardcoded strings in info/warning/error (BP001), ' +
           'doInsert/doUpdate/doDelete misuse (BP002), generic doc-comments (BP003), ' +
-          'missing AlternateKey on table XML (XML001).',
+          'missing AlternateKey on table XML (XML001). ' +
+          'Plus data-driven property rules mined from standard models (XML002 Label, ' +
+          'XML003 TableGroup, XML004 field EDT, XML005 ClusteredIndex).',
         inputSchema: {
           type: 'object',
           properties: {

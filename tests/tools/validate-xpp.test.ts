@@ -173,3 +173,112 @@ describe('XML rules', () => {
     expect(getText(result)).not.toContain('XML001');
   });
 });
+
+// ─── Data-driven property rules (XML002–XML005) ──────────────────────────────
+
+const COMPLETE_TABLE_XML = `
+<AxTable>
+  <Name>ContosoTable</Name>
+  <Label>@Contoso:ContosoTable</Label>
+  <TableGroup>Main</TableGroup>
+  <ClusteredIndex>ContosoIdx</ClusteredIndex>
+  <Fields>
+    <AxTableField>
+      <Name>ContosoId</Name>
+      <ExtendedDataType>CustAccount</ExtendedDataType>
+    </AxTableField>
+  </Fields>
+  <Indexes>
+    <AxTableIndex>
+      <Name>ContosoIdx</Name>
+      <AlternateKey>Yes</AlternateKey>
+    </AxTableIndex>
+  </Indexes>
+</AxTable>`;
+
+const BARE_TABLE_XML = `
+<AxTable>
+  <Name>ContosoTable</Name>
+  <Fields>
+    <AxTableField>
+      <Name>ContosoId</Name>
+    </AxTableField>
+  </Fields>
+  <Indexes>
+    <AxTableIndex>
+      <Name>ContosoIdx</Name>
+      <AlternateKey>Yes</AlternateKey>
+    </AxTableIndex>
+  </Indexes>
+</AxTable>`;
+
+/** Stats provider stub with configurable ratios. */
+const statsProvider = (ratios: Record<string, number>, totals = 1000) => ({
+  getPropertyPresenceRatio: (nodeType: string, property: string) => {
+    const ratio = ratios[`${nodeType}.${property}`];
+    return ratio === undefined
+      ? { present: 0, total: 0, ratio: 0 }
+      : { present: Math.round(ratio * totals), total: totals, ratio };
+  },
+  getPropertyValueDistribution: () => [
+    { value: 'Main', count: 600 },
+    { value: 'Transaction', count: 400 },
+  ],
+});
+
+describe('XML property rules — static defaults (no stats)', () => {
+  it('flags missing Label, TableGroup and field EDT on a bare table', async () => {
+    const result = await validateXppTool(req({ code: BARE_TABLE_XML, codeType: 'xml-table' }));
+    const text = getText(result);
+    expect(text).toContain('XML002');
+    expect(text).toContain('XML003');
+    expect(text).toContain('XML004');
+    expect(text).not.toContain('XML005'); // static default off without stats
+  });
+
+  it('passes a complete table XML', async () => {
+    const result = await validateXppTool(req({ code: COMPLETE_TABLE_XML, codeType: 'xml-table' }));
+    const text = getText(result);
+    for (const rule of ['XML002', 'XML003', 'XML004', 'XML005']) {
+      expect(text).not.toContain(rule);
+    }
+  });
+});
+
+describe('XML property rules — mined statistics', () => {
+  it('includes mined evidence and value distribution in violations', async () => {
+    const context = {
+      symbolIndex: statsProvider({
+        'AxTable.Label': 0.97,
+        'AxTable.TableGroup': 0.95,
+        'AxTableField.ExtendedDataType': 0.92,
+      }),
+    } as any;
+    const result = await validateXppTool(req({ code: BARE_TABLE_XML, codeType: 'xml-table' }), context);
+    const text = getText(result);
+    expect(text).toContain('97% of 1,000 standard AxTable nodes');
+    expect(text).toContain('Main (60%)');
+  });
+
+  it('disables a rule when standard usage is below the threshold', async () => {
+    const context = {
+      symbolIndex: statsProvider({
+        'AxTable.Label': 0.3, // standard models rarely set it → rule off
+        'AxTable.TableGroup': 0.95,
+        'AxTableField.ExtendedDataType': 0.92,
+      }),
+    } as any;
+    const result = await validateXppTool(req({ code: BARE_TABLE_XML, codeType: 'xml-table' }), context);
+    const text = getText(result);
+    expect(text).not.toContain('XML002');
+    expect(text).toContain('XML003');
+  });
+
+  it('enables XML005 only when stats prove standard usage', async () => {
+    const context = {
+      symbolIndex: statsProvider({ 'AxTable.ClusteredIndex': 0.9 }),
+    } as any;
+    const result = await validateXppTool(req({ code: BARE_TABLE_XML, codeType: 'xml-table' }), context);
+    expect(getText(result)).toContain('XML005');
+  });
+});

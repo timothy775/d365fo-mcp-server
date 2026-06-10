@@ -392,7 +392,7 @@ export function registerToolHandler(server: Server, context: XppServerContext): 
       case 'get_xpp_knowledge':
         return xppKnowledgeTool(request);
       case 'validate_xpp':
-        return validateXppTool(request);
+        return validateXppTool(request, context);
       case 'resolve_references':
         return resolveReferencesTool(request, context);
       case 'prepare_change':

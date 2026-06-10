@@ -7,6 +7,7 @@ import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { XppSymbol } from './types.js';
+import { isStandardModel } from '../utils/modelClassifier.js';
 
 /**
  * Detect if running in CI environment
@@ -567,6 +568,25 @@ export class XppSymbolIndex {
       CREATE INDEX IF NOT EXISTS idx_mit_name ON menu_item_targets(menu_item_name);
       CREATE INDEX IF NOT EXISTS idx_mit_target ON menu_item_targets(target_object);
       CREATE INDEX IF NOT EXISTS idx_mit_model ON menu_item_targets(model);
+    `);
+
+    // ── Property Statistics ──────────────────────────────────────────────────
+    // Distribution of metadata property values across STANDARD models, mined
+    // during build-database. Drives data-driven BP property rules in
+    // validate_xpp: "what does Microsoft actually set on this node type"
+    // instead of hardcoded rule tables. Presence is encoded as the special
+    // values '(present)' / '(absent)'.
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS property_stats (
+        node_type TEXT NOT NULL,
+        property TEXT NOT NULL,
+        value TEXT NOT NULL,
+        model TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (node_type, property, value, model)
+      );
+      CREATE INDEX IF NOT EXISTS idx_ps_node_prop ON property_stats(node_type, property);
     `);
 
     // ── Extension Metadata ───────────────────────────────────────────────────
@@ -1352,6 +1372,9 @@ export class XppSymbolIndex {
           model,
         });
 
+        // Mine property distribution for data-driven BP rules (standard models only)
+        this.recordTablePropertyStats(tableData, model);
+
         // Add field symbols
         if (tableData.fields && Array.isArray(tableData.fields)) {
           for (const field of tableData.fields) {
@@ -1886,6 +1909,89 @@ export class XppSymbolIndex {
     }
   }
 
+  // ─── Property statistics (data-driven BP rules) ────────────────────────────
+
+  /**
+   * Record one observation of a metadata property value.
+   * Presence checks use the special values '(present)' / '(absent)'.
+   */
+  recordPropertyStat(nodeType: string, property: string, value: string, model: string): void {
+    let stmt = this.stmtCache.get('recordPropertyStat');
+    if (!stmt) {
+      stmt = this.db.prepare(`
+        INSERT INTO property_stats (node_type, property, value, model, count)
+        VALUES (?, ?, ?, ?, 1)
+        ON CONFLICT(node_type, property, value, model) DO UPDATE SET count = count + 1
+      `);
+      this.stmtCache.set('recordPropertyStat', stmt);
+    }
+    stmt.run(nodeType, property, value, model);
+  }
+
+  /**
+   * Ratio of '(present)' observations for a property across all mined models.
+   * Returns total=0 when no statistics exist (validate_xpp falls back to
+   * static defaults in that case).
+   */
+  getPropertyPresenceRatio(nodeType: string, property: string): { present: number; total: number; ratio: number } {
+    const rows = this.getReadDb().prepare(
+      `SELECT value, SUM(count) AS c FROM property_stats
+       WHERE node_type = ? AND property = ? GROUP BY value`,
+    ).all(nodeType, property) as Array<{ value: string; c: number }>;
+    let present = 0;
+    let total = 0;
+    for (const row of rows) {
+      total += row.c;
+      if (row.value === '(present)') present += row.c;
+    }
+    return { present, total, ratio: total > 0 ? present / total : 0 };
+  }
+
+  /** Most common values for a property, ordered by observation count. */
+  getPropertyValueDistribution(
+    nodeType: string,
+    property: string,
+    limit = 10,
+  ): Array<{ value: string; count: number }> {
+    return this.getReadDb().prepare(
+      `SELECT value, SUM(count) AS count FROM property_stats
+       WHERE node_type = ? AND property = ? AND value NOT IN ('(present)', '(absent)')
+       GROUP BY value ORDER BY count DESC LIMIT ?`,
+    ).all(nodeType, property, limit) as Array<{ value: string; count: number }>;
+  }
+
+  /**
+   * Mine property statistics from one parsed table JSON. Only standard
+   * (Microsoft) models are mined — the stats answer "what does the standard
+   * platform do", not "what did our customizations do".
+   */
+  private recordTablePropertyStats(tableData: any, model: string): void {
+    if (!isStandardModel(model)) return;
+    const presence = (v: unknown) => (v ? '(present)' : '(absent)');
+    try {
+      // xmlParser defaults label to the table name — same value means no real label
+      const hasLabel = !!tableData.label && tableData.label !== tableData.name;
+      this.recordPropertyStat('AxTable', 'Label', presence(hasLabel), model);
+      this.recordPropertyStat('AxTable', 'TableGroup', tableData.tableGroup || '(absent)', model);
+      this.recordPropertyStat('AxTable', 'PrimaryIndex', presence(tableData.primaryIndex), model);
+      this.recordPropertyStat('AxTable', 'ClusteredIndex', presence(tableData.clusteredIndex), model);
+      const indexes = Array.isArray(tableData.indexes) ? tableData.indexes : [];
+      this.recordPropertyStat(
+        'AxTable', 'AlternateKeyIndex',
+        presence(indexes.some((i: any) => i?.unique)), model,
+      );
+      const fields = Array.isArray(tableData.fields) ? tableData.fields : [];
+      for (const field of fields) {
+        this.recordPropertyStat(
+          'AxTableField', 'ExtendedDataType',
+          presence(field?.extendedDataType || field?.enumType), model,
+        );
+      }
+    } catch {
+      // Statistics are best-effort — never fail the indexing pass
+    }
+  }
+
   /**
    * Get class methods for autocomplete
    */
@@ -2348,6 +2454,7 @@ export class XppSymbolIndex {
     this.db.exec('DELETE FROM security_role_duties');
     this.db.exec('DELETE FROM menu_item_targets');
     this.db.exec('DELETE FROM extension_metadata');
+    this.db.exec('DELETE FROM property_stats');
     this.vacuum();
   }
 
@@ -2376,6 +2483,7 @@ export class XppSymbolIndex {
       this.db.prepare(`DELETE FROM security_role_duties WHERE model IN (${placeholders})`).run(...modelNames);
       this.db.prepare(`DELETE FROM menu_item_targets WHERE model IN (${placeholders})`).run(...modelNames);
       this.db.prepare(`DELETE FROM extension_metadata WHERE model IN (${placeholders})`).run(...modelNames);
+      this.db.prepare(`DELETE FROM property_stats WHERE model IN (${placeholders})`).run(...modelNames);
     });
     deleteAll();
 
