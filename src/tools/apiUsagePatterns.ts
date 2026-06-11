@@ -16,7 +16,7 @@ const GetApiUsagePatternsArgsSchema = z.object({
 export async function getApiUsagePatternsTool(request: CallToolRequest, context: XppServerContext) {
   try {
     const args = GetApiUsagePatternsArgsSchema.parse(request.params.arguments);
-    const { symbolIndex, cache } = context;
+    const { symbolIndex } = context;
 
     // ── Bridge fast-path (DYNAMICSXREFDB cross-references) ──
     // Returns compiler-resolved callers grouped by class
@@ -24,20 +24,7 @@ export async function getApiUsagePatternsTool(request: CallToolRequest, context:
     if (bridgeResult) return bridgeResult;
 
     // ── Fallback: SQLite symbol index patterns ──
-    // Check cache first
-    const cacheKey = `api-patterns:${args.apiName}:${args.context || 'general'}`;
-    const cachedResults = await cache.get<any>(cacheKey);
-    
-    if (cachedResults) {
-      return {
-        content: [{ type: 'text', text: formatPatterns(cachedResults, args.apiName) }],
-      };
-    }
-
     const patterns = symbolIndex.getApiUsagePatterns(args.apiName);
-    
-    // Cache results
-    await cache.set(cacheKey, patterns, 1800); // Cache for 30 minutes
     
     const formatted = formatPatterns(patterns, args.apiName);
     

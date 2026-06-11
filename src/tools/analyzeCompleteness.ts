@@ -14,19 +14,7 @@ const AnalyzeClassCompletenessArgsSchema = z.object({
 export async function analyzeClassCompletenessTool(request: CallToolRequest, context: XppServerContext) {
   try {
     const args = AnalyzeClassCompletenessArgsSchema.parse(request.params.arguments);
-    const { symbolIndex, cache } = context;
-
-    // Check cache first — avoid unnecessary DB lookup on cache hit
-    const cacheKey = `completeness:${args.className}`;
-    const cachedResults = await cache.get<any>(cacheKey);
-
-    if (cachedResults) {
-      // classSymbol still needed for model/path display in formatAnalysis
-      const classSymbol = symbolIndex.getSymbolByName(args.className, 'class');
-      return {
-        content: [{ type: 'text', text: formatAnalysis(cachedResults, classSymbol) }],
-      };
-    }
+    const { symbolIndex } = context;
 
     const classSymbol = symbolIndex.getSymbolByName(args.className, 'class');
     
@@ -51,9 +39,6 @@ export async function analyzeClassCompletenessTool(request: CallToolRequest, con
       existingMethods,
       suggestedMethods
     };
-    
-    // Cache results
-    await cache.set(cacheKey, analysis, 600); // Cache for 10 minutes
     
     const formatted = formatAnalysis(analysis, classSymbol);
     

@@ -17,7 +17,6 @@ import { bridgeValidateAfterWrite, canBridgeCreate, bridgeCreateObject } from '.
 import { enforceGrounding } from '../utils/provenanceStore.js';
 import { gateOnFormPatternErrors } from './validateFormPattern.js';
 import { gateOnReferenceErrors } from './resolveReferences.js';
-import { invalidateCache } from './updateSymbolIndex.js';
 import { normalizeD365Xml } from '../utils/d365XmlNormalizer.js';
 
 /**
@@ -3319,7 +3318,6 @@ export async function handleCreateD365File(
   request: CallToolRequest,
   context?: {
     bridge?: import('../bridge/bridgeClient.js').BridgeClient;
-    cache?: import('../cache/redisCache.js').RedisCacheService;
     symbolIndex?: import('../metadata/symbolIndex.js').XppSymbolIndex;
   },
 ): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> {
@@ -3938,14 +3936,6 @@ export async function handleCreateD365File(
             }
           }
 
-          // Auto-invalidate Redis cache so subsequent reads see fresh data
-          // (bridge was already refreshed internally by bridgeCreateObject)
-          if (context?.cache) {
-            try {
-              await invalidateCache(context.cache, finalObjectName, args.objectType, [finalObjectName]);
-            } catch { /* Redis not available — non-fatal */ }
-          }
-
           return {
             content: [
               {
@@ -4110,13 +4100,6 @@ export async function handleCreateD365File(
     }).catch(e => {
       console.error(`[create_d365fo_file] Bridge validation skipped: ${e}`);
     });
-
-    // Auto-invalidate Redis cache so subsequent reads return fresh data
-    if (context?.cache) {
-      try {
-        await invalidateCache(context.cache, finalObjectName, args.objectType, [finalObjectName]);
-      } catch { /* Redis not available — non-fatal */ }
-    }
 
     // Add to Visual Studio project if requested
     let projectMessage = '';

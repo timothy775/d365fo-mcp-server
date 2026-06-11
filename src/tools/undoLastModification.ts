@@ -141,10 +141,10 @@ export const undoLastModificationTool = async (params: any, context: XppServerCo
 // ── Index cleanup after undo ───────────────────────────────────────────────
 
 /**
- * Clean up the symbol index, label index, Redis cache, and bridge after
+ * Clean up the symbol index, label index, and bridge after
  * a file is reverted or deleted by undo_last_modification.
  *
- * - For DELETED files: remove all stale symbols + labels, invalidate cache.
+ * - For DELETED files: remove all stale symbols + labels.
  * - For REVERTED files: re-index from the restored file content.
  */
 async function cleanupIndexAfterUndo(
@@ -152,11 +152,11 @@ async function cleanupIndexAfterUndo(
   filePath: string,
   action: 'deleted' | 'reverted',
 ): Promise<void> {
-  const { symbolIndex, cache } = context;
+  const { symbolIndex } = context;
 
   try {
     // 1. Remove stale symbols from SQLite
-    const { deletedCount, objectNames } = symbolIndex.removeSymbolsByFile(filePath);
+    const { deletedCount } = symbolIndex.removeSymbolsByFile(filePath);
     console.error(`[undo] Removed ${deletedCount} stale symbol(s) for ${path.basename(filePath)}`);
 
     // 2. Remove stale labels (label .txt files have the same path pattern)
@@ -165,24 +165,12 @@ async function cleanupIndexAfterUndo(
       console.error(`[undo] Removed ${labelCount} stale label(s) for ${path.basename(filePath)}`);
     }
 
-    // 3. Invalidate Redis cache for affected objects
-    const primaryName = path.parse(filePath).name;
-    try {
-      for (const name of objectNames) {
-        await cache.delete(cache.generateClassKey(name));
-        await cache.delete(cache.generateTableKey(name));
-      }
-      await cache.deletePattern(`xpp:method-sig:${primaryName}:*`);
-      await cache.deletePattern(`xpp:complete:${primaryName}:*`);
-      await cache.deletePattern('xpp:search:*');
-    } catch { /* Redis not available */ }
-
-    // 4. Refresh bridge metadata provider
+    // 3. Refresh bridge metadata provider
     try {
       await bridgeRefreshProvider(context.bridge);
     } catch { /* bridge not available */ }
 
-    // 5. For reverted files: re-index the restored content
+    // 4. For reverted files: re-index the restored content
     if (action === 'reverted' && fs.existsSync(filePath)) {
       // Import dynamically to avoid circular dependency
       const { updateSymbolIndexTool } = await import('./updateSymbolIndex.js');

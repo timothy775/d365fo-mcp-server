@@ -266,7 +266,7 @@ Key Learn references:
 ## Performance Notes
 
 - First query: ~50-100ms (database)
-- Cached query: <10ms (Redis)
+- Repeat query: <10ms (in-memory index)
 - Don't hesitate to call tools multiple times for accuracy
 
 ## Error Recovery

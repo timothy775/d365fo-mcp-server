@@ -26,7 +26,6 @@ import {
   bridgeAddControl, bridgeAddDataSource,
   bridgeAddFieldModification, bridgeAddMenuItemToMenu,
 } from '../bridge/index.js';
-import { invalidateCache } from './updateSymbolIndex.js';
 import { ProjectFileManager, ProjectFileFinder } from './createD365File.js';
 import { normalizeD365Xml } from '../utils/d365XmlNormalizer.js';
 import { enforceGrounding } from '../utils/provenanceStore.js';
@@ -1015,11 +1014,6 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
     }).catch(e => {
       console.error(`[modify_d365fo_file] Bridge validation skipped: ${e}`);
     });
-
-    // Auto-invalidate Redis cache so subsequent reads return fresh data
-    try {
-      await invalidateCache(context.cache, objectName, objectType, [objectName]);
-    } catch { /* Redis not available — non-fatal */ }
 
     // Optionally add the file to the Visual Studio project
     let projectMessage = '';

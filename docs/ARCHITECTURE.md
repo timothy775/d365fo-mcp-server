@@ -23,14 +23,12 @@ graph TB
         DB[(Symbols DB\nSQLite FTS5, 580K+ symbols)]
         LDB[(Labels DB\nSQLite FTS5, 20M+ rows, 70 languages)]
         BRIDGE[C# Bridge\nIMetadataProvider + DYNAMICSXREFDB]
-        CACHE[Redis\noptional]
     end
 
     VS & CC -->|JSON-RPC| TRANSPORT --> TOOLS
     TOOLS --> GATES
     TOOLS --> DB & LDB
     TOOLS -->|Windows VM| BRIDGE
-    TOOLS -.-> CACHE
 
     style BRIDGE fill:#512BD4,color:#fff
     style GATES fill:#E65100,color:#fff
@@ -58,18 +56,18 @@ sequenceDiagram
     participant IDE as Copilot / Claude
     participant SRV as MCP Server
     participant GATE as Gates
-    participant SRC as Bridge / SQLite / Redis
+    participant SRC as Bridge / SQLite
 
     IDE->>SRV: tools/call (JSON-RPC)
     SRV->>SRV: dedup cache + loop detection
     alt read tool
-        SRV->>SRC: bridge-first, SQLite fallback, Redis cache
+        SRV->>SRC: bridge-first, SQLite fallback
         SRC-->>IDE: result (~10 ms cached)
     else write tool
         SRV->>GATE: grounding token · resolve_references · validate_xpp · validate_form_pattern
         alt gates pass
             GATE->>SRC: bridge write (IMetadataProvider)
-            SRC->>SRC: invalidate SQLite + Redis + bridge state
+            SRC->>SRC: invalidate SQLite + bridge state
             SRC-->>IDE: ✅ written + registered in .rnrproj
         else gate fails
             GATE-->>IDE: ⛔ blocked with structured violations + fixes
@@ -135,7 +133,7 @@ Key implementation points:
 
 - **DiskProvider discovery** — write methods hide behind internal interfaces; the bridge casts to reach `SaveObject()`.
 - **ModelSaveInfo** — every write resolves the owning model from its descriptor, so files land in the right model.
-- **Auto-invalidation** — after each write: bridge metadata cache + SQLite index + Redis keys are refreshed, so the next read sees the change.
+- **Auto-invalidation** — after each write: bridge metadata cache + SQLite index are refreshed, so the next read sees the change.
 - **Graceful degradation** — bridge missing (Azure/Linux) → read tools fall back to SQLite; `xrefAvailable: false` → xref tools fall back to FTS.
 
 Protocol, error codes and troubleshooting: [BRIDGE.md](BRIDGE.md)
@@ -188,7 +186,7 @@ Index refresh is automated via [Azure DevOps pipelines](PIPELINES.md); the App S
 
 | Aspect | Implementation |
 |--------|----------------|
-| Search latency | FTS5 < 10 ms; Redis cache TTL 1 h (search/info), 30 min (completion); active invalidation on writes |
+| Search latency | FTS5 < 10 ms; active invalidation on writes |
 | Rate limits | `/mcp` 500 req / 15 min · `/health` 1000 req / 15 min |
 | Auth (HTTP) | API key / Bearer middleware; HTTPS + TLS 1.2+; Managed Identity for Blob access |
 | Path safety | every write target validated against `PackagesLocalDirectory/<Package>/<Model>/Ax<Type>/` containment (no traversal) |
@@ -200,7 +198,7 @@ Index refresh is automated via [Azure DevOps pipelines](PIPELINES.md); the App S
 |-------|-----------|
 | Runtime | Node.js ≥ 24, TypeScript 6 (strict) |
 | Transport | MCP SDK — stdio + Express 5 HTTP |
-| Storage | better-sqlite3 (WAL, FTS5), optional Redis |
+| Storage | better-sqlite3 (WAL, FTS5) |
 | Bridge | .NET Framework 4.8, Microsoft.Dynamics.AX.Metadata DLLs |
 | Tests | Vitest — 750+ tests, golden quality-gate suites |
 | CI/CD | GitHub Actions (app), Azure DevOps (metadata pipelines) |

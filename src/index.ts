@@ -16,7 +16,6 @@ import { createXppMcpServer } from './server/mcpServer.js';
 import { createStreamableHttpTransport } from './server/transport.js';
 import { XppSymbolIndex } from './metadata/symbolIndex.js';
 import { XppMetadataParser } from './metadata/xmlParser.js';
-import { RedisCacheService } from './cache/redisCache.js';
 import { WorkspaceScanner } from './workspace/workspaceScanner.js';
 import { HybridSearch } from './workspace/hybridSearch.js';
 import { initializeDatabase } from './database/download.js';
@@ -114,7 +113,6 @@ interface ServerState {
   statusMessage: string;
   symbolIndex?: XppSymbolIndex;
   parser?: XppMetadataParser;
-  cache?: RedisCacheService;
 }
 
 const serverState: ServerState = {
@@ -150,10 +148,6 @@ async function initializeServices() {
       console.log('ℹ️  No .mcp.json found — using environment variables / defaults');
     }
 
-    const cache = new RedisCacheService();
-    // Don't wait for Redis in write-only mode — it's not used
-    cache.waitForConnection().catch(() => {});
-
     const symbolIndex = new XppSymbolIndex(':memory:', ':memory:');
     const parser = new XppMetadataParser();
     const workspaceScanner = new WorkspaceScanner();
@@ -161,12 +155,11 @@ async function initializeServices() {
 
     serverState.symbolIndex = symbolIndex;
     serverState.parser = parser;
-    serverState.cache = cache;
 
-    const context: import('./types/context.js').XppServerContext = { symbolIndex, parser, cache, workspaceScanner, hybridSearch };
+    const context: import('./types/context.js').XppServerContext = { symbolIndex, parser, workspaceScanner, hybridSearch };
     const mcpServer = createXppMcpServer(context);
     console.log('✅ MCP Server initialized (write-only mode)');
-    return { mcpServer, symbolIndex, parser, cache, workspaceScanner, hybridSearch, context };
+    return { mcpServer, symbolIndex, parser, workspaceScanner, hybridSearch, context };
   }
 
   // -----------------------------------------------------------------------
@@ -191,21 +184,6 @@ async function initializeServices() {
     } else {
       console.log('ℹ️  No .mcp.json found — using environment variables / defaults');
     }
-
-    // Initialize cache service
-    console.log('💾 Initializing cache service...');
-    serverState.statusMessage = 'Connecting to Redis...';
-    const cache = new RedisCacheService();
-    
-    // Wait for Redis connection
-    const isConnected = await cache.waitForConnection();
-    if (isConnected) {
-      const stats = await cache.getStats();
-      console.log(`✅ Redis cache enabled (${stats.keyCount || 0} keys, ${stats.memory || 'unknown'} memory)`);
-    } else {
-      console.log('⚠️  Redis cache disabled - running without cache');
-    }
-    serverState.cache = cache;
 
     // Download database from blob storage if configured (only if remote is newer than local)
     if (process.env.AZURE_STORAGE_CONNECTION_STRING && process.env.BLOB_CONTAINER_NAME) {
@@ -311,14 +289,13 @@ async function initializeServices() {
     const context: import('./types/context.js').XppServerContext = { 
       symbolIndex, 
       parser, 
-      cache, 
       workspaceScanner, 
       hybridSearch,
     };
     const mcpServer = createXppMcpServer(context);
     console.log('✅ MCP Server initialized with workspace support');
 
-    return { mcpServer, symbolIndex, parser, cache, workspaceScanner, hybridSearch, context };
+    return { mcpServer, symbolIndex, parser, workspaceScanner, hybridSearch, context };
   } catch (error) {
     console.error('❌ Initialization error:', error);
     serverState.statusMessage = `Initialization failed: ${error}`;
@@ -535,8 +512,6 @@ async function main() {
     //     then execute immediately with full results.
 
     // Step 1: lightweight stub + deferred dbReady promise
-    const stubCache = new RedisCacheService();
-    stubCache.waitForConnection().catch(() => {});
     const stubIndex = new XppSymbolIndex(':memory:', ':memory:');
     const stubParser = new XppMetadataParser();
     const stubScanner = new WorkspaceScanner();
@@ -552,7 +527,6 @@ async function main() {
     const stubContext: import('./types/context.js').XppServerContext = {
       symbolIndex: stubIndex,
       parser: stubParser,
-      cache: stubCache,
       workspaceScanner: stubScanner,
       hybridSearch: stubHybrid,
       dbReady: dbReadyPromise,
@@ -585,28 +559,19 @@ async function main() {
 
     // Step 4: load real database in the background
     const dbLoadStart = Date.now();
-    initializeServices().then(({ symbolIndex, parser, cache, workspaceScanner, hybridSearch }) => {
+    initializeServices().then(({ symbolIndex, parser, workspaceScanner, hybridSearch }) => {
       // Step 5: patch the context references used by tool handlers
       stubContext.symbolIndex       = symbolIndex;
       stubContext.parser            = parser;
-      stubContext.cache             = cache;
       stubContext.workspaceScanner  = workspaceScanner;
       stubContext.hybridSearch      = hybridSearch;
       serverState.symbolIndex = symbolIndex;
       serverState.parser      = parser;
-      serverState.cache       = cache;
       serverState.statusMessage = 'Ready';
       // Resolve dbReady AFTER context is patched — tools can now run with real index.
       resolveDbReady();
       console.log(`✅ Database loaded in ${Date.now() - dbLoadStart} ms (${diagTs()} from process start) — all tools fully operational`);
 
-      // Close the handshake-phase stub cache so we don't leak its (no-op or
-      // real Redis) connection for the rest of the process lifetime.
-      // The stub and the real cache are distinct RedisCacheService instances;
-      // once the real one is wired, the stub is unreachable.
-      if (stubCache !== cache) {
-        stubCache.close().catch(() => {});
-      }
       // The in-memory stub symbol index is also unreachable once swapped.
       try { stubIndex.close(); } catch { /* ignore */ }
     }).catch(err => {
@@ -689,9 +654,9 @@ async function main() {
     }));
 
     // Initialise services in the background; register MCP routes once ready
-    initializeServices().then(({ mcpServer, symbolIndex, parser, cache, workspaceScanner, hybridSearch, context }) => {
+    initializeServices().then(({ mcpServer, symbolIndex, parser, workspaceScanner, hybridSearch, context }) => {
       // Register MCP transport (Express supports dynamic route registration)
-      createStreamableHttpTransport(mcpServer, app, { symbolIndex, parser, cache, workspaceScanner, hybridSearch });
+      createStreamableHttpTransport(mcpServer, app, { symbolIndex, parser, workspaceScanner, hybridSearch });
 
       // Initialize C# bridge (non-blocking) — also needed for HTTP mode on Windows/UDE
       if (context) void initializeBridge(context);

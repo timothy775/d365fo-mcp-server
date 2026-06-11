@@ -19,7 +19,7 @@ const CompletionArgsSchema = z.object({
 export async function completionTool(request: CallToolRequest, context: XppServerContext) {
   try {
     const args = CompletionArgsSchema.parse(request.params.arguments);
-    const { symbolIndex, cache, workspaceScanner } = context;
+    const { symbolIndex, workspaceScanner } = context;
 
     // ── Bridge fast-path (C# IMetadataProvider) ──
     // Try bridge BEFORE the table guard — bridge handles both classes and tables
@@ -71,16 +71,6 @@ export async function completionTool(request: CallToolRequest, context: XppServe
       if (workspaceCompletions) {
         return workspaceCompletions;
       }
-    }
-
-    // Check cache first
-    const cacheKey = `completion:${args.className}:${args.prefix}`;
-    const cachedResults = await cache.get<any[]>(cacheKey);
-    
-    if (cachedResults) {
-      return {
-        content: [{ type: 'text', text: formatCompletions(cachedResults, args.className, args.prefix) }],
-      };
     }
 
     // Use the built-in getCompletions method that properly handles both classes and tables
@@ -142,9 +132,6 @@ export async function completionTool(request: CallToolRequest, context: XppServe
         ],
       };
     }
-
-    // Cache results
-    await cache.set(cacheKey, completions, 300); // Cache for 5 minutes
 
     const formatted = formatCompletions(completions, args.className, args.prefix);
 

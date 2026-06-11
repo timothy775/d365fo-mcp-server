@@ -112,7 +112,7 @@ Two servers, one merged tool list — Copilot/Claude routes calls automatically:
 | `d365fo-azure` | App Service | `read-only` | search & analysis tools |
 | `d365fo-local` | Windows VM (stdio) | `write-only` | write tools + bridge-backed reads + `get_workspace_info`/`verify_d365fo_project` |
 
-The write-only companion skips database download entirely — it starts in under a second and needs no Redis/Blob.
+The write-only companion skips database download entirely — it starts in under a second and needs no Blob.
 
 Startup logs confirm the filtering:
 

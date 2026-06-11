@@ -4,7 +4,7 @@
  * Returns method modifiers, return type, parameters with types
  *
  * PRIMARY: C# bridge (IMetadataProvider) via tryBridgeMethodSignature.
- * SQLite is used only as a gate (verify class/method exists) and for cache.
+ * SQLite is used only as a gate (verify class/method exists).
  */
 
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
@@ -40,15 +40,8 @@ interface MethodSignature {
 export async function getMethodSignatureTool(request: CallToolRequest, context: XppServerContext) {
   try {
     const args = GetMethodSignatureArgsSchema.parse(request.params.arguments);
-    const { symbolIndex, cache, parser } = context;
+    const { symbolIndex, parser } = context;
     const { className, methodName, modelName } = args;
-
-    // Check cache first (method signatures are static — 24h TTL via setClassInfo)
-    const cacheKey = `xpp:method-sig:${className}:${methodName}`;
-    const cachedResult = await cache.get<any>(cacheKey);
-    if (cachedResult) {
-      return cachedResult;
-    }
 
     // 1. Find the class/table/view — methods live on all three object types
     const OBJECT_TYPES = `('class', 'table', 'view', 'data-entity')`;
@@ -106,13 +99,13 @@ export async function getMethodSignatureTool(request: CallToolRequest, context: 
     // This is the sole data path — eliminates JSON file I/O and XML parsing.
     const includeCoc = args.includeCocTemplate ?? false;
     const bridgeSignature = await tryBridgeMethodSignature(
-      context.bridge, className, methodName, classRow.model, includeCoc, cache, cacheKey,
+      context.bridge, className, methodName, classRow.model, includeCoc,
     );
     if (bridgeSignature) return bridgeSignature;
 
     // Fallback: parse XML file from disk (same pattern as classInfo.ts)
     const xmlSignature = await tryXmlMethodSignature(
-      parser, classRow.file_path, className, methodName, classRow.model, includeCoc, cache, cacheKey, classRow.type,
+      parser, classRow.file_path, className, methodName, classRow.model, includeCoc, classRow.type,
     );
     if (xmlSignature) return xmlSignature;
 
@@ -161,8 +154,6 @@ async function tryBridgeMethodSignature(
   methodName: string,
   modelName: string,
   includeCoc: boolean,
-  cache: any,
-  cacheKey: string,
 ): Promise<any | null> {
   if (!bridge?.isReady || !bridge.metadataAvailable) return null;
   try {
@@ -175,7 +166,6 @@ async function tryBridgeMethodSignature(
 
     const obsoleteWarning = detectObsolete(ms.source);
     const result = formatOutput(className, methodName, signature, modelName, includeCoc, obsoleteWarning);
-    await cache.setClassInfo(cacheKey, result);
     return result;
   } catch (e) {
     console.error(`[methodSignature] Bridge getMethodSource(${className}, ${methodName}) failed: ${e}`);
@@ -196,8 +186,6 @@ async function tryXmlMethodSignature(
   methodName: string,
   modelName: string,
   includeCoc: boolean,
-  cache: any,
-  cacheKey: string,
   objectType?: string,
 ): Promise<any | null> {
   if (!parser || !filePath) return null;
@@ -220,7 +208,6 @@ async function tryXmlMethodSignature(
 
     const obsoleteWarning = detectObsolete(method.source);
     const result = formatOutput(className, methodName, signature, modelName, includeCoc, obsoleteWarning);
-    await cache.setClassInfo(cacheKey, result);
     return result;
   } catch (e) {
     console.error(`[methodSignature] XML parse for ${className}.${methodName} failed: ${e}`);

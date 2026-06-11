@@ -11,7 +11,7 @@ export const updateSymbolIndexToolDefinition = {
   name: 'update_symbol_index',
   description:
     'Index a newly generated or modified D365FO XML/label file immediately so references to it work without restarting the server. ' +
-    'Also handles file DELETIONS: if the file no longer exists on disk, stale symbols + labels + Redis cache entries are cleaned up.',
+    'Also handles file DELETIONS: if the file no longer exists on disk, stale symbols + labels are cleaned up.',
   parameters: z.object({
     filePath: z.string().describe('The absolute path to the modified, created, or DELETED XML file')
   })
@@ -92,7 +92,7 @@ function parseLabelFileName(filePath: string): { labelFileId: string; language: 
 export const updateSymbolIndexTool = async (params: any, context: XppServerContext) => {
   const { filePath } = params;
   try {
-    const { symbolIndex, cache } = context;
+    const { symbolIndex } = context;
     const pathParts = filePath.split(/[\\/]/);
     const fileName = pathParts[pathParts.length - 1] ?? filePath;
     const objectName = fileName.replace(/\.[^.]+$/, '');
@@ -104,16 +104,13 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
     if (!fs.existsSync(filePath)) {
       console.error(`[update_symbol_index] File deleted — cleaning up stale entries for "${objectName}"`);
 
-      // 1. Remove symbols from SQLite (returns names for cache invalidation)
-      const { deletedCount, objectNames } = symbolIndex.removeSymbolsByFile(filePath);
+      // 1. Remove symbols from SQLite
+      const { deletedCount } = symbolIndex.removeSymbolsByFile(filePath);
 
       // 2. Remove labels from labels DB (label files live alongside XML)
       const labelCount = symbolIndex.removeLabelsByFile(filePath);
 
-      // 3. Invalidate Redis cache for affected objects
-      await invalidateCache(cache, objectName, objectType, objectNames);
-
-      // 4. Refresh bridge so it no longer sees the deleted file
+      // 3. Refresh bridge so it no longer sees the deleted file
       try {
         await bridgeRefreshProvider(context.bridge);
       } catch { /* bridge not available */ }
@@ -129,7 +126,7 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
         content: [{
           type: 'text',
           text: `🗑️ File deleted — cleaned up ${summary} for **${objectName}** (${objectType}).\n` +
-            `Redis cache invalidated. Bridge refreshed.`
+            `Bridge refreshed.`
         }]
       };
     }
@@ -176,7 +173,6 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
         };
       }
 
-      await invalidateCache(cache, labelFileId, 'label', [labelFileId]);
       symbolIndex.touchLastIndexed?.();
 
       return {
@@ -184,8 +180,8 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
           type: 'text',
           text: `✅ Label index updated for **${path.basename(filePath)}** (model: ${model}, language: ${language}).\n\n` +
             `Removed: ${removedCount} stale entr${removedCount === 1 ? 'y' : 'ies'}\n` +
-            `Inserted: ${insertedCount} label${insertedCount !== 1 ? 's' : ''}\n` +
-            `Redis cache invalidated.`,
+            `Inserted: ${insertedCount} label${insertedCount !== 1 ? 's' : ''}`,
+
         }],
       };
     }
@@ -320,8 +316,6 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
       tx();
     }
 
-    // ── Invalidate Redis cache for the re-indexed object ────────────────────
-    await invalidateCache(cache, objectName, objectType, [objectName]);
     symbolIndex.touchLastIndexed?.();
 
     return {
@@ -329,8 +323,7 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
         type: 'text',
         text: `✅ Symbol index updated for **${objectName}** (${objectType}, model: ${model}).\n\n` +
           `Removed: ${deletedCount} stale entr${deletedCount === 1 ? 'y' : 'ies'}\n` +
-          `Inserted: ${insertedCount} symbol${insertedCount !== 1 ? 's' : ''}\n` +
-          `Redis cache invalidated.`
+          `Inserted: ${insertedCount} symbol${insertedCount !== 1 ? 's' : ''}`
       }]
     };
   } catch (error: any) {
@@ -341,41 +334,3 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
     };
   }
 };
-
-// ── Shared cache invalidation helper ───────────────────────────────────────
-
-/**
- * Invalidate Redis cache entries that might reference the given object.
- * Clears:
- * - Direct class/table key (xpp:class:Name, xpp:table:Name)
- * - Method signature keys (xpp:method-sig:Name:*)
- * - Search results that might include the object (xpp:search:*)
- * - Code completion cache (xpp:complete:Name:*)
- *
- * Exported so create_d365fo_file and modify_d365fo_file can auto-invalidate
- * without requiring an explicit update_symbol_index call.
- */
-export async function invalidateCache(
-  cache: XppServerContext['cache'],
-  primaryName: string,
-  _objectType: string,
-  allObjectNames: string[],
-): Promise<void> {
-  try {
-    // Direct object keys
-    for (const name of allObjectNames) {
-      await cache.delete(cache.generateClassKey(name));
-      await cache.delete(cache.generateTableKey(name));
-    }
-    // Method signature cache (pattern: xpp:method-sig:ClassName:*)
-    await cache.deletePattern(`xpp:method-sig:${primaryName}:*`);
-    // Code completion cache
-    await cache.deletePattern(`xpp:complete:${primaryName}:*`);
-    // Search results are impossible to selectively invalidate (query-based keys),
-    // so we clear all search cache. This is fast and search TTL is only 30 min anyway.
-    await cache.deletePattern('xpp:search:*');
-  } catch (e) {
-    // Redis not available — silently ignore
-    console.error(`[update_symbol_index] Redis cache invalidation failed (non-fatal): ${e}`);
-  }
-}

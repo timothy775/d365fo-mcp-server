@@ -101,11 +101,10 @@ describe('search', () => {
     expect(result.isError).toBeFalsy();
   });
 
-  it('uses cached result when available', async () => {
-    (ctx.cache.getFuzzy as any).mockResolvedValueOnce([makeSymbol()]);
+  it('returns results from symbolIndex when bridge is unavailable', async () => {
     const result = await searchTool(req('search', { query: 'CustTable' }), ctx);
     expect(result.content[0].text).toContain('CustTable');
-    expect(ctx.symbolIndex.searchSymbols).not.toHaveBeenCalled();
+    expect(ctx.symbolIndex.searchSymbols).toHaveBeenCalled();
   });
 });
 
