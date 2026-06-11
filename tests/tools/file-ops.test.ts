@@ -437,15 +437,9 @@ describe('create_d365fo_file', () => {
         addToProject: false,
       }),
     );
-    if (process.platform === 'win32') {
-      expect((result as any).isError).toBeFalsy();
-      expect(result.content[0].text).toMatch(/created|success|MyNewClass/i);
-    } else {
-      // Non-Windows: creation legitimately fails (requires a Windows D365FO VM) and is
-      // now correctly reported as isError rather than masked as a success message.
-      expect((result as any).isError).toBe(true);
-      expect(result.content[0].text).toMatch(/non-Windows|Windows/i);
-    }
+    // fs is fully mocked — writes succeed on all platforms.
+    expect((result as any).isError).toBeFalsy();
+    expect(result.content[0].text).toMatch(/created|success|MyNewClass/i);
   });
 
   it('creates a table-extension file', async () => {
@@ -459,8 +453,8 @@ describe('create_d365fo_file', () => {
         addToProject: false,
       }),
     );
-    // Non-Windows: creation fails (needs Windows) and is correctly reported as isError.
-    expect(!!(result as any).isError).toBe(process.platform !== 'win32');
+    // fs is fully mocked — writes succeed on all platforms.
+    expect((result as any).isError).toBeFalsy();
   });
 
   it('auto-converts bare extension name to dot-notation (Case C fix)', async () => {
@@ -477,8 +471,7 @@ describe('create_d365fo_file', () => {
         addToProject: false,
       }),
     );
-    // On macOS the function throws "Cannot create on non-Windows" before writing, which
-    // is caught by the outer catch and returned as content text (no isError flag).
+    // fs is fully mocked — writes succeed on all platforms.
     // We inspect the path embedded in the message: it must use dot-notation
     // (PurchTable.<something>Extension.xml) and NOT a flat prefix (FmMcpPurchTable.xml).
     const text: string = result.content[0].text;
@@ -561,8 +554,8 @@ describe('create_d365fo_file', () => {
         addToProject: false,
       }),
     );
-    // Non-Windows: creation fails (needs Windows) and is correctly reported as isError.
-    expect(!!(result as any).isError).toBe(process.platform !== 'win32');
+    // fs is fully mocked — writes succeed on all platforms.
+    expect((result as any).isError).toBeFalsy();
   });
 
   it('returns error when objectType is missing', async () => {
