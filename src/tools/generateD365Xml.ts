@@ -274,10 +274,6 @@ class XmlTemplateGenerator {
     const implementsAttr = properties?.implements
       ? `\t<Implements>${properties.implements}</Implements>\n`
       : '';
-    const isFinalAttr = properties?.isFinal ? `\t<IsFinal>Yes</IsFinal>\n` : '';
-    const isAbstractAttr = properties?.isAbstract
-      ? `\t<IsAbstract>Yes</IsAbstract>\n`
-      : '';
 
     // D365FO convention: method source is always indented by 4 spaces inside <Source>.
     const indentMethodSource = (src: string): string =>
@@ -296,7 +292,7 @@ class XmlTemplateGenerator {
     return `<?xml version="1.0" encoding="utf-8"?>
 <AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
 \t<Name>${className}</Name>
-${extendsAttr}${implementsAttr}${isFinalAttr}${isAbstractAttr}\t<SourceCode>
+${extendsAttr}${implementsAttr}\t<SourceCode>
 \t\t<Declaration><![CDATA[
 ${ensureBlankLineBeforeClosingBrace(ensureXppDocComment(declaration))}
 ]]></Declaration>

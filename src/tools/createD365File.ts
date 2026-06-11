@@ -539,10 +539,6 @@ export class XmlTemplateGenerator {
     const implementsAttr = properties?.implements
       ? `\t<Implements>${properties.implements}</Implements>\n`
       : '';
-    const isFinalAttr = properties?.isFinal ? `\t<IsFinal>Yes</IsFinal>\n` : '';
-    const isAbstractAttr = properties?.isAbstract
-      ? `\t<IsAbstract>Yes</IsAbstract>\n`
-      : '';
 
     // D365FO convention: method source is always indented by 4 spaces inside <Source>.
     // This matches what VS writes and what the compiler/Designer expect to see.
@@ -562,7 +558,7 @@ export class XmlTemplateGenerator {
     return `<?xml version="1.0" encoding="utf-8"?>
 <AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
 \t<Name>${className}</Name>
-${extendsAttr}${implementsAttr}${isFinalAttr}${isAbstractAttr}\t<SourceCode>
+${extendsAttr}${implementsAttr}\t<SourceCode>
 \t\t<Declaration><![CDATA[
 ${ensureBlankLineBeforeClosingBrace(ensureXppDocComment(declaration))}
 ]]></Declaration>
@@ -589,7 +585,7 @@ ${methodsXml}\t</SourceCode>
     const defaultSource = sourceCode ||
       `[ExtensionOf(classStr(${baseClass}))]\nfinal class ${extensionName}\n{\n    // ⚠️  ALWAYS call next <methodName>() — verify exact signature with:\n    //     get_method_signature("${baseClass}", "methodName")\n    //\n    // Template for wrapping a method:\n    //   public ReturnType methodName(ParamType _param)\n    //   {\n    //       ReturnType result = next methodName(_param);\n    //       return result;\n    //   }\n}`;
 
-    return XmlTemplateGenerator.generateAxClassXml(extensionName, defaultSource, { isFinal: true, ...properties });
+    return XmlTemplateGenerator.generateAxClassXml(extensionName, defaultSource, { ...properties });
   }
 
   /**
@@ -2700,7 +2696,7 @@ public final class ${contractName} extends BusinessEventsContract
     }
 }`;
 
-    return XmlTemplateGenerator.generateAxClassXml(name, source, { label, helpText, isFinal: true });
+    return XmlTemplateGenerator.generateAxClassXml(name, source, { label, helpText });
   }
 
   /**
