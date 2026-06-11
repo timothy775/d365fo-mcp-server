@@ -7,6 +7,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { glob } from 'glob';
 import { parseStringPromise } from 'xml2js';
+import { isFileUnderRoot } from '../utils/pathContainment.js';
 
 export interface WorkspaceFile {
   path: string;
@@ -69,6 +70,15 @@ export class WorkspaceScanner {
     });
 
     for (const filePath of xmlFiles) {
+      // Defense in depth: verify that each globbed file (after symlink
+      // resolution) still resolves under the validated workspace root.
+      // A symlink placed inside the workspace could otherwise redirect a read
+      // to an arbitrary location outside the allowed root.
+      if (!isFileUnderRoot(filePath, workspacePath)) {
+        console.warn(`[WorkspaceScanner] Skipping ${filePath} — resolves outside workspace root ${workspacePath}`);
+        continue;
+      }
+
       const stat = await fs.stat(filePath);
       const fileName = path.basename(filePath, '.xml');
       

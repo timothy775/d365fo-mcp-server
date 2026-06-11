@@ -14,6 +14,7 @@ import type { XppServerContext } from '../types/context.js';
 import { promises as fs } from 'fs';
 import { parseStringPromise } from 'xml2js';
 import { tryBridgeForm } from '../bridge/bridgeAdapter.js';
+import { assertWritePathAllowed } from '../utils/pathContainment.js';
 
 const GetFormInfoArgsSchema = z.object({
   formName: z.string().describe('Name of the form'),
@@ -82,6 +83,18 @@ export async function getFormInfoTool(request: CallToolRequest, context: XppServ
     // 0. If an explicit filePath is provided, skip bridge entirely.
     // This is the retry path for newly-created forms not yet in bridge metadata.
     if (explicitFilePath) {
+      // Security: validate that the supplied path falls within a configured D365FO
+      // package root before reading any file content.  Without this check a
+      // prompt-injection attack could read arbitrary local files via this parameter.
+      const containment = await assertWritePathAllowed(explicitFilePath);
+      if (!containment.ok) {
+        return {
+          content: [{ type: 'text', text:
+            `❌ get_form_info: filePath rejected — ${containment.reason}`,
+          }],
+          isError: true,
+        };
+      }
       let xmlContent: string | null = null;
       try {
         xmlContent = await fs.readFile(explicitFilePath, 'utf-8');

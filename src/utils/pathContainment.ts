@@ -162,3 +162,45 @@ export async function ensureWritePathAllowed(filePath: string, modelHint?: strin
   if (!r.ok) throw new Error(`⛔ Path containment check failed: ${r.reason}`);
   return r.canonicalPath!;
 }
+
+/**
+ * Validate that `dirPath` is a directory inside one of the configured D365FO
+ * package roots. Used as the read-side equivalent of `assertWritePathAllowed`
+ * for workspace-scanning operations (`workspacePath` tool parameter).
+ *
+ * Prevents path traversal and arbitrary directory reads: any absolute path that
+ * does NOT resolve under a configured package root is rejected outright.
+ */
+export async function assertReadRootAllowed(dirPath: string): Promise<PathContainmentResult> {
+  if (!dirPath || typeof dirPath !== 'string') {
+    return { ok: false, reason: 'dirPath is empty' };
+  }
+  if (!isAbsoluteCrossPlatform(dirPath)) {
+    return { ok: false, reason: `dirPath must be absolute: "${dirPath}"` };
+  }
+
+  const canonical = normalise(dirPath);
+  const roots = await getAllowedRoots();
+  const matchedRoot = roots.find(r => isUnder(canonical, r));
+  if (!matchedRoot) {
+    return {
+      ok: false,
+      reason:
+        `Refusing to scan outside configured D365FO package roots.\n` +
+        `  path:    ${dirPath}\n` +
+        `  allowed: ${roots.join(' | ') || '(none configured)'}`,
+    };
+  }
+
+  return { ok: true, canonicalPath: canonical, matchedRoot };
+}
+
+/**
+ * Check that a single file path (e.g. a glob result) still resolves under
+ * `rootDir` after symlink resolution. Call this on every file returned by
+ * a glob that was rooted at a validated workspace path — a symlink inside
+ * the workspace could otherwise redirect a read outside the allowed root.
+ */
+export function isFileUnderRoot(filePath: string, rootDir: string): boolean {
+  return isUnder(filePath, rootDir);
+}
