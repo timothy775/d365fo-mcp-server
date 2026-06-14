@@ -15,17 +15,17 @@ Pick the right form pattern, base it on a standard form, and add lifecycle metho
 
 ```mermaid
 flowchart LR
-    A["get_form_patterns<br/>recommend: setup, 5 fields"] -->|SimpleList + CustGroup| B["get_form_pattern_spec<br/>(SimpleList)"]
+    A["form_pattern action=analyze<br/>recommend: setup, 5 fields"] -->|SimpleList + CustGroup| B["form_pattern action=spec<br/>(SimpleList)"]
     B --> C["generate_smart<br/>objectType: form<br/>cloneFrom: CustGroup<br/>tableMapping: CustGroup→MyRentalGroup<br/>includeMethodStubs: true"]
-    C --> D[validate_form_pattern]
-    D -->|0 errors| E[create_d365fo_file]
+    C --> D[form_pattern action=validate]
+    D -->|0 errors| E[d365fo_file action=create]
     E --> F[verify_d365fo_project ✅]
 ```
 
 **Key takeaways**
 - The advisor implements Microsoft's pattern decision tree and backs it with mined usage from your own environment.
 - Cloning `CustGroup` preserves the full pattern structure (ActionPane → filters → grid, sub-patterns included); fields missing on the target table are dropped and reported.
-- Structural violations (wrong order, missing container) would **block** `create_d365fo_file` — the form opens clean in Visual Studio on the first try.
+- Structural violations (wrong order, missing container) would **block** `d365fo_file` (action=create) — the form opens clean in Visual Studio on the first try.
 
 ---
 
@@ -43,18 +43,18 @@ then generate the CoC class that inserts an audit record after the base call.
 ```mermaid
 flowchart LR
     A[get_workspace_info] --> B["find_coc_extensions +<br/>analyze_extension_points"]
-    B --> C[prepare_change<br/>signature + token]
+    B --> C[prepare mode=change<br/>signature + token]
     C --> D["labels(action=search) →<br/>labels(action=create) ×6"]
     D --> E[generate_smart objectType=table<br/>+ get_object_info table verify]
     E --> F["resolve_references<br/>+ validate_xpp"]
-    F --> G["create_d365fo_file<br/>(CoC class)"]
+    F --> G["d365fo_file action=create<br/>(CoC class)"]
     G --> H[verify_d365fo_project ✅]
 ```
 
 **Key takeaways**
 - `find_coc_extensions` before writing prevents silent duplicate wrappers — the #1 CoC mistake.
 - `get_object_info(objectType="table")` right after generation verifies what was *actually* written (EDTs may differ from the request).
-- The grounding token from `prepare_change` is required by the write tools — ungrounded code never reaches disk.
+- The grounding token from `prepare` (mode=change) is required by the write tools — ungrounded code never reaches disk.
 
 ---
 
@@ -70,16 +70,16 @@ Follow the patterns of existing batch jobs in this codebase.
 
 ```mermaid
 flowchart LR
-    A[analyze_code_patterns<br/>+ search_extensions] --> B["batch_search<br/>framework classes + EDTs"]
+    A[analyze_code mode=patterns<br/>+ search scope=extensions] --> B["search queries[]<br/>framework classes + EDTs"]
     B --> C["generate_code<br/>pattern: sysoperation"]
     C --> D["get_object_info table + edt<br/>parameter types"]
     D --> E["labels(action=search) →<br/>labels(action=create) ×2"]
-    E --> F["create_d365fo_file ×3<br/>Contract / Controller / Service"]
+    E --> F["d365fo_file action=create ×3<br/>Contract / Controller / Service"]
     F --> G[verify_d365fo_project ✅]
 ```
 
 **Key takeaways**
-- An existing `My*` DataContract from the same model is the best structural template — `search_extensions` finds it.
+- An existing `My*` DataContract from the same model is the best structural template — `search(scope="extensions")` finds it.
 - Exhaustive `labels(action="search")` before `labels(action="create")` prevents duplicate label IDs across thousands of SYS labels.
 
 ---
@@ -96,10 +96,10 @@ then add the field to the General tab of the CustTable form.
 
 ```mermaid
 flowchart LR
-    A["labels(action=search) →<br/>labels(action=create)"] --> B["create_d365fo_file<br/>(enum)"]
-    B --> C["create_d365fo_file<br/>(table extension)"]
+    A["labels(action=search) →<br/>labels(action=create)"] --> B["d365fo_file action=create<br/>(enum)"]
+    B --> C["d365fo_file action=create<br/>(table extension)"]
     C --> D["get_object_info form<br/>exact tab names"]
-    D --> E["modify_d365fo_file<br/>add-control → TabGeneral"]
+    D --> E["d365fo_file action=modify<br/>add-control → TabGeneral"]
     E --> F[verify_d365fo_project ✅]
 ```
 
@@ -121,9 +121,9 @@ validate the name MY_VendPaymTermsMaintain, then create the privilege and duty.
 
 ```mermaid
 flowchart LR
-    A["get_security_coverage_for_object<br/>full chain for the form"] --> B["get_security_artifact_info ×N<br/>candidate duties/privileges"]
+    A["security_info mode=coverage<br/>full chain for the form"] --> B["security_info mode=artifact ×N<br/>candidate duties/privileges"]
     B --> C[validate_object_naming]
-    C --> D["create_d365fo_file ×2<br/>privilege + duty"]
+    C --> D["d365fo_file action=create ×2<br/>privilege + duty"]
     D --> E[verify_d365fo_project ✅]
 ```
 
@@ -146,16 +146,16 @@ MyLedgerInventAdjustmentService with create-header, add-lines, and post methods.
 
 ```mermaid
 flowchart LR
-    A["get_object_info table ×3<br/>journal + invent tables"] --> B["get_api_usage_patterns<br/>real call sequences"]
-    B --> C["get_method_signature ×7<br/>exact parameter order"]
-    C --> D["search_extensions<br/>existing My* service template"]
-    D --> E["labels(action=create) ×3 →<br/>create_d365fo_file"]
+    A["get_object_info table ×3<br/>journal + invent tables"] --> B["analyze_code mode=api-usage<br/>real call sequences"]
+    B --> C["get_method include=signature ×7<br/>exact parameter order"]
+    C --> D["search scope=extensions<br/>existing My* service template"]
+    D --> E["labels(action=create) ×3 →<br/>d365fo_file action=create"]
     E --> F[verify_d365fo_project ✅]
 ```
 
 **Key takeaways**
 - Seven signature lookups before one line of code: guessing `JournalTransData.create(...)` parameters produces uncompilable X++.
-- `get_api_usage_patterns` returns compiler-resolved real callers — better than any documentation.
+- `analyze_code(mode="api-usage")` returns compiler-resolved real callers — better than any documentation.
 
 ---
 
@@ -173,16 +173,16 @@ Include a Controller so we can attach a menu item.
 flowchart LR
     A["get_object_info report<br/>study existing report"] --> B["labels(action=search) →<br/>labels(action=create) ×3"]
     B --> C["generate_smart objectType=report<br/>5 objects in one call"]
-    C --> D["create_d365fo_file ×5<br/>Tmp → Contract → DP → Controller → Report"]
+    C --> D["d365fo_file action=create ×5<br/>Tmp → Contract → DP → Controller → Report"]
     D --> E["get_object_info table<br/>InventSum + WHSZone"]
-    E --> F["modify_d365fo_file<br/>processReport() body"]
+    E --> F["d365fo_file action=modify<br/>processReport() body"]
     F --> G[verify_d365fo_project ✅]
 ```
 
 **Key takeaways**
 - `generate_smart(objectType="report")` replaces 15+ manual calls; creation order matters (TmpTable before DP for `tableStr` resolution).
 - `processReport()` is intentionally a TODO skeleton — query logic is added after studying the source tables, not guessed.
-- On a Windows VM the files are written directly; the per-file `create_d365fo_file` step is the Azure/Linux path.
+- On a Windows VM the files are written directly; the per-file `d365fo_file` (action=create) step is the Azure/Linux path.
 
 ---
 

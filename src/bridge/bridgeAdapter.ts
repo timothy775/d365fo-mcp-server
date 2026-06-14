@@ -195,7 +195,7 @@ function formatClass(cls: BridgeClassInfo, compact: boolean, methodOffset: numbe
       out += `### ${m.name}\n\n`;
       if (m.source) {
         const preview = m.source.substring(0, 500);
-        out += `\`\`\`xpp\n${preview}${m.source.length > 500 ? '\n// ... (use get_method_source for full body)' : ''}\n\`\`\`\n\n`;
+        out += `\`\`\`xpp\n${preview}${m.source.length > 500 ? '\n// ... (use get_method(include="source") for full body)' : ''}\n\`\`\`\n\n`;
       }
     }
   }

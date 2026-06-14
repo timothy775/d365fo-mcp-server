@@ -139,7 +139,7 @@ export async function classInfoTool(request: CallToolRequest, context: XppServer
           output += `**Documentation:**\n${method.documentation}\n\n`;
         }
         
-        output += `\`\`\`xpp\n${method.source.substring(0, 200)}${method.source.length > 200 ? '\n// ... (use get_method_signature for full body)' : ''}\n\`\`\`\n\n`;
+        output += `\`\`\`xpp\n${method.source.substring(0, 200)}${method.source.length > 200 ? '\n// ... (use get_method(include="signature") for full body)' : ''}\n\`\`\`\n\n`;
       }
     }
 
@@ -201,7 +201,7 @@ async function buildDbOnlyResponse(
   if (hasMore) {
     output += `\n> ⚠️ ${totalMethods - methodOffset - METHOD_PAGE_SIZE} more — call with \`methodOffset: ${methodOffset + METHOD_PAGE_SIZE}\`\n`;
   }
-  output += `\n> 💡 Use \`get_method_signature\` for a full method body.\n`;
+  output += `\n> 💡 Use \`get_method(include="signature")\` for a full method body.\n`;
 
   return { content: [{ type: 'text', text: output }] };
 }

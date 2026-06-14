@@ -146,7 +146,7 @@ export function formatStructuredDiagnostics(diagnostics: XppcDiagnostic[], maxIt
   }
   if (errors.length > 0) {
     lines.push('');
-    lines.push('Fix the errors with modify_d365fo_file (use the object/line references above), then rebuild.');
+    lines.push('Fix the errors with d365fo_file(action="modify") (use the object/line references above), then rebuild.');
   }
   return lines.join('\n');
 }

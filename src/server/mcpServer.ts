@@ -199,45 +199,47 @@ export function createXppMcpServer(context: XppServerContext): Server {
       tools: [
         {
           name: 'search',
-          description: 'Search pre-indexed D365FO objects by name or keywords. Returns name, type, model. Use batch_search for multiple queries. Use get_object_info(objectType, name) when you already know the exact name and need full details.',
+          description:
+            'Search pre-indexed D365FO objects by name or keyword. Three modes in ONE tool:\n' +
+            '• single (default) → pass `query`; returns name, type, model.\n' +
+            '• batch → pass `queries[]` (max 10) to run searches in parallel (3× faster, with dedup + cross-reference).\n' +
+            '• extensions → set `scope:"extensions"` to restrict to custom/ISV models only (filters out Microsoft standard code). Model names in those results are SOURCE models — never use them as create/modify targets.\n' +
+            'Use get_object_info(objectType, name) when you already know the exact name and need full details.',
           inputSchema: {
             type: 'object',
             properties: {
-              query: { type: 'string', description: 'Search query (class name, method name, table name, etc.)' },
-              type: { 
-                type: 'string', 
+              scope: {
+                type: 'string',
+                enum: ['all', 'extensions'],
+                default: 'all',
+                description: '[single] Search the whole index ("all", default) or only custom/ISV models ("extensions"). Ignored when `queries[]` is provided.',
+              },
+              query: { type: 'string', description: '[single|extensions] Search query (class name, method name, table name, etc.). REQUIRED unless using batch `queries[]`.' },
+              type: {
+                type: 'string',
                 enum: ['class', 'table', 'field', 'method', 'enum', 'edt', 'form', 'query', 'view', 'report',
                   'security-privilege', 'security-duty', 'security-role',
                   'menu-item-display', 'menu-item-action', 'menu-item-output',
                   'table-extension', 'class-extension', 'form-extension',
                   'enum-extension', 'edt-extension', 'data-entity-extension',
                   'all'],
-                description: 'Filter by object type (class=AxClass, table=AxTable, enum=AxEnum, edt=AxEdt, form=AxForm, query=AxQuery, view=AxView, report=AxReport, security-privilege/duty/role=security objects, menu-item-display/action/output=menu items, table/class/form/enum/edt-extension=extensions, data-entity-extension=DE extensions, all=no filter)',
+                description: '[single] Filter by object type (class=AxClass, table=AxTable, enum=AxEnum, edt=AxEdt, form=AxForm, query=AxQuery, view=AxView, report=AxReport, security-privilege/duty/role=security objects, menu-item-display/action/output=menu items, table/class/form/enum/edt-extension=extensions, data-entity-extension=DE extensions, all=no filter)',
                 default: 'all'
               },
-              limit: { type: 'number', description: 'Maximum results to return', default: 20 },
+              prefix: { type: 'string', description: '[extensions] Extension prefix filter (e.g., ISV_, Custom_).' },
+              limit: { type: 'number', description: '[single|extensions] Maximum results to return', default: 20 },
               workspacePath: {
                 type: 'string',
-                description: 'Optional workspace path to search local project files in addition to external metadata',
+                description: '[single] Optional workspace path to search local project files in addition to external metadata',
               },
               includeWorkspace: {
                 type: 'boolean',
                 default: false,
-                description: 'Whether to include workspace files in search results (workspace-aware search)',
+                description: '[single] Whether to include workspace files in search results (workspace-aware search)',
               },
-            },
-            required: ['query'],
-          },
-        },
-        {
-          name: 'batch_search',
-          description: 'Execute multiple symbol searches in parallel (max 10). 3x faster than sequential search calls. Supports deduplication and cross-referencing across results.',
-          inputSchema: {
-            type: 'object',
-            properties: {
               queries: {
                 type: 'array',
-                description: 'Array of search queries to execute in parallel (max 10 queries)',
+                description: '[batch] Array of search queries to execute in parallel (max 10). When provided, runs in batch mode and `scope`/`query` are ignored.',
                 minItems: 1,
                 maxItems: 10,
                 items: {
@@ -280,7 +282,7 @@ export function createXppMcpServer(context: XppServerContext): Server {
                 type: 'array',
                 maxItems: 5,
                 description:
-                  'Default type filter for queries without an explicit per-query type. ' +
+                  '[batch] Default type filter for queries without an explicit per-query type. ' +
                   'E.g. ["class"] restricts all untyped queries to classes. ' +
                   'Multiple values fan out each untyped query into one search per type.',
                 items: {
@@ -298,18 +300,17 @@ export function createXppMcpServer(context: XppServerContext): Server {
                 type: 'boolean',
                 default: true,
                 description:
-                  'When true, symbols appearing in multiple query results are collapsed. ' +
+                  '[batch] When true, symbols appearing in multiple query results are collapsed. ' +
                   'Later occurrences are replaced with a reference to the query where they first appeared.',
               },
               crossReference: {
                 type: 'boolean',
                 default: true,
                 description:
-                  'Append a cross-reference summary at the end listing symbols that appeared in multiple queries. ' +
+                  '[batch] Append a cross-reference summary at the end listing symbols that appeared in multiple queries. ' +
                   'Useful for identifying the most relevant / commonly matched objects across all searches.',
               },
             },
-            required: ['queries'],
           },
         },
         {
@@ -326,7 +327,7 @@ export function createXppMcpServer(context: XppServerContext): Server {
                 items: {
                   type: 'object',
                   properties: {
-                    name: { type: 'string', description: 'Exact object name (use search/batch_search first if unsure)' },
+                    name: { type: 'string', description: 'Exact object name (use search first if unsure)' },
                     type: {
                       type: 'string',
                       enum: ['class', 'table', 'form', 'query', 'view', 'enum', 'edt', 'report',
@@ -340,19 +341,6 @@ export function createXppMcpServer(context: XppServerContext): Server {
               },
             },
             required: ['objects'],
-          },
-        },
-        {
-          name: 'search_extensions',
-          description: 'Search only custom/ISV objects, filtering out Microsoft standard code. Model names in results are SOURCE models — never use them as target for create/modify operations.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              query: { type: 'string', description: 'Search query (class name, method name, etc.)' },
-              prefix: { type: 'string', description: 'Extension prefix filter (e.g., ISV_, Custom_)' },
-              limit: { type: 'number', description: 'Maximum results to return', default: 20 },
-            },
-            required: ['query'],
           },
         },
         {
@@ -371,7 +359,7 @@ export function createXppMcpServer(context: XppServerContext): Server {
         },
         {
           name: 'generate_code',
-          description: 'Generate X++ code from a named pattern (see pattern enum). Call analyze_code_patterns first, then generate_code, then create_d365fo_file.',
+          description: 'Generate X++ code from a named pattern (see pattern enum). Call analyze_code(mode="patterns") first, then generate_code, then d365fo_file(action="create").',
           inputSchema: {
             type: 'object',
             properties: {
@@ -418,29 +406,29 @@ export function createXppMcpServer(context: XppServerContext): Server {
           },
         },
         {
-          name: 'analyze_code_patterns',
-          description: 'Analyze the codebase to find common classes, methods, and dependencies for a scenario. Call BEFORE generate_code to learn from existing real patterns.',
+          name: 'analyze_code',
+          description:
+            'Learn from the existing codebase. Choose a `mode`:\n' +
+            '• patterns → common classes/methods/dependencies for a scenario (call BEFORE generate_code).\n' +
+            '• implementations → real implementation examples of a similar method (actual code).\n' +
+            '• completeness → missing standard methods on a class (find/exist/validate gaps).\n' +
+            '• api-usage → how an API/class is initialized and called in practice.',
           inputSchema: {
             type: 'object',
             properties: {
-              scenario: { type: 'string', description: 'Description of the scenario or functionality to analyze (e.g., "financial dimensions", "inventory transactions")' },
-              classPattern: { type: 'string', description: 'Optional class name pattern to filter results (e.g., "Helper", "Service")' },
-              limit: { type: 'number', description: 'Maximum number of pattern examples to return', default: 5 },
-            },
-            required: ['scenario'],
-          },
-        },
-        {
-          name: 'suggest_method_implementation',
-          description: 'Find real implementation examples of similar methods in the codebase. Shows how others implemented the same/similar method with actual code.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              className: { type: 'string', description: 'Name of the class containing the method' },
-              methodName: { type: 'string', description: 'Name of the method to implement' },
+              mode: {
+                type: 'string',
+                enum: ['patterns', 'implementations', 'completeness', 'api-usage'],
+                description: 'Which analysis to run.',
+              },
+              // ── mode=patterns ──────────────────────────────────────────────
+              scenario: { type: 'string', description: '[patterns] REQUIRED. Scenario/functionality to analyze (e.g., "financial dimensions", "inventory transactions").' },
+              classPattern: { type: 'string', description: '[patterns] Optional class name pattern to filter results (e.g., "Helper", "Service").' },
+              // ── mode=implementations ───────────────────────────────────────
+              methodName: { type: 'string', description: '[implementations] REQUIRED. Name of the method to implement.' },
               parameters: {
                 type: 'array',
-                description: 'Method parameters',
+                description: '[implementations] Method parameters.',
                 items: {
                   type: 'object',
                   properties: {
@@ -450,44 +438,34 @@ export function createXppMcpServer(context: XppServerContext): Server {
                   required: ['name', 'type'],
                 },
               },
-              returnType: { type: 'string', default: 'void', description: 'Method return type' },
+              returnType: { type: 'string', default: 'void', description: '[implementations] Method return type.' },
+              // ── mode=implementations|completeness ──────────────────────────
+              className: { type: 'string', description: '[implementations|completeness] REQUIRED. Class to analyze / containing the method.' },
+              // ── mode=api-usage ─────────────────────────────────────────────
+              apiName: { type: 'string', description: '[api-usage] REQUIRED. Name of the API/class to get usage patterns for.' },
+              context: { type: 'string', description: '[api-usage] Optional context to filter patterns (e.g., "initialization", "validation").' },
+              // ── shared ─────────────────────────────────────────────────────
+              limit: { type: 'number', description: '[patterns] Maximum number of pattern examples to return', default: 5 },
             },
-            required: ['className', 'methodName'],
+            required: ['mode'],
           },
         },
         {
-          name: 'analyze_class_completeness',
-          description: 'Analyze a class and suggest missing methods by comparing with similar classes in the codebase. Identifies gaps like missing find(), exist(), validate() methods.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              className: { type: 'string', description: 'Name of the class to analyze' },
-            },
-            required: ['className'],
-          },
-        },
-        {
-          name: 'get_api_usage_patterns',
-          description: 'Show how a specific API/class is actually used in the codebase: initialization sequences, method call patterns, and common parameters.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              apiName: { type: 'string', description: 'Name of the API/class to get usage patterns for' },
-              context: { type: 'string', description: 'Optional context to filter patterns (e.g., "initialization", "validation")' },
-            },
-            required: ['apiName'],
-          },
-        },
-        {
-          name: 'create_d365fo_file',
-          description: `Create a D365FO AOT object file (.xml) in the correct PackagesLocalDirectory location (UTF-8 BOM, auto-added to .rnrproj).
+          name: 'd365fo_file',
+          description: `Create, modify, or generate a D365FO AOT object. Choose an \`action\`:
+• create → write a NEW object file (.xml) into PackagesLocalDirectory (UTF-8 BOM, auto-added to .rnrproj). THIS IS THE WRITE STEP — the task is incomplete until it returns isError=false. Never treat a ⚠️/❌ response as success. Extensions: objectName="BaseObject.PrefixExtension". (Windows)
+• modify → edit an EXISTING object via IMetadataProvider (methods, fields, indexes, relations, controls, enum values, properties). APPLIES IMMEDIATELY, no dry-run — describe the change and get user confirmation BEFORE calling. Revert with undo_last_modification. Requires \`operation\`. (Windows)
+• generate → produce the XML as TEXT only, no file written (Azure/Linux fallback when create reports "requires file system access"). Save it yourself with UTF-8 BOM. ALWAYS try action=create first.
 
-⚠️ THIS IS THE WRITE STEP — analysis/generate tools only prepare the design; the task is incomplete until this tool returns isError=false. Never treat a ⚠️/❌ response as success.
-
-Extensions: objectName="BaseObject.PrefixExtension" (e.g. "CustTable.ContosoExtension"). Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member vars inside the class { }, methods after the closing }.`,
+Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member vars inside the class { }, methods after the closing }.`,
           inputSchema: {
             type: 'object',
             properties: {
+              action: {
+                type: 'string',
+                enum: ['create', 'modify', 'generate'],
+                description: 'create = new object file (write); modify = edit existing object (write); generate = XML text only (no write).',
+              },
               objectType: {
                 type: 'string',
                 enum: [
@@ -500,9 +478,11 @@ Extensions: objectName="BaseObject.PrefixExtension" (e.g. "CustTable.ContosoExte
                   'business-event', 'tile', 'kpi',
                 ],
                 description:
-                  'Type of D365FO object to create. Each security/menu-item type maps to its own AOT folder — ' +
+                  'Type of D365FO object. Each security/menu-item type maps to its own AOT folder — ' +
                   'NEVER use security-privilege for a duty or role. ' +
-                  'class-extension = [ExtensionOf] final class skeleton; business-event = BusinessEventsBase + Contract pair.'
+                  'class-extension = [ExtensionOf] final class skeleton; business-event = BusinessEventsBase + Contract pair. ' +
+                  '[modify] supported: class, table, form, enum, query, view, edt, data-entity, report and their *-extension variants. ' +
+                  '[generate] supported: class, table, enum, form, query, view, data-entity, report and table/form/enum/edt/data-entity-extension.'
               },
               objectName: {
                 type: 'string',
@@ -569,59 +549,181 @@ Extensions: objectName="BaseObject.PrefixExtension" (e.g. "CustTable.ContosoExte
               groundingToken: {
                 type: 'string',
                 description:
-                  'Provenance token from prepare_change/prepare_create. Required for *-extension objectTypes when ' +
+                  'Provenance token from prepare(change/create). Required for *-extension objectTypes when ' +
                   'GROUNDING_ENFORCE=true; object-bound — only valid for the object it was issued for.',
               },
-            },
-            required: ['objectType', 'objectName'],
-          },
-        },
-        {
-          name: 'generate_d365fo_xml',
-          description: '⚠️ CLOUD/AZURE ONLY - LAST RESORT: Generates D365FO XML content as TEXT (does NOT create physical file). Use ONLY when create_d365fo_file fails with "requires file system access" error (Azure/Linux deployment). Returns XML that must be manually saved using VS Code create_file tool with UTF-8 BOM encoding. ALWAYS TRY create_d365fo_file FIRST.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              objectType: {
+              // ── action=modify only ──────────────────────────────────────────
+              operation: {
                 type: 'string',
                 enum: [
-                  'class', 'table', 'enum', 'form', 'query', 'view', 'data-entity', 'report',
-                  'table-extension', 'form-extension', 'enum-extension', 'edt-extension',
-                  'data-entity-extension'
+                  'add-method', 'remove-method', 'replace-code',
+                  'add-field', 'modify-field', 'rename-field', 'replace-all-fields', 'remove-field',
+                  'add-display-method', 'add-table-method',
+                  'add-index', 'remove-index',
+                  'add-relation', 'remove-relation',
+                  'add-field-group', 'remove-field-group', 'add-field-to-field-group',
+                  'add-field-modification',
+                  'add-data-source', 'add-control',
+                  'add-enum-value', 'modify-enum-value', 'remove-enum-value',
+                  'add-menu-item-to-menu',
+                  'modify-property',
                 ],
-                description: 'Type of D365FO object to generate'
+                description:
+                  '[modify] REQUIRED. Modification to perform. Non-obvious ones:\n' +
+                  'add-method: adds OR updates in place when the method name exists (position preserved).\n' +
+                  'replace-code: surgical oldCode→newCode replacement; preferred for rewriting a known method. Form control overrides: methodName="ControlName.methodName".\n' +
+                  'rename-field: also fixes index DataField refs and TitleField1/2.\n' +
+                  'replace-all-fields: atomic rewrite of ALL fields (corrupted field names).\n' +
+                  'add-display-method: display method with [SysClientCacheDataMethodAttribute].\n' +
+                  'add-table-method: canonical find/exist/findByRecId/validateWrite/validateDelete/initValue boilerplate.\n' +
+                  'add-field-modification: override base-table field label/mandatory in a table-extension.\n' +
+                  'modify-property: any object-level property (TableGroup, TitleField1, TableType, Extends, …) — see propertyPath.'
               },
-              objectName: {
+              methodName: {
                 type: 'string',
-                description: 'Base name WITHOUT model prefix. Prefix is auto-applied from modelName. See create_d365fo_file for details.'
+                description: '[modify] Method name (required for add-method, remove-method)'
               },
-              modelName: {
+              methodCode: {
                 type: 'string',
-                description: 'Model name from .mcp.json (determines prefix). DO NOT use model names from search results.'
+                description:
+                  '[modify:add-method] Full X++ method source: modifiers + return type + name + params + body + attributes ' +
+                  '(alias of sourceCode). A bare body gets its signature assembled from methodModifiers/methodReturnType/methodName/methodParameters.'
               },
-              sourceCode: {
+              methodModifiers: {
                 type: 'string',
-                description: `X++ source code for the object.\n\nFOR CLASSES — same format as create_d365fo_file:\n  • Member variable declarations MUST be inside the class { } header block → goes to <Declaration>\n  • Methods follow AFTER the closing } of the class header → each becomes a <Method>\n\nExample:\n  public class MyClass\n  {\n      int myVar;\n      Qty myQty;\n  }\n  public void myMethod() { }`
+                description: '[modify] Method modifiers (e.g., "public static")'
               },
-              properties: {
-                type: 'object',
-                description: `Additional properties depending on objectType:
-- class/form/query/view: extends, implements, label
-- table: label, tableGroup, fields[]
-- enum: label, useEnumValue, configurationKey, isExtensible, enumValues[{name,value?,label?,helpText?}]
-- table-extension: fields[{name,edt?,enumType?,label?,mandatory?,fieldType?}] — fieldType defaults to AxTableFieldString; use AxTableFieldEnum for enum-based fields (also set enumType)
-- report (ALL REQUIRED for correct XML):
-    dpClassName   {string}  Data Provider class name (e.g. "ContosoInventByZoneDP")
-    tmpTableName  {string}  TempDB table name        (e.g. "ContosoInventByZoneTmp")
-    datasetName   {string}  Dataset name — defaults to tmpTableName if omitted
-    designName    {string}  Design name              (default: "Report")
-    caption       {string}  Design caption label ref (e.g. "@MyModel:MyLabel")
-    style         {string}  Design style             (e.g. "TableStyleTemplate")
-    fields        {Array}   [{name, alias?, dataType?, caption?}] → AxReportDataSetField entries
-    rdlContent    {string}  Full RDL XML to embed in <Text><![CDATA[...]]></Text>`
+              methodReturnType: {
+                type: 'string',
+                description: '[modify] Return type of method (e.g., "void", "str", "boolean")'
+              },
+              methodParameters: {
+                type: 'string',
+                description: '[modify] Method parameters (e.g., "str _param1, int _param2")'
+              },
+              oldCode: {
+                type: 'string',
+                description:
+                  '[modify:replace-code] REQUIRED. Exact existing snippet to find (whitespace-trimmed match). ' +
+                  'With methodName the search is scoped to that method.'
+              },
+              newCode: {
+                type: 'string',
+                description:
+                  '[modify:replace-code] REQUIRED. Replacement for the first occurrence of oldCode; "" deletes the snippet.'
+              },
+              fieldName: {
+                type: 'string',
+                description: '[modify] Field name (required for add-field, modify-field, rename-field, remove-field)'
+              },
+              fieldNewName: {
+                type: 'string',
+                description:
+                  '[modify:rename-field] New field name. Index DataField refs and TitleField1/2 are fixed automatically; ' +
+                  'if the field was already renamed, only the index refs are repaired.'
+              },
+              fieldType: {
+                type: 'string',
+                description: '[modify] EDT name for the field (required for add-field, e.g. "InventQty", "WHSZoneId", "TransDate"). For modify-field: new EDT to set.'
+              },
+              fieldBaseType: {
+                type: 'string',
+                enum: ['String', 'Integer', 'Real', 'Date', 'DateTime', 'Int64', 'GUID', 'Enum'],
+                description:
+                  '[modify] Base type for add-field — REQUIRED when fieldType is an EDT name; selects the XML element ' +
+                  '(e.g. edt "InventQty" + "Real" → AxTableFieldReal). Defaults to String, which is WRONG for Real/Date/Int64.'
+              },
+              fieldMandatory: {
+                type: 'boolean',
+                description: '[modify] Is field mandatory (for add-field and modify-field)'
+              },
+              fieldLabel: {
+                type: 'string',
+                description: '[modify] Field label (for add-field and modify-field)'
+              },
+              fields: {
+                type: 'array',
+                description:
+                  '[modify:replace-all-fields] Full replacement field list (atomic; for corrupted field names). ' +
+                  'NEVER use PowerShell/create_file for this.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string', description: 'Field name' },
+                    edt:  { type: 'string', description: 'EDT name, e.g. "InventQty", "WHSZoneId"' },
+                    type: {
+                      type: 'string',
+                      enum: ['String', 'Integer', 'Real', 'Date', 'DateTime', 'Int64', 'GUID', 'Enum'],
+                      description:
+                        'Base type — REQUIRED alongside edt; selects AxTableFieldReal/Date/… (defaults to String, wrong for numeric/date EDTs).'
+                    },
+                    mandatory: { type: 'boolean' },
+                    label: { type: 'string' },
+                  },
+                  required: ['name'],
+                },
+              },
+              propertyPath: {
+                type: 'string',
+                description:
+                  '[modify:modify-property] Property name to set. Supported names by objectType:\n' +
+                  'table: TableGroup, TitleField1/2, TableType (TempDB/InMemory/RegularTable), CacheLookup, ClusteredIndex, PrimaryIndex, SaveDataPerCompany, Label, HelpText, Extends, SystemTable.\n' +
+                  'table-extension (stored as <AxPropertyModification>): the table names above plus ModifiedDateTime, CreatedDateTime, ModifiedBy, CreatedBy (Yes/No), CountryRegionCodes ("CZ,SK").\n' +
+                  'edt: Extends, StringSize, Label, HelpText, ReferenceTable, ReferenceField.\n' +
+                  'class: Extends, Abstract, Final, Label.\n' +
+                  'Example: propertyPath="TableGroup" propertyValue="Group".'
+              },
+              propertyValue: {
+                type: 'string',
+                description: '[modify:modify-property] New property value (required for modify-property)'
+              },
+              controlName: {
+                type: 'string',
+                description:
+                  '[modify:add-control] Name of the new form control. e.g. "MyCustPriorityTier". Becomes <Name> inside <FormControl>. ' +
+                  'MUST match the field name in the table extension so the binding works.'
+              },
+              parentControl: {
+                type: 'string',
+                description:
+                  '[modify:add-control] Name of the existing parent tab/group in the base form. e.g. "TabGeneral", "TabPageSales", "HeaderGroup". ' +
+                  'Use get_object_info(objectType="form", name=formName, options={searchControl:"General"}) to find the exact name.'
+              },
+              controlDataSource: {
+                type: 'string',
+                description: '[modify:add-control] Data source name for the control binding (e.g. "CustTable").'
+              },
+              controlDataField: {
+                type: 'string',
+                description:
+                  '[modify:add-control] Data field name for the control binding (e.g. "MyCustPriorityTier"). ' +
+                  'The field must already exist in the table or table extension before binding it here.'
+              },
+              controlType: {
+                type: 'string',
+                description:
+                  '[modify:add-control] Control type: String (default), Integer, Real, CheckBox (NoYes/boolean), ComboBox (enums), ' +
+                  'Date, DateTime, Int64, Group, Button, CommandButton, MenuFunctionButton.'
+              },
+              positionType: {
+                type: 'string',
+                description: '[modify:add-control] Optional: AfterItem | BeforeItem. Omit to append at the end of the parent.'
+              },
+              previousSibling: {
+                type: 'string',
+                description: '[modify:add-control] Name of the sibling control to position after (used with positionType=AfterItem).'
+              },
+              createBackup: {
+                type: 'boolean',
+                description: '[modify] Create backup before modification (default: false)',
+                default: false
+              },
+              workspacePath: {
+                type: 'string',
+                description: '[modify] Path to workspace for finding file'
               },
             },
-            required: ['objectType', 'objectName', 'modelName'],
+            required: ['action'],
           },
         },
         {
@@ -650,248 +752,29 @@ Extensions: objectName="BaseObject.PrefixExtension" (e.g. "CustTable.ContosoExte
           },
         },
         {
-          name: 'modify_d365fo_file',
-          description: '⚠️ WINDOWS ONLY (no Azure/Linux): Modify an existing D365FO object via IMetadataProvider — methods, fields, indexes, relations, controls, enum values, properties. ' +
-            '⚠️ APPLIES IMMEDIATELY, no dry-run: describe the change in chat and get user confirmation BEFORE calling. ' +
-            'Revert with undo_last_modification (or createBackup=true). isError=true means the change did NOT apply — never treat a ⚠️/❌ response as success.',
+          name: 'get_method',
+          description:
+            'Read a method off a class. Choose `include`:\n' +
+            '• signature → modifiers/return type/params/attributes only (cheap). REQUIRED before creating CoC extensions — wrong signatures cause compile errors.\n' +
+            '• source → full X++ body of the method.\n' +
+            '• both (default) → signature followed by source.\n' +
+            'Only call for methods confirmed to exist via get_object_info(objectType="class", ...) — never guess method names.',
           inputSchema: {
             type: 'object',
             properties: {
-              objectType: {
+              include: {
                 type: 'string',
-                enum: ['class', 'table', 'form', 'enum', 'query', 'view', 'edt', 'data-entity', 'report', 'table-extension', 'class-extension', 'form-extension', 'enum-extension'],
-                description: 'Type of D365FO object to modify'
+                enum: ['signature', 'source', 'both'],
+                default: 'both',
+                description: 'What to return: signature, source, or both (default).',
               },
-              objectName: {
-                type: 'string',
-                description: 'Name of the object to modify (e.g., CustTable, SalesTable)'
-              },
-              operation: {
-                type: 'string',
-                enum: [
-                  'add-method', 'remove-method', 'replace-code',
-                  'add-field', 'modify-field', 'rename-field', 'replace-all-fields', 'remove-field',
-                  'add-display-method', 'add-table-method',
-                  'add-index', 'remove-index',
-                  'add-relation', 'remove-relation',
-                  'add-field-group', 'remove-field-group', 'add-field-to-field-group',
-                  'add-field-modification',
-                  'add-data-source', 'add-control',
-                  'add-enum-value', 'modify-enum-value', 'remove-enum-value',
-                  'add-menu-item-to-menu',
-                  'modify-property',
-                ],
-                description:
-                  'Modification to perform. Non-obvious ones:\n' +
-                  'add-method: adds OR updates in place when the method name exists (position preserved).\n' +
-                  'replace-code: surgical oldCode→newCode replacement; preferred for rewriting a known method. Form control overrides: methodName="ControlName.methodName".\n' +
-                  'rename-field: also fixes index DataField refs and TitleField1/2.\n' +
-                  'replace-all-fields: atomic rewrite of ALL fields (corrupted field names).\n' +
-                  'add-display-method: display method with [SysClientCacheDataMethodAttribute].\n' +
-                  'add-table-method: canonical find/exist/findByRecId/validateWrite/validateDelete/initValue boilerplate.\n' +
-                  'add-field-modification: override base-table field label/mandatory in a table-extension.\n' +
-                  'modify-property: any object-level property (TableGroup, TitleField1, TableType, Extends, …) — see propertyPath.'
-              },
-              methodName: {
-                type: 'string',
-                description: 'Method name (required for add-method, remove-method)'
-              },
-              sourceCode: {
-                type: 'string',
-                description:
-                  '[add-method] PREFERRED — full X++ method source: modifiers + return type + name + params + body + attributes. ' +
-                  'Example: "public void myMethod(str _param)\\n{\\n    next myMethod(_param);\\n}". Stored as-is. Alias of methodCode.'
-              },
-              methodCode: {
-                type: 'string',
-                description:
-                  '[add-method] Alias of sourceCode (preferred). Full source is kept as-is; a bare body gets its signature ' +
-                  'assembled from methodModifiers/methodReturnType/methodName/methodParameters.'
-              },
-              methodModifiers: {
-                type: 'string',
-                description: 'Method modifiers (e.g., "public static")'
-              },
-              methodReturnType: {
-                type: 'string',
-                description: 'Return type of method (e.g., "void", "str", "boolean")'
-              },
-              methodParameters: {
-                type: 'string',
-                description: 'Method parameters (e.g., "str _param1, int _param2")'
-              },
-              oldCode: {
-                type: 'string',
-                description:
-                  '[replace-code] REQUIRED. Exact existing snippet to find (whitespace-trimmed match). ' +
-                  'With methodName the search is scoped to that method.'
-              },
-              newCode: {
-                type: 'string',
-                description:
-                  '[replace-code] REQUIRED. Replacement for the first occurrence of oldCode; "" deletes the snippet.'
-              },
-              fieldName: {
-                type: 'string',
-                description: 'Field name (required for add-field, modify-field, rename-field, remove-field)'
-              },
-              fieldNewName: {
-                type: 'string',
-                description:
-                  'New field name (required for rename-field). Index DataField refs and TitleField1/2 are fixed automatically; ' +
-                  'if the field was already renamed, only the index refs are repaired.'
-              },
-              fieldType: {
-                type: 'string',
-                description: 'EDT name for the field (required for add-field, e.g. "InventQty", "WHSZoneId", "TransDate"). For modify-field: new EDT to set.'
-              },
-              fieldBaseType: {
-                type: 'string',
-                enum: ['String', 'Integer', 'Real', 'Date', 'DateTime', 'Int64', 'GUID', 'Enum'],
-                description:
-                  'Base type for add-field — REQUIRED when fieldType is an EDT name; selects the XML element ' +
-                  '(e.g. edt "InventQty" + "Real" → AxTableFieldReal). Defaults to String, which is WRONG for Real/Date/Int64.'
-              },
-              fieldMandatory: {
-                type: 'boolean',
-                description: 'Is field mandatory (for add-field and modify-field)'
-              },
-              fieldLabel: {
-                type: 'string',
-                description: 'Field label (for add-field and modify-field)'
-              },
-              fields: {
-                type: 'array',
-                description:
-                  'Full replacement field list for replace-all-fields (atomic; for corrupted field names). ' +
-                  'NEVER use PowerShell/create_file for this.',
-                items: {
-                  type: 'object',
-                  properties: {
-                    name: { type: 'string', description: 'Field name' },
-                    edt:  { type: 'string', description: 'EDT name, e.g. "InventQty", "WHSZoneId"' },
-                    type: {
-                      type: 'string',
-                      enum: ['String', 'Integer', 'Real', 'Date', 'DateTime', 'Int64', 'GUID', 'Enum'],
-                      description:
-                        'Base type — REQUIRED alongside edt; selects AxTableFieldReal/Date/… (defaults to String, wrong for numeric/date EDTs).'
-                    },
-                    mandatory: { type: 'boolean' },
-                    label: { type: 'string' },
-                  },
-                  required: ['name'],
-                },
-              },
-              propertyPath: {
-                type: 'string',
-                description:
-                  'Property name to set (modify-property). Supported names by objectType:\n' +
-                  'table: TableGroup, TitleField1/2, TableType (TempDB/InMemory/RegularTable), CacheLookup, ClusteredIndex, PrimaryIndex, SaveDataPerCompany, Label, HelpText, Extends, SystemTable.\n' +
-                  'table-extension (stored as <AxPropertyModification>): the table names above plus ModifiedDateTime, CreatedDateTime, ModifiedBy, CreatedBy (Yes/No), CountryRegionCodes ("CZ,SK").\n' +
-                  'edt: Extends, StringSize, Label, HelpText, ReferenceTable, ReferenceField.\n' +
-                  'class: Extends, Abstract, Final, Label.\n' +
-                  'Example: propertyPath="TableGroup" propertyValue="Group".'
-              },
-              propertyValue: {
-                type: 'string',
-                description: 'New property value (required for modify-property)'
-              },
-              controlName: {
-                type: 'string',
-                description:
-                  '[add-control only] Name of the new form control. ' +
-                  'e.g. "MyCustPriorityTier". Becomes <Name> inside <FormControl>. ' +
-                  'MUST match the field name in the table extension so the binding works.'
-              },
-              parentControl: {
-                type: 'string',
-                description:
-                  '[add-control only] Name of the existing parent tab/group in the base form. ' +
-                  'e.g. "TabGeneral", "TabPageSales", "HeaderGroup". ' +
-                  'Use get_object_info(objectType="form", name=formName, options={searchControl:"General"}) to find the exact name.'
-              },
-              controlDataSource: {
-                type: 'string',
-                description: '[add-control only] Data source name for the control binding (e.g. "CustTable").'
-              },
-              controlDataField: {
-                type: 'string',
-                description:
-                  '[add-control only] Data field name for the control binding (e.g. "MyCustPriorityTier"). ' +
-                  'The field must already exist in the table or table extension before binding it here.'
-              },
-              controlType: {
-                type: 'string',
-                description:
-                  '[add-control only] Control type: String (default), Integer, Real, CheckBox (NoYes/boolean), ComboBox (enums), ' +
-                  'Date, DateTime, Int64, Group, Button, CommandButton, MenuFunctionButton.'
-              },
-              positionType: {
-                type: 'string',
-                description: '[add-control only] Optional: AfterItem | BeforeItem. Omit to append at the end of the parent.'
-              },
-              previousSibling: {
-                type: 'string',
-                description: '[add-control only] Name of the sibling control to position after (used with positionType=AfterItem).'
-              },
-              createBackup: {
-                type: 'boolean',
-                description: 'Create backup before modification (default: false)',
-                default: false
-              },
-              modelName: {
-                type: 'string',
-                description: 'Model name (auto-detected if not provided)'
-              },
-              packageName: {
-                type: 'string',
-                description: 'Package name. Auto-resolved if omitted.',
-              },
-              workspacePath: {
-                type: 'string',
-                description: 'Path to workspace for finding file'
-              },
-              groundingToken: {
-                type: 'string',
-                description:
-                  'Provenance token from prepare_change/prepare_create. Required for *-extension objectTypes when ' +
-                  'GROUNDING_ENFORCE=true; object-bound — only valid for the object it was issued for.',
-              },
-            },
-            required: ['objectType', 'objectName', 'operation'],
-          },
-        },
-        {
-          name: 'get_method_signature',
-          description: 'Get exact method signature (modifiers, return type, parameters, attributes). REQUIRED before creating CoC extensions — incorrect signatures cause compilation errors.',
-          inputSchema: {
-            type: 'object',
-            properties: {
               className: {
                 type: 'string',
                 description: 'Name of the class containing the method'
               },
               methodName: {
                 type: 'string',
-                description: 'Name of the method to get signature for'
-              },
-            },
-            required: ['className', 'methodName'],
-          },
-        },
-        {
-          name: 'get_method_source',
-          description: 'Get the full X++ source code of a specific method. Only call for methods confirmed to exist via get_object_info(objectType="class", ...) or get_method_signature — never guess method names.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              className: {
-                type: 'string',
-                description: 'Name of the class containing the method',
-              },
-              methodName: {
-                type: 'string',
-                description: 'Name of the method to retrieve source code for',
+                description: 'Name of the method'
               },
             },
             required: ['className', 'methodName'],
@@ -910,7 +793,7 @@ Extensions: objectName="BaseObject.PrefixExtension" (e.g. "CustTable.ContosoExte
               },
               name: {
                 type: 'string',
-                description: 'Exact object name (use search/batch_search first if unsure)',
+                description: 'Exact object name (use search first if unsure)',
               },
               options: {
                 type: 'object',
@@ -1076,30 +959,37 @@ Extensions: objectName="BaseObject.PrefixExtension" (e.g. "CustTable.ContosoExte
           },
         },
         {
-          name: 'get_form_patterns',
-          description: 'Form pattern advisor + usage analysis. ' +
-            'RECOMMEND MODE (preferred when creating a new form): pass recommend={entityKind, hasHeaderLines, fieldCount, usageIntent, tableName} ' +
-            'to get the right pattern via the Microsoft decision tree, reference forms to clone, and the exact next generate_smart call. ' +
-            'ANALYSIS MODE: filter by formPattern, dataSource table name, or similarTo form.',
+          name: 'form_pattern',
+          description:
+            'Form-pattern toolkit. Choose an `action`:\n' +
+            '• analyze → pattern advisor + usage analysis. RECOMMEND (preferred for a new form): pass recommend={entityKind, hasHeaderLines, fieldCount, usageIntent, tableName} for the right pattern via the Microsoft decision tree + reference forms to clone. Or filter by formPattern / dataSource / similarTo.\n' +
+            '• spec → full structure spec of a pattern or sub-pattern (required hierarchy/ordering, allowed children, reference forms, lifecycle). Call after analyze, before building.\n' +
+            '• validate → structural validator of AxForm XML (<50 ms, offline): container hierarchy/order, sub-patterns, PatternVersion. Returns FP001-FP010 violations. Call before action=create on d365fo_file.',
           inputSchema: {
             type: 'object',
             properties: {
+              action: {
+                type: 'string',
+                enum: ['analyze', 'validate', 'spec'],
+                description: 'Which form-pattern operation to run.',
+              },
+              // ── action=analyze ─────────────────────────────────────────────
               formPattern: {
                 type: 'string',
                 enum: ['DetailsTransaction', 'ListPage', 'SimpleList', 'SimpleListDetails', 'Dialog', 'DropDialog', 'FormPart', 'Lookup'],
-                description: 'D365FO form pattern to analyze',
+                description: '[analyze] D365FO form pattern to analyze',
               },
               dataSource: {
                 type: 'string',
-                description: 'Table name - find forms using this table',
+                description: '[analyze] Table name - find forms using this table',
               },
               similarTo: {
                 type: 'string',
-                description: 'Form name to find similar patterns',
+                description: '[analyze] Form name to find similar patterns',
               },
               recommend: {
                 type: 'object',
-                description: 'Pattern advisor: describe requirements, get a recommended pattern + reference forms to clone.',
+                description: '[analyze] Pattern advisor: describe requirements, get a recommended pattern + reference forms to clone.',
                 properties: {
                   entityKind: {
                     type: 'string',
@@ -1127,10 +1017,29 @@ Extensions: objectName="BaseObject.PrefixExtension" (e.g. "CustTable.ContosoExte
               },
               limit: {
                 type: 'number',
-                description: 'Maximum number of pattern examples (default: 10)',
+                description: '[analyze] Maximum number of pattern examples (default: 10)',
                 default: 10,
               },
+              // ── action=spec ────────────────────────────────────────────────
+              pattern: {
+                type: 'string',
+                description: '[spec] REQUIRED. Pattern name (id, xmlName, or alias) — e.g. "SimpleList", "DetailsMaster", or a sub-pattern like "FieldsFieldGroups".',
+              },
+              // ── action=validate ────────────────────────────────────────────
+              xml: {
+                type: 'string',
+                description: '[validate] Complete AxForm XML to validate. Provide this OR formName/filePath.',
+              },
+              formName: {
+                type: 'string',
+                description: '[validate] Name of an indexed form — XML is loaded from the metadata store.',
+              },
+              filePath: {
+                type: 'string',
+                description: '[validate] Explicit path to an AxForm XML file (e.g. a freshly created form not yet indexed).',
+              },
             },
+            required: ['action'],
           },
         },
         {
@@ -1163,7 +1072,7 @@ Extensions: objectName="BaseObject.PrefixExtension" (e.g. "CustTable.ContosoExte
             '• table → AxTable XML with intelligent field/index/relation suggestions (copyFrom, tableGroup + generateCommonFields, or fieldsHint with auto-EDTs).\n' +
             '• form → pattern-aware form generation. PREFERRED: cloneFrom + tableMapping. Alternative: formPattern + dataSource. Output validated against form-pattern catalog.\n' +
             '• report → full SSRS stack (TmpTable + Contract + DP + Controller + AxReport+RDL) in one call; fieldsHint or fields for the TmpTable, contractParams for the dialog.\n' +
-            'For tables/forms: returns XML for create_d365fo_file. For reports on Windows: files written directly; on Azure/Linux: call create_d365fo_file for each returned object.',
+            'For tables/forms: returns XML for d365fo_file(action="create"). For reports on Windows: files written directly; on Azure/Linux: call d365fo_file(action="create") for each returned object.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -1305,20 +1214,37 @@ Extensions: objectName="BaseObject.PrefixExtension" (e.g. "CustTable.ContosoExte
         },
       // ── New tools: security, menu items, extensions ──────────────────────────────
       {
-        name: 'get_security_artifact_info',
-        description: 'Get detailed info for a D365FO security privilege, duty, or role. Walks full hierarchy: Role → Duties → Privileges → Entry Points.',
+        name: 'security_info',
+        description:
+          'D365FO security lookup. Choose a `mode`:\n' +
+          '• artifact → details + full hierarchy of a named privilege/duty/role (Role → Duties → Privileges → Entry Points).\n' +
+          '• coverage → reverse chain for an object: which privileges/duties/roles grant access (object → menu items → privileges → duties → roles).',
         inputSchema: {
           type: 'object',
           properties: {
-            name: { type: 'string', description: 'Name of the security privilege, duty, or role' },
+            mode: {
+              type: 'string',
+              enum: ['artifact', 'coverage'],
+              description: 'artifact = look up a named privilege/duty/role; coverage = who can access an object.',
+            },
+            // ── mode=artifact ──────────────────────────────────────────────
+            name: { type: 'string', description: '[artifact] REQUIRED. Name of the security privilege, duty, or role' },
             artifactType: {
               type: 'string',
               enum: ['privilege', 'duty', 'role'],
-              description: 'Type of security artifact to look up',
+              description: '[artifact] REQUIRED. Type of security artifact to look up',
             },
-            includeChain: { type: 'boolean', description: 'Walk the full hierarchy (default: true)', default: true },
+            includeChain: { type: 'boolean', description: '[artifact] Walk the full hierarchy (default: true)', default: true },
+            // ── mode=coverage ──────────────────────────────────────────────
+            objectName: { type: 'string', description: '[coverage] REQUIRED. Name of the form, table, class, or menu item' },
+            objectType: {
+              type: 'string',
+              enum: ['form', 'table', 'class', 'menu-item', 'auto'],
+              description: '[coverage] Type of the object (default: auto-detect)',
+              default: 'auto',
+            },
           },
-          required: ['name', 'artifactType'],
+          required: ['mode'],
         },
       },
       {
@@ -1370,23 +1296,6 @@ Extensions: objectName="BaseObject.PrefixExtension" (e.g. "CustTable.ContosoExte
               default: 'all',
             },
           },
-        },
-      },
-      {
-        name: 'get_security_coverage_for_object',
-        description: 'Show what security privileges, duties, and roles cover a D365FO object. Traces reverse chain: object → menu items → privileges → duties → roles.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            objectName: { type: 'string', description: 'Name of the form, table, class, or menu item' },
-            objectType: {
-              type: 'string',
-              enum: ['form', 'table', 'class', 'menu-item', 'auto'],
-              description: 'Type of the object (default: auto-detect)',
-              default: 'auto',
-            },
-          },
-          required: ['objectName'],
         },
       },
       {
@@ -1483,7 +1392,7 @@ Extensions: objectName="BaseObject.PrefixExtension" (e.g. "CustTable.ContosoExte
       },
       {
         name: 'verify_d365fo_project',
-        description: 'Verify that D365FO objects exist on disk at the correct AOT path and are referenced in the .rnrproj project file. Use instead of PowerShell to check create_d365fo_file results.',
+        description: 'Verify that D365FO objects exist on disk at the correct AOT path and are referenced in the .rnrproj project file. Use instead of PowerShell to check d365fo_file(action="create") results.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1524,7 +1433,7 @@ Extensions: objectName="BaseObject.PrefixExtension" (e.g. "CustTable.ContosoExte
       // ── SDLC & Build Tools ────────────────────────────────────────────────────
       {
         name: 'update_symbol_index',
-        description: 'Index a newly generated or modified D365FO XML file immediately so references to it work without restarting the server. Call this after create_d365fo_file to make the new object instantly searchable.',
+        description: 'Index a newly generated or modified D365FO XML file immediately so references to it work without restarting the server. Call this after d365fo_file(action="create") to make the new object instantly searchable.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -1655,39 +1564,24 @@ Extensions: objectName="BaseObject.PrefixExtension" (e.g. "CustTable.ContosoExte
         },
       },
       {
-        name: 'get_d365fo_error_help',
+        name: 'get_knowledge',
         description:
-          'Diagnose D365FO / X++ compiler and runtime errors: structured root cause + step-by-step fix + corrected X++ example. ' +
-          'Covers TTS mismatch, UpdateConflict, CSUV1, SYS10028 missing next, overlayering, BP errors, and more. ' +
-          'Call this instead of guessing — X++ error semantics differ from C#/.NET.',
+          'X++ knowledge lookup. Choose a `kind`:\n' +
+          '• knowledge → queryable X++ rulebook: verified patterns, BP rules, AX2012→D365FO migration. Use BEFORE generating code. Topics incl.: select-statement, coc-authoring, bp-rules, sysoperation, event-handlers, workflow, number-sequences, security, sysda, form patterns.\n' +
+          '• error → diagnose a D365FO/X++ compiler or runtime error: structured root cause + step-by-step fix + corrected X++ example (TTS mismatch, UpdateConflict, CSUV1, SYS10028 missing next, overlayering, BP errors, …). Call this instead of guessing — X++ error semantics differ from C#/.NET.',
         inputSchema: {
           type: 'object',
           properties: {
-            errorText: {
+            kind: {
               type: 'string',
-              description: 'Full error message text as displayed in the X++ compiler or event log',
+              enum: ['knowledge', 'error'],
+              description: 'knowledge = look up an X++ topic/rule; error = diagnose an error message.',
             },
-            errorCode: {
-              type: 'string',
-              description: 'Optional error code (e.g. SYS10028, CSUV1, BPUpgradeCodeToday)',
-            },
-          },
-          required: ['errorText'],
-        },
-      },
-      {
-        name: 'get_xpp_knowledge',
-        description:
-          'Queryable X++ rulebook: verified patterns, BP rules, AX2012→D365FO migration. Use BEFORE generating code. ' +
-          'Topics incl.: select-statement, coc-authoring, bp-rules, sysoperation, event-handlers, workflow, ' +
-          'number-sequences, security, sysda, form patterns.',
-        inputSchema: {
-          type: 'object',
-          properties: {
+            // ── kind=knowledge ─────────────────────────────────────────────
             topic: {
               type: 'string',
               description:
-                'Topic to query — e.g. "batch job", "ttsbegin", "RunBase vs SysOperation", ' +
+                '[knowledge] REQUIRED. Topic to query — e.g. "batch job", "ttsbegin", "RunBase vs SysOperation", ' +
                 '"set-based operations", "CoC", "data entities", "number sequences", "security", ' +
                 '"temp tables", "today() deprecated", "query patterns", "form patterns"',
             },
@@ -1695,10 +1589,19 @@ Extensions: objectName="BaseObject.PrefixExtension" (e.g. "CustTable.ContosoExte
               type: 'string',
               enum: ['concise', 'detailed'],
               default: 'concise',
-              description: 'concise = quick reference (default), detailed = full explanation with code examples',
+              description: '[knowledge] concise = quick reference (default), detailed = full explanation with code examples',
+            },
+            // ── kind=error ─────────────────────────────────────────────────
+            errorText: {
+              type: 'string',
+              description: '[error] REQUIRED. Full error message text as displayed in the X++ compiler or event log',
+            },
+            errorCode: {
+              type: 'string',
+              description: '[error] Optional error code (e.g. SYS10028, CSUV1, BPUpgradeCodeToday)',
             },
           },
-          required: ['topic'],
+          required: ['kind'],
         },
       },
       {
@@ -1729,48 +1632,6 @@ Extensions: objectName="BaseObject.PrefixExtension" (e.g. "CustTable.ContosoExte
         },
       },
       {
-        name: 'validate_form_pattern',
-        description:
-          'Structural form-pattern validator (<50 ms, offline): container hierarchy/order, allowed child types, ' +
-          'sub-patterns, PatternVersion, datasource expectations. Returns violations {rule, severity, path, excerpt, fix} (FP001-FP010). ' +
-          'Structural errors BLOCK form writes when FORM_PATTERN_ENFORCE=true (default). ' +
-          'Call after generate_smart / manual form XML edits, before create_d365fo_file.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            xml: {
-              type: 'string',
-              description: 'Complete AxForm XML to validate. Provide this OR formName/filePath.',
-            },
-            formName: {
-              type: 'string',
-              description: 'Name of an indexed form — XML is loaded from the metadata store.',
-            },
-            filePath: {
-              type: 'string',
-              description: 'Explicit path to an AxForm XML file (e.g. a freshly created form not yet indexed).',
-            },
-          },
-        },
-      },
-      {
-        name: 'get_form_pattern_spec',
-        description:
-          'Full spec of a form pattern or container sub-pattern: required hierarchy + ordering, allowed children, ' +
-          'sub-patterns, PatternVersions, when (not) to use, reference forms to clone, lifecycle methods. ' +
-          'Call after get_form_patterns(recommend) and before building a form. Accepts ids, xmlNames and aliases.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            pattern: {
-              type: 'string',
-              description: 'Pattern name (id, xmlName, or alias) — e.g. "SimpleList", "DetailsMaster", or a sub-pattern like "FieldsFieldGroups".',
-            },
-          },
-          required: ['pattern'],
-        },
-      },
-      {
         name: 'resolve_references',
         description:
           'Semantic reference resolver (<200 ms, index-only): verifies every type, field, method (incl. arity), enum, ' +
@@ -1793,72 +1654,54 @@ Extensions: objectName="BaseObject.PrefixExtension" (e.g. "CustTable.ContosoExte
         },
       },
       {
-        name: 'prepare_change',
+        name: 'prepare',
         description:
-          'ONE-call context aggregator for extension work: exact signature, existing CoC wrappers, eligibility, ' +
-          'recommended strategy, naming validation, code patterns + groundingToken (30-min TTL, required for ' +
-          'extension writes when GROUNDING_ENFORCE=true). Replaces the analyze→search→info→generate loop.',
+          'ONE-call context aggregator + groundingToken (30-min TTL, required for extension/new-object writes when ' +
+          'GROUNDING_ENFORCE=true). Choose a `mode`:\n' +
+          '• change → extending/modifying an EXISTING object: exact signature, existing CoC wrappers, eligibility, ' +
+          'recommended strategy, naming validation, code patterns. Replaces the analyze→search→info→generate loop.\n' +
+          '• create → a NEW object: collision check, naming with auto-prefix, similar objects, EDT suggestions, ' +
+          'reusable labels, mined property defaults. Call BEFORE generating any new object.',
         inputSchema: {
           type: 'object',
           properties: {
+            mode: {
+              type: 'string',
+              enum: ['change', 'create'],
+              description: 'change = extend/modify an existing object; create = a brand-new object.',
+            },
             goal: {
               type: 'string',
-              description: 'One-sentence description of the intended change. Example: "Add CoC on CustTable.validateWrite to enforce a custom rule."',
+              description: 'One-sentence description of the intent. Example (change): "Add CoC on CustTable.validateWrite". Example (create): "Parameter table for the Contoso import feature."',
             },
             objectName: {
               type: 'string',
-              description: 'Name of the D365FO object to extend or modify. Example: "CustTable", "SalesFormLetter".',
-            },
-            methodName: {
-              type: 'string',
-              description: 'Target method name when the change involves a specific method (CoC or event handlers). Example: "validateWrite".',
-            },
-            objectType: {
-              type: 'string',
-              enum: ['class', 'table', 'form', 'query', 'view', 'enum', 'edt', 'data-entity', 'map', 'report'],
-              description: 'D365FO object type. Auto-detected from the symbol index when omitted.',
-            },
-            proposedName: {
-              type: 'string',
-              description: 'Proposed name for the new extension class/object. When provided, naming validation runs.',
-            },
-          },
-          required: ['goal', 'objectName'],
-        },
-      },
-      {
-        name: 'prepare_create',
-        description:
-          'ONE-call context aggregator for NEW objects (mirror of prepare_change): collision check, naming with auto-prefix, ' +
-          'similar objects, EDT suggestions, reusable labels, mined property defaults + groundingToken. ' +
-          'Call BEFORE generating any new object.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            goal: {
-              type: 'string',
-              description: 'One-sentence description of what the new object is for. Example: "Parameter table for the Contoso import feature."',
-            },
-            objectName: {
-              type: 'string',
-              description: 'Proposed BASE name WITHOUT model prefix (same value you would pass to create_d365fo_file). Example: "ImportParameters".',
+              description: '[change] Name of the object to extend/modify (e.g. "CustTable"). [create] Proposed BASE name WITHOUT model prefix (same value you would pass to d365fo_file create).',
             },
             objectType: {
               type: 'string',
               enum: [
                 'class', 'table', 'form', 'enum', 'edt', 'query', 'view',
-                'data-entity', 'report', 'menu-item-display', 'menu-item-action',
+                'data-entity', 'report', 'map', 'menu-item-display', 'menu-item-action',
                 'menu-item-output', 'security-privilege', 'security-duty', 'security-role',
               ],
-              description: 'Type of the new D365FO object.',
+              description: '[change] D365FO object type — auto-detected from the index when omitted. [create] REQUIRED — type of the new object.',
+            },
+            methodName: {
+              type: 'string',
+              description: '[change] Target method name when the change involves a specific method (CoC or event handlers). Example: "validateWrite".',
+            },
+            proposedName: {
+              type: 'string',
+              description: '[change] Proposed name for the new extension class/object. When provided, naming validation runs.',
             },
             fieldsHint: {
               type: 'array',
               items: { type: 'string' },
-              description: 'For tables/views: planned field names — each gets EDT suggestions from the index.',
+              description: '[create] For tables/views: planned field names — each gets EDT suggestions from the index.',
             },
           },
-          required: ['goal', 'objectName', 'objectType'],
+          required: ['mode', 'goal', 'objectName'],
         },
       },
     ],

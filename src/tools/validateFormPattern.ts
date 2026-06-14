@@ -52,10 +52,10 @@ function formatReport(report: FormPatternReport, source: string): string {
     : 'no pattern declared';
 
   if (report.violations.length === 0) {
-    lines.push(`✅ validate_form_pattern: ${source} conforms to ${header}.`);
+    lines.push(`✅ form_pattern(action="validate"): ${source} conforms to ${header}.`);
   } else {
     lines.push(
-      `${errors.length > 0 ? '❌' : '⚠️'} validate_form_pattern: ` +
+      `${errors.length > 0 ? '❌' : '⚠️'} form_pattern(action="validate"): ` +
         `${errors.length} error(s), ${warnings.length} warning(s) — ${source}, ${header}`,
     );
     lines.push('');
@@ -73,7 +73,7 @@ function formatReport(report: FormPatternReport, source: string): string {
     `Pattern coverage: ${report.coverage.containersPatterned}/${report.coverage.containersTotal} containers carry a sub-pattern.`,
   );
   if (errors.length > 0) {
-    lines.push('⛔ Fix all errors before calling create_d365fo_file — they will block the write.');
+    lines.push('⛔ Fix all errors before calling d365fo_file(action="create") — they will block the write.');
   }
   return lines.join('\n');
 }
@@ -246,7 +246,7 @@ export async function gateOnFormPatternErrors(
           `(${report.pattern ?? 'unknown'}${report.patternVersion ? ` v${report.patternVersion}` : ''}).\n\n` +
           formatReport(report, 'form XML') +
           `\n\nFix the structure (or set FORM_PATTERN_ENFORCE=false to bypass) and retry. ` +
-          `Use validate_form_pattern to iterate quickly.`,
+          `Use form_pattern(action="validate") to iterate quickly.`,
       }],
     },
     warningsText,

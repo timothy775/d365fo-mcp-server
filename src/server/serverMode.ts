@@ -37,8 +37,6 @@
  *                         workspace info — so it's excluded from read-only mode
  */
 export const LOCAL_TOOLS = new Set([
-  'create_d365fo_file',
-  'modify_d365fo_file',
   'verify_d365fo_project',
   'update_symbol_index',
   'build_d365fo_project',
@@ -48,12 +46,12 @@ export const LOCAL_TOOLS = new Set([
   'review_workspace_changes',
   'undo_last_modification',
   'get_workspace_info',
-  // Bridge-backed member readers: work in write-only mode via IMetadataProvider
-  // (no SQLite needed — bridge reads directly from disk).
+  // Bridge-backed member reader: works in write-only mode via IMetadataProvider
+  // (no SQLite needed — bridge reads directly from disk). get_method unifies the
+  // former get_method_signature + get_method_source via the `include` discriminator.
   // The bridge-backed OBJECT readers (class/table/form/…) are now reached through
   // get_object_info, which is in ALWAYS_TOOLS so it stays available in every mode.
-  'get_method_source',
-  'get_method_signature',
+  'get_method',
 ]);
 
 /**
@@ -74,6 +72,11 @@ export const ALWAYS_TOOLS = new Set([
   // access and are gated at runtime by the underlying handler returning a clear
   // error when the local filesystem isn't reachable.
   'labels',
+  // `d365fo_file` mixes a read-capable action (generate → XML text, works on
+  // Azure read-only) with write actions (create/modify → need K:\). Same gating
+  // approach as `labels`: the create/modify handlers return a clear error when
+  // the local filesystem isn't reachable.
+  'd365fo_file',
 ]);
 
 /**

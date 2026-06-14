@@ -371,7 +371,7 @@ export async function handleGenerateSmartForm(
       noteLines.push(`   Datasources re-bound: ${cloneResult.renamedDataSources.map(r => `${r.from}→${r.to}`).join(', ')}`);
     }
     if (cloneResult.strippedMethods.length > 0) {
-      noteLines.push(`   Methods stripped (re-add what you need via modify_d365fo_file add-method): ${cloneResult.strippedMethods.join(', ')}`);
+      noteLines.push(`   Methods stripped (re-add what you need via d365fo_file(action="modify") add-method): ${cloneResult.strippedMethods.join(', ')}`);
     }
     if (cloneResult.droppedFields.length > 0) {
       noteLines.push(`   ⚠️ Fields dropped (missing on target table): ${cloneResult.droppedFields.map(d => `${d.dataSource}.${d.field}`).join(', ')}`);
@@ -427,7 +427,7 @@ export async function handleGenerateSmartForm(
     }
     cloneNotes +=
       `\n   ⚠️ Pattern validation found ${patternErrors.length} error(s) in the cloned XML ` +
-      `(create_d365fo_file will block them while FORM_PATTERN_ENFORCE=true):\n` +
+      `(d365fo_file(action="create") will block them while FORM_PATTERN_ENFORCE=true):\n` +
       errorList.split('\n').map(l => `      ${l}`).join('\n');
   }
 
@@ -439,9 +439,9 @@ export async function handleGenerateSmartForm(
       : `\n> ⚠️  No model resolved — XML generated without prefix. Pass \`modelName\` with the actual model name from .mcp.json (e.g. \`"ContosoExt"\`) for correct object naming.`;
     const nextStep = [
       ``,
-      `**✅ MANDATORY NEXT STEP — immediately call \`create_d365fo_file\` with the XML below:**`,
+      `**✅ MANDATORY NEXT STEP — immediately call \`d365fo_file(action="create")\` with the XML below:**`,
       `\`\`\``,
-      `create_d365fo_file(`,
+      `d365fo_file(action="create", `,
       `  objectType="form",`,
       `  objectName="${finalName}",`,
       `  xmlContent="<copy the full XML block below>",`,
@@ -549,7 +549,7 @@ export async function handleGenerateSmartForm(
           cloneNotes,
           projectMessage,
           ``,
-          `⛔ DO NOT call \`create_d365fo_file\` — the file is already written to disk.`,
+          `⛔ DO NOT call \`d365fo_file(action="create")\` — the file is already written to disk.`,
           `⛔ DO NOT call \`generate_smart\` again — task is COMPLETE.`,
           ``,
           `Next steps for the user:`,

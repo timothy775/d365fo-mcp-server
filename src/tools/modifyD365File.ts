@@ -360,7 +360,7 @@ const ModifyD365FileArgsSchema = z.object({
   workspacePath: z.string().optional().describe('Path to workspace for finding file'),
   filePath: z.string().optional().describe(
     'Absolute path to the XML file. Use this when the object was just created and the path is already known ' +
-    '(e.g. from create_d365fo_file output). Bypasses symbol DB lookup entirely.'
+    '(e.g. from d365fo_file(action="create") output). Bypasses symbol DB lookup entirely.'
   ),
   addToProject: z.boolean().optional().default(false).describe(
     'When true, adds the modified file to the Visual Studio project (.rnrproj). ' +
@@ -374,7 +374,7 @@ const ModifyD365FileArgsSchema = z.object({
     'Path to VS solution directory. Used to find .rnrproj when projectPath is not given.'
   ),
   groundingToken: z.string().optional().describe(
-    'Provenance token returned by prepare_change. Proves the change was grounded in the indexed codebase. ' +
+    'Provenance token returned by prepare(mode="change"). Proves the change was grounded in the indexed codebase. ' +
     'Required for *-extension objectTypes when GROUNDING_ENFORCE=true on the server.'
   ),
 });
@@ -389,7 +389,7 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
     if (args.objectType.endsWith('-extension')) {
       const groundingError = enforceGrounding(
         args.groundingToken,
-        `modify_d365fo_file(objectType="${args.objectType}", objectName="${args.objectName}", operation="${args.operation}")`,
+        `d365fo_file(action="modify", objectType="${args.objectType}", objectName="${args.objectName}", operation="${args.operation}")`,
         args.objectName,
       );
       if (groundingError) return groundingError;
@@ -401,7 +401,7 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
     const referenceError = gateOnReferenceErrors(
       xppToWrite,
       context.symbolIndex,
-      `modify_d365fo_file(objectType="${args.objectType}", objectName="${args.objectName}", operation="${args.operation}")`,
+      `d365fo_file(action="modify", objectType="${args.objectType}", objectName="${args.objectName}", operation="${args.operation}")`,
     );
     if (referenceError) return referenceError;
 
@@ -517,7 +517,7 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
         `Retry options (do NOT use PowerShell — this tool can handle it):\n` +
         `  1. Pass modelName="<YourModel>" — triggers filesystem lookup by path.\n` +
         `  2. Pass filePath="K:\\\\AosService\\\\PackagesLocalDirectory\\\\<pkg>\\\\<model>\\\\${objectName}.xml" — bypasses all lookup.\n` +
-        `  3. If the object was just created, re-run create_d365fo_file first and use the returned path as filePath.`
+        `  3. If the object was just created, re-run d365fo_file(action="create") first and use the returned path as filePath.`
       );
     }
 
@@ -543,9 +543,9 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
           `Your configured model is "${configuredModel || '(not set)'}".\n` +
           `Modifying standard objects is not permitted — it can corrupt the base application.\n\n` +
           `To extend a standard object, create an extension instead:\n` +
-          `  • Table: create_d365fo_file(objectType="table-extension", objectName="${objectName}.${configuredModel || 'YourModel'}Extension")\n` +
-          `  • Class: create_d365fo_file(objectType="class-extension", objectName="${objectName}_Extension")\n` +
-          `  • Form:  create_d365fo_file(objectType="form-extension", objectName="${objectName}.${configuredModel || 'YourModel'}Extension")`
+          `  • Table: d365fo_file(action="create", objectType="table-extension", objectName="${objectName}.${configuredModel || 'YourModel'}Extension")\n` +
+          `  • Class: d365fo_file(action="create", objectType="class-extension", objectName="${objectName}_Extension")\n` +
+          `  • Form:  d365fo_file(action="create", objectType="form-extension", objectName="${objectName}.${configuredModel || 'YourModel'}Extension")`
         );
       }
     }
@@ -828,7 +828,7 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
             `  • oldCode = the exact existing snippet to find\n` +
             `  • newCode = the replacement snippet\n\n` +
             `Example:\n` +
-            `  modify_d365fo_file(objectType="form", objectName="MyForm",\n` +
+            `  d365fo_file(action="modify", objectType="form", objectName="MyForm",\n` +
             `    operation="replace-code",\n` +
             `    methodName="PostButton.clicked",\n` +
             `    oldCode="ttsbegin;",\n` +

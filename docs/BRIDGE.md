@@ -1,7 +1,7 @@
 # C# Metadata Bridge
 
 > **The C# bridge is mandatory for the MCP server to function on Windows D365FO development VMs.**
-> Without it, file creation (`create_d365fo_file`) and modification (`modify_d365fo_file`) will fail.
+> Without it, file writes via `d365fo_file` (action=create / action=modify) will fail.
 > Read-only tools fall back to SQLite, but all write operations require the bridge.
 
 The bridge connects the Node.js MCP server to Microsoft's official D365FO Dev Tools API

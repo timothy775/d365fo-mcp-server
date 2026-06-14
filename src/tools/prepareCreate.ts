@@ -28,7 +28,7 @@ export const prepareCreateArgsSchema = z.object({
   ),
   objectName: z.string().describe(
     'Proposed BASE name of the new object WITHOUT model prefix ' +
-    '(the same value you would pass to create_d365fo_file). Example: "ImportParameters".',
+    '(the same value you would pass to d365fo_file(action="create")). Example: "ImportParameters".',
   ),
   objectType: z.enum([
     'class', 'table', 'form', 'enum', 'edt', 'query', 'view',
@@ -82,7 +82,7 @@ function validateNaming(baseName: string, finalName: string, modelName: string |
   }
   const lines = [
     `Base name   : ${baseName}`,
-    `Final name  : ${finalName}${finalName !== baseName ? ' _(prefix auto-applied by create_d365fo_file)_' : ''}`,
+    `Final name  : ${finalName}${finalName !== baseName ? ' _(prefix auto-applied by d365fo_file(action="create"))_' : ''}`,
     `Model       : ${modelName ?? '(not configured — set modelName or .mcp.json)'}`,
   ];
   if (issues.length > 0) lines.push(...issues);
@@ -224,7 +224,7 @@ export async function prepareCreateTool(request: any, context: XppServerContext)
   });
 
   const lines: string[] = [
-    `# prepare_create — ${objectType} \`${finalName}\``,
+    `# prepare(mode="create") — ${objectType} \`${finalName}\``,
     '',
     `**Goal:** ${goal}`,
     '',
@@ -250,7 +250,7 @@ export async function prepareCreateTool(request: any, context: XppServerContext)
   lines.push('');
   lines.push(
     'Next: generate the object, run `resolve_references` + `validate_xpp` on the result, ' +
-    `then call \`create_d365fo_file(objectType="${objectType}", objectName="${objectName}", groundingToken=...)\`. ` +
+    `then call \`d365fo_file(action="create", objectType="${objectType}", objectName="${objectName}", groundingToken=...)\`. ` +
     'The token is bound to this object and expires in 30 minutes.',
   );
 

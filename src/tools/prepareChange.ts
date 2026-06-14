@@ -292,7 +292,7 @@ export async function prepareChangeTool(request: any, context: XppServerContext)
 
   // Format output
   const lines: string[] = [];
-  lines.push(`## prepare_change: context for \`${objectName}\`${methodName ? `::${methodName}` : ''}`);
+  lines.push(`## prepare(mode="change"): context for \`${objectName}\`${methodName ? `::${methodName}` : ''}`);
   lines.push('');
   lines.push(`**Goal:** ${goal}`);
   if (resolvedType) lines.push(`**Object type (resolved):** ${resolvedType}`);
@@ -334,10 +334,10 @@ export async function prepareChangeTool(request: any, context: XppServerContext)
   lines.push(
     process.env.GROUNDING_ENFORCE === 'true'
       ? '⚠️  **GROUNDING_ENFORCE=true** — pass `groundingToken` to `generate_code` ' +
-        '(extension patterns), `create_d365fo_file` and `modify_d365fo_file` (extension objectTypes). ' +
+        '(extension patterns), `d365fo_file(action="create")` and `d365fo_file(action="modify")` (extension objectTypes). ' +
         `The token is bound to \`${objectName}\` — it does not authorize writes to other objects. ` +
         'Token expires in 30 minutes.'
-      : 'ℹ️  Pass `groundingToken` to `generate_code`, `create_d365fo_file` or `modify_d365fo_file` ' +
+      : 'ℹ️  Pass `groundingToken` to `generate_code`, `d365fo_file(action="create")` or `d365fo_file(action="modify")` ' +
         'to confirm this context was used. Set `GROUNDING_ENFORCE=true` to require it.',
   );
 

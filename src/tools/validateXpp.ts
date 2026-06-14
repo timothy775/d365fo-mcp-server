@@ -748,7 +748,7 @@ export async function validateXppTool(
   lines.push('');
   lines.push(
     errors.length > 0
-      ? '⛔ Fix all errors before calling create_d365fo_file or modify_d365fo_file.'
+      ? '⛔ Fix all errors before calling d365fo_file(action="create") or d365fo_file(action="modify").'
       : '⚠️  Address warnings where practical, then proceed.',
   );
 

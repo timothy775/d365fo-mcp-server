@@ -51,7 +51,7 @@
 
   <!-- Tool handlers -->
   <rect x="340" y="260" width="560" height="110" rx="8" fill="#ffffff" stroke="#6366f1"/>
-  <text x="352" y="282" font-size="12.5" font-weight="600" fill="#4338ca">47 Tool Handlers</text>
+  <text x="352" y="282" font-size="12.5" font-weight="600" fill="#4338ca">34 Tool Handlers</text>
 
   <rect x="352" y="294" width="100" height="22" rx="11" fill="#eef2ff" stroke="#c7d2fe"/>
   <text x="402" y="309" text-anchor="middle" font-size="10.5" fill="#3730a3">Search / X-ref</text>
@@ -92,7 +92,7 @@
 
   <rect x="764" y="418" width="128" height="74" rx="6" fill="#ffffff" stroke="#fdba74"/>
   <text x="828" y="436" text-anchor="middle" font-size="11" font-weight="600" fill="#9a3412">Form patterns</text>
-  <text x="828" y="452" text-anchor="middle" font-size="9.5" fill="#7c2d12">validate_form_pattern</text>
+  <text x="828" y="452" text-anchor="middle" font-size="9.5" fill="#7c2d12">form_pattern · validate</text>
   <text x="828" y="466" text-anchor="middle" font-size="9.5" fill="#7c2d12">FP001–FP010</text>
 
   <!-- Data access -->
@@ -120,7 +120,7 @@
   <rect x="960" y="310" width="280" height="74" rx="8" fill="#ffffff" stroke="#86c79c"/>
   <text x="972" y="332" font-size="12" font-weight="600" fill="#15803d">Automation</text>
   <text x="972" y="350" font-size="10.5" fill="#475569">Azure DevOps — extract → build → upload</text>
-  <text x="972" y="366" font-size="10.5" fill="#475569">GitHub Actions — app CI · 750+ tests</text>
+  <text x="972" y="366" font-size="10.5" fill="#475569">GitHub Actions — app CI · 850+ tests</text>
 
   <!-- Legend (moved into clients column free space so it doesn't sit on top of build-time arrows) -->
   <rect x="40" y="600" width="220" height="58" rx="8" fill="#f8fafc" stroke="#e2e8f0"/>

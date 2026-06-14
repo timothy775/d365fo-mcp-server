@@ -287,9 +287,9 @@ async function renderRecommendation(symbolIndex: any, input: RecommendInput): Pr
   lines.push(`  includeMethodStubs=true`);
   lines.push(`)`);
   lines.push('```');
-  lines.push(`Then: \`validate_form_pattern(xml=...)\` → \`create_d365fo_file(objectType="form", ...)\`.`);
+  lines.push(`Then: \`form_pattern(action="validate", xml=...)\` → \`d365fo_file(action="create", objectType="form", ...)\`.`);
   lines.push('');
-  lines.push(`Use \`get_form_pattern_spec(pattern="${rec.spec.xmlName}")\` for the full structure spec (required containers, ordering, sub-patterns).`);
+  lines.push(`Use \`form_pattern(action="spec", pattern="${rec.spec.xmlName}")\` for the full structure spec (required containers, ordering, sub-patterns).`);
 
   return lines.join('\n');
 }

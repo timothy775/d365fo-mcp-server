@@ -130,7 +130,7 @@ export function enforceGrounding(
       warnedWriteOnlyBypass = true;
       console.error(
         '[provenance] ⚠️ GROUNDING_ENFORCE=true is ignored in write-only mode — ' +
-        'prepare_change tokens are issued by the read-only instance and cannot be ' +
+        'prepare(mode="change") tokens are issued by the read-only instance and cannot be ' +
         'validated in this process. Remove GROUNDING_ENFORCE from the local companion .env.',
       );
     }
@@ -150,7 +150,7 @@ export function enforceGrounding(
           (bundle.context.proposedName ? ` (proposed: \`${bundle.context.proposedName}\`)` : '') +
           `, but this call targets \`${targetObjectName}\`.\n\n` +
           `**Required workflow:**\n` +
-          `1. Call \`prepare_change(goal="...", objectName="${targetObjectName}")\` for THIS object.\n` +
+          `1. Call \`prepare(mode="change", goal="...", objectName="${targetObjectName}")\` for THIS object.\n` +
           `2. Pass the returned \`groundingToken\` to this tool.\n\n` +
           `Tokens are object-bound — one token cannot authorize writes to a different object.`,
       }],
@@ -167,7 +167,7 @@ export function enforceGrounding(
         `❌ Grounding required for ${operationDescription} (GROUNDING_ENFORCE=true).\n\n` +
         `Reason: ${reason}.\n\n` +
         `**Required workflow:**\n` +
-        `1. Call \`prepare_change(goal="...", objectName="...")\` to gather facts from the D365FO index.\n` +
+        `1. Call \`prepare(mode="change", goal="...", objectName="...")\` to gather facts from the D365FO index.\n` +
         `2. Pass the returned \`groundingToken\` as a parameter to this tool.\n\n` +
         `This ensures generated extension code is grounded in your actual codebase, not AI training data.\n\n` +
         `To disable enforcement (direct API / human use): set \`GROUNDING_ENFORCE=false\` in the server .env.`,

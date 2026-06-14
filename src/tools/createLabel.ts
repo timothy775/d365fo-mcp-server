@@ -384,7 +384,7 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
               `AxLabelFile "${labelFileId}" not found in model "${model}" ` +
               `(expected path: ${labelResourcesDir}).\n\n` +
               `Set createLabelFileIfMissing=true to create the label file from scratch, ` +
-              `or use create_d365fo_file to scaffold the label file first.`,
+              `or use d365fo_file(action="create") to scaffold the label file first.`,
           },
         ],
         isError: true,

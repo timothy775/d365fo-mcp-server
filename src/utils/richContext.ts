@@ -144,7 +144,7 @@ export function generateRelatedSearches(
   // Pattern 5: Extension search suggestion
   if (results.length > 0 && !queryLower.includes('custom')) {
     suggestions.push({
-      query: `search_extensions for "${query}"`,
+      query: `search(scope="extensions") for "${query}"`,
       reason: 'Find custom/ISV extensions'
     });
   }
@@ -267,8 +267,8 @@ export function generateContextualTips(
       tip: 'Try a broader search term or use wildcard patterns (e.g., "Dim*" for all classes starting with Dim)'
     });
     tips.push({
-      tip: 'Use search_extensions() to search only in custom/ISV code',
-      tool: 'search_extensions'
+      tip: 'Use search(scope="extensions") to search only in custom/ISV code',
+      tool: 'search'
     });
     
     // Query-specific suggestions for empty results
@@ -300,8 +300,8 @@ export function generateContextualTips(
 
     if (firstClass.usageFrequency && firstClass.usageFrequency > 10) {
       tips.push({
-        tip: `Use get_api_usage_patterns("${firstClass.name}") to see how this frequently-used class is initialized and used`,
-        tool: 'get_api_usage_patterns'
+        tip: `Use analyze_code(mode="api-usage", apiName="${firstClass.name}") to see how this frequently-used class is initialized and used`,
+        tool: 'analyze_code'
       });
     }
   }
@@ -324,8 +324,8 @@ export function generateContextualTips(
   const hasHelpers = results.some(r => r.name.includes('Helper'));
   if (hasHelpers) {
     tips.push({
-      tip: 'Helper classes often have validate(), find(), and create() methods. Use analyze_class_completeness() to check for missing patterns',
-      tool: 'analyze_class_completeness'
+      tip: 'Helper classes often have validate(), find(), and create() methods. Use analyze_code(mode="completeness", className=...) to check for missing patterns',
+      tool: 'analyze_code'
     });
   }
 

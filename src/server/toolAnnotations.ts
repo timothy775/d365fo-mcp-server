@@ -48,45 +48,33 @@ function write(
 export const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
   // ── Search & discovery ────────────────────────────────────────────────────
   search:                           read('Search D365FO index'),
-  batch_search:                     read('Batch search D365FO index'),
   batch_get_info:                   read('Batch read object info'),
-  search_extensions:                read('Search custom extensions'),
   find_references:                  read('Find references'),
   find_coc_extensions:              read('Find CoC extensions'),
   find_event_handlers:              read('Find event handlers'),
 
   // ── Object inspection ─────────────────────────────────────────────────────
   get_object_info:                  read('Read object info'),
-  get_method_signature:             read('Read method signature'),
-  get_method_source:                read('Read method source'),
+  get_method:                       read('Read method signature/source'),
   get_table_extension_info:         read('Read table extensions'),
-  get_security_artifact_info:       read('Read security artifact'),
-  get_security_coverage_for_object: read('Read security coverage'),
+  security_info:                    read('Security info (artifact/coverage)'),
 
   // ── Analysis & guidance ───────────────────────────────────────────────────
-  analyze_code_patterns:            read('Analyze code patterns'),
-  analyze_class_completeness:       read('Analyze class completeness'),
+  analyze_code:                     read('Analyze code (patterns/impl/completeness/API)'),
   analyze_extension_points:         read('Analyze extension points'),
   recommend_extension_strategy:     read('Recommend extension strategy'),
-  suggest_method_implementation:    read('Suggest method implementation'),
   suggest_edt:                      read('Suggest EDT for field'),
-  get_api_usage_patterns:           read('Get API usage patterns'),
   get_table_patterns:               read('Get table patterns'),
-  get_form_patterns:                read('Get form patterns'),
-  get_form_pattern_spec:            read('Get form pattern spec'),
-  validate_form_pattern:            read('Validate form pattern'),
-  get_xpp_knowledge:                read('Read X++ knowledge base'),
-  get_d365fo_error_help:            read('Look up D365FO error help'),
+  form_pattern:                     read('Form patterns (analyze/validate/spec)'),
+  get_knowledge:                    read('X++ knowledge / error help'),
   code_completion:                  read('Suggest code completions'),
   validate_object_naming:           read('Validate object naming'),
   validate_xpp:                     read('Validate X++ code'),
   resolve_references:               read('Resolve symbol references'),
-  prepare_change:                   read('Prepare grounded change context'),
-  prepare_create:                   read('Prepare grounded create context'),
+  prepare:                          read('Prepare grounded context'),
 
   // ── Text generation (no disk writes) ──────────────────────────────────────
   generate_code:                    read('Generate X++ code pattern'),
-  generate_d365fo_xml:              read('Generate D365FO XML'),
 
   // ── Diagnostics ───────────────────────────────────────────────────────────
   get_workspace_info:               read('Read workspace configuration'),
@@ -95,8 +83,10 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
   run_bp_check:                     read('Run Best Practices check'),
 
   // ── File & label writes ───────────────────────────────────────────────────
-  create_d365fo_file:               write('Create D365FO object file'),
-  modify_d365fo_file:               write('Modify D365FO object file', { destructive: true }),
+  // `d365fo_file` covers create (new file), modify (edit existing — destructive),
+  // and generate (XML text only, no write). Marked as a destructive write tool so
+  // clients prompt for confirmation; the generate action is still safe to call.
+  d365fo_file:                      write('D365FO file (create/modify/generate)', { destructive: true }),
   // `labels` exposes read actions (search/info) and write actions (create/rename).
   // Marked as a write tool so clients prompt for confirmation; the read actions
   // are still safe to call — the tool annotations are hints, not gates.

@@ -43,10 +43,10 @@ const HEAVY_TOOLS = new Set<string>([
 ]);
 
 const FAST_TOOLS = new Set<string>([
-  'search', 'batch_search', 'batch_get_info',
+  'search', 'batch_get_info',
   'get_object_info',
-  'get_method_signature', 'get_method_source',
-  'get_table_extension_info', 'get_security_artifact_info',
+  'get_method',
+  'get_table_extension_info', 'security_info',
   // `labels` is NOT here — write actions (create/rename) can scan many files and exceed the fast timeout.
 ]);
 

@@ -115,7 +115,7 @@ const STRATEGY_RULES: readonly StrategyRule[] = [
     ],
     nextSteps: [
       'analyze_extension_points("TableName") — check initValue availability',
-      'get_method_signature("TableName", "initValue", includeCocTemplate: true) — get CoC template',
+      'get_method(include="signature", "TableName", "initValue", includeCocTemplate: true) — get CoC template',
     ],
     antiPatterns: [
       { wrong: 'Overriding insert()', why: 'insert() is for persistence — defaults belong in initValue()' },
@@ -146,7 +146,7 @@ const STRATEGY_RULES: readonly StrategyRule[] = [
     ],
     nextSteps: [
       'analyze_extension_points("ClassName") — see CoC-eligible methods and delegates',
-      'get_method_signature("ClassName", "methodName", includeCocTemplate: true) — get exact CoC skeleton',
+      'get_method(include="signature", "ClassName", "methodName", includeCocTemplate: true) — get exact CoC skeleton',
       'find_coc_extensions("ClassName", "methodName") — check for existing CoC wrappers',
     ],
     antiPatterns: [
@@ -178,7 +178,7 @@ const STRATEGY_RULES: readonly StrategyRule[] = [
       { mechanism: 'Dual-write', when: 'Real-time bidirectional sync with Dataverse is needed' },
     ],
     nextSteps: [
-      'get_xpp_knowledge("business events") — learn the pattern',
+      'get_knowledge(kind="knowledge", "business events") — learn the pattern',
       'generate_code(pattern="business-event", name="MyEvent") — generate skeleton',
     ],
     antiPatterns: [
@@ -211,7 +211,7 @@ const STRATEGY_RULES: readonly StrategyRule[] = [
       { mechanism: 'Composite entity', when: 'Header + lines structure needs to be imported as a document' },
     ],
     nextSteps: [
-      'get_xpp_knowledge("data-management-framework") — learn DMF patterns',
+      'get_knowledge(kind="knowledge", "data-management-framework") — learn DMF patterns',
       'search("MyTable", "data-entity") — check if an entity already exists',
       'generate_code(pattern="data-entity", name="MyEntity") — generate entity skeleton',
     ],
@@ -245,7 +245,7 @@ const STRATEGY_RULES: readonly StrategyRule[] = [
     nextSteps: [
       'get_object_info(objectType="form", name="FormName", options={searchControl:"General"}) — find exact control names and hierarchy',
       'analyze_extension_points("FormName") — check form extension points',
-      'create_d365fo_file(objectType="form-extension") — create the extension',
+      'd365fo_file(action="create", objectType="form-extension") — create the extension',
     ],
     antiPatterns: [
       { wrong: 'Overlayering the base form', why: 'Overlayering is not supported in D365FO — use extensions only' },
@@ -277,7 +277,7 @@ const STRATEGY_RULES: readonly StrategyRule[] = [
     ],
     nextSteps: [
       'get_object_info(objectType="report", name="ReportName") — inspect existing report structure',
-      'get_xpp_knowledge("ssrs-reports") — patterns for SSRS',
+      'get_knowledge(kind="knowledge", "ssrs-reports") — patterns for SSRS',
       'generate_smart(objectType="report", name="MyReport") — generate full SSRS stack',
     ],
     antiPatterns: [
@@ -304,7 +304,7 @@ const STRATEGY_RULES: readonly StrategyRule[] = [
       { mechanism: 'Custom counter table', when: 'Simple auto-increment without legal entity scope or configurable format (rare — prefer the framework)' },
     ],
     nextSteps: [
-      'get_xpp_knowledge("number-sequences") — full pattern reference',
+      'get_knowledge(kind="knowledge", "number-sequences") — full pattern reference',
       'generate_code(pattern="number-seq-handler") — generate skeleton',
     ],
     antiPatterns: [
@@ -327,16 +327,16 @@ const STRATEGY_RULES: readonly StrategyRule[] = [
     risks: [
       'Privileges are per-entry-point (menu item, web content, service) — not per table or field directly',
       'Table permissions inherit via menu item → privilege chain — broken chain = no access',
-      'Extensible enums for duty/privilege discovery: use get_security_coverage_for_object to verify the chain',
+      'Extensible enums for duty/privilege discovery: use security_info(mode="coverage") to verify the chain',
     ],
     alternatives: [
       { mechanism: 'Security policy (XDS)', when: 'Row-level security is needed (e.g. filter CustTable by user\'s allowed customers)' },
       { mechanism: 'Table permission framework override', when: 'Granting DML access without a menu item entry point (rare)' },
     ],
     nextSteps: [
-      'get_xpp_knowledge("security-privileges-duties") — security pattern reference',
-      'get_security_coverage_for_object("ObjectName") — check existing security chain',
-      'create_d365fo_file(objectType="security-privilege") — create privilege',
+      'get_knowledge(kind="knowledge", "security-privileges-duties") — security pattern reference',
+      'security_info(mode="coverage", "ObjectName") — check existing security chain',
+      'd365fo_file(action="create", objectType="security-privilege") — create privilege',
     ],
     antiPatterns: [
       { wrong: 'Hardcoded hasPermission() checks', why: 'Use the declarative security model — privilege chain enforced by the kernel' },
@@ -364,7 +364,7 @@ const STRATEGY_RULES: readonly StrategyRule[] = [
       { mechanism: 'Business Event + external processor', when: 'Processing should happen outside D365FO (e.g. Azure Function)' },
     ],
     nextSteps: [
-      'get_xpp_knowledge("sysoperation") — SysOperation patterns',
+      'get_knowledge(kind="knowledge", "sysoperation") — SysOperation patterns',
       'generate_code(pattern="sysoperation", name="MyProcess") — generate SysOperation skeleton',
       'generate_code(pattern="batch-job", name="MyBatch") — generate RunBaseBatch skeleton',
     ],

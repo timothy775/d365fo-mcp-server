@@ -15,7 +15,7 @@ graph TB
 
     subgraph "MCP Server — Node.js 24, TypeScript"
         TRANSPORT[Transport: stdio / Express HTTP\n+ rate limiting, dedup cache]
-        TOOLS[47 tool handlers]
+        TOOLS[34 tool handlers]
         GATES[Quality gates\n grounding · references · BP · form patterns]
     end
 
@@ -64,7 +64,7 @@ sequenceDiagram
         SRV->>SRC: bridge-first, SQLite fallback
         SRC-->>IDE: result (~10 ms cached)
     else write tool
-        SRV->>GATE: grounding token · resolve_references · validate_xpp · validate_form_pattern
+        SRV->>GATE: grounding token · resolve_references · validate_xpp · form_pattern (validate)
         alt gates pass
             GATE->>SRC: bridge write (IMetadataProvider)
             SRC->>SRC: invalidate SQLite + bridge state
@@ -83,10 +83,10 @@ Generated code must *prove* itself before touching disk. All gates are fail-clos
 
 | Gate | Tool / mechanism | Blocks when | Switch |
 |------|------------------|-------------|--------|
-| Provenance | `prepare_change` / `prepare_create` issue a SHA-256 grounding token (30 min TTL, object-bound) | write called without a valid token | `GROUNDING_ENFORCE` |
+| Provenance | `prepare` (mode=change/create) issues a SHA-256 grounding token (30 min TTL, object-bound) | write called without a valid token | `GROUNDING_ENFORCE` |
 | References | `resolve_references` — every type, field, method (incl. arity), enum, label checked against the index | any identifier unresolved | `GROUNDING_ENFORCE` |
 | Best practices | `validate_xpp` — 13 static rules + data-driven XML rules mined from standard models (`property_stats`) | error-severity violations | — (advisory in output) |
-| Form patterns | `validate_form_pattern` — rules FP001–FP010 against the curated pattern catalog | structural violations (FP001–FP005, FP007) | `FORM_PATTERN_ENFORCE` |
+| Form patterns | `form_pattern (action=validate)` — rules FP001–FP010 against the curated pattern catalog | structural violations (FP001–FP005, FP007) | `FORM_PATTERN_ENFORCE` |
 
 Supporting reliability mechanisms:
 
@@ -101,14 +101,14 @@ Supporting reliability mechanisms:
 
 ```mermaid
 flowchart LR
-    CAT["Curated catalog\n~19 patterns + ~20 sub-patterns\nsrc/knowledge/formPatterns"] --> ADV[get_form_patterns\nrecommend]
-    CAT --> SPEC[get_form_pattern_spec]
-    CAT --> VAL[validate_form_pattern\nFP001–FP010]
+    CAT["Curated catalog\n~19 patterns + ~20 sub-patterns\nsrc/knowledge/formPatterns"] --> ADV[form_pattern\naction=analyze]
+    CAT --> SPEC[form_pattern\naction=spec]
+    CAT --> VAL[form_pattern action=validate\nFP001–FP010]
     MINE[("form_patterns table\nmined from real forms\nduring build-database")] --> ADV
     MINE -->|cross-check report| CAT
     ADV --> GEN["generate_smart_form\nclone reference form\n+ re-bind datasources"]
     GEN --> VAL
-    VAL -->|gate| WRITE[create_d365fo_file]
+    VAL -->|gate| WRITE[d365fo_file action=create]
 ```
 
 The catalog encodes Microsoft's form patterns as data (required containers, ordering, allowed sub-patterns, versions); mining grounds it in the actual environment and reports drift after every index rebuild.
@@ -174,7 +174,7 @@ graph LR
 
 | Mode | `MCP_SERVER_MODE` | Tools exposed | Typical host |
 |------|-------------------|---------------|--------------|
-| Full | `full` (default) | all 47 | developer VM |
+| Full | `full` (default) | all 34 | developer VM |
 | Read-only | `read-only` | search/analysis | Azure App Service |
 | Write-only | `write-only` | file ops + bridge reads | hybrid local companion |
 
@@ -200,5 +200,5 @@ Index refresh is automated via [Azure DevOps pipelines](PIPELINES.md); the App S
 | Transport | MCP SDK — stdio + Express 5 HTTP |
 | Storage | better-sqlite3 (WAL, FTS5) |
 | Bridge | .NET Framework 4.8, Microsoft.Dynamics.AX.Metadata DLLs |
-| Tests | Vitest — 750+ tests, golden quality-gate suites |
+| Tests | Vitest — 850+ tests, golden quality-gate suites |
 | CI/CD | GitHub Actions (app), Azure DevOps (metadata pipelines) |

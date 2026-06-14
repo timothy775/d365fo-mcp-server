@@ -999,7 +999,7 @@ export async function handleGenerateSmartReport(
     const createCalls = generatedObjects.map(o => {
       return [
         `\`\`\``,
-        `create_d365fo_file(`,
+        `d365fo_file(action="create", `,
         `  objectType="${o.objectType}",`,
         `  objectName="${o.objectName}",`,
         `  xmlContent="<XML block #${generatedObjects.indexOf(o) + 1} below>",`,
@@ -1028,7 +1028,7 @@ export async function handleGenerateSmartReport(
           ``,
           `ℹ️ MCP server is running on Azure/Linux — file writing is handled by the local Windows companion.`,
           ``,
-          `**✅ MANDATORY NEXT STEPS — call \`create_d365fo_file\` for EACH object below, in this order:**`,
+          `**✅ MANDATORY NEXT STEPS — call \`d365fo_file(action="create")\` for EACH object below, in this order:**`,
           ``,
           createCalls,
           ``,
@@ -1072,7 +1072,7 @@ export async function handleGenerateSmartReport(
 
     // Guard: refuse to overwrite existing table files (would destroy existing methods, fields, etc.)
     if (obj.objectType === 'table' && fs.existsSync(normalizedPath)) {
-      results.push(`⚠️ ${obj.objectType}: ${normalizedPath} — SKIPPED (file already exists, would destroy existing content). Use \`modify_d365fo_file\` to modify existing tables.`);
+      results.push(`⚠️ ${obj.objectType}: ${normalizedPath} — SKIPPED (file already exists, would destroy existing content). Use \`d365fo_file(action="modify")\` to modify existing tables.`);
       log(`Skipped existing table: ${normalizedPath}`);
       continue;
     }
@@ -1108,7 +1108,7 @@ export async function handleGenerateSmartReport(
         `📦 Model: ${resolvedModel}`,
         results.join('\n'),
         ``,
-        `⛔ DO NOT call \`create_d365fo_file\` — all files are already written to disk.`,
+        `⛔ DO NOT call \`d365fo_file(action="create")\` — all files are already written to disk.`,
         `⛔ DO NOT call \`generate_smart\` again — task is COMPLETE.`,
         ``,
         `Next steps:`,

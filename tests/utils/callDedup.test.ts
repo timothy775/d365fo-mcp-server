@@ -46,7 +46,7 @@ describe('dedup cache', () => {
   });
 
   it('excludes stateful tools from dedup', () => {
-    for (const tool of ['build_d365fo_project', 'modify_d365fo_file', 'prepare_change', 'get_workspace_info']) {
+    for (const tool of ['build_d365fo_project', 'd365fo_file', 'prepare', 'get_workspace_info']) {
       expect(DEDUP_EXCLUDED_TOOLS.has(tool)).toBe(true);
     }
     expect(DEDUP_EXCLUDED_TOOLS.has('search')).toBe(false);

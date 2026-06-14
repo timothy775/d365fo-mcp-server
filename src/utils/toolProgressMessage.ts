@@ -8,57 +8,62 @@ export function buildProgressMessage(toolName: string, args: Record<string, any>
   const a = args ?? {};
   switch (toolName) {
     case 'search':
+      if (Array.isArray(a.queries)) {
+        return `🔍 Batch search: ${a.queries.map((q: any) => `"${q.query ?? q}"`).join(', ')}`;
+      }
+      if (a.scope === 'extensions') {
+        return `🔍 Searching custom extensions: "${a.query ?? ''}"`;
+      }
       return `🔍 Searching D365FO index: "${a.query ?? ''}"${a.type ? ` [${a.type}]` : ''}`;
-    case 'batch_search':
-      return `🔍 Batch search: ${Array.isArray(a.queries) ? a.queries.map((q: any) => `"${q.query ?? q}"`).join(', ') : ''}`;
-    case 'search_extensions':
-      return `🔍 Searching custom extensions: "${a.query ?? ''}"`;
     case 'get_object_info':
       return `📦 Reading ${a.objectType ?? 'object'} ${a.name ?? ''}`;
-    case 'get_method_source':
-      return `📖 Reading source of ${a.className ?? ''}.${a.methodName ?? ''}`;
-    case 'get_method_signature':
-      return `🔑 Reading signature of ${a.className ?? ''}.${a.methodName ?? ''}`;
+    case 'get_method':
+      return `📖 Reading ${a.include === 'signature' ? 'signature' : a.include === 'source' ? 'source' : 'method'} of ${a.className ?? ''}.${a.methodName ?? ''}`;
     case 'find_references':
       return `🔗 Finding references to ${a.targetName ?? ''}`;
     case 'find_coc_extensions':
       return `🔗 Finding CoC extensions of ${a.className ?? ''}${a.methodName ? `.${a.methodName}` : ''}`;
     case 'find_event_handlers':
       return `🔗 Finding event handlers for ${a.targetName ?? a.targetTable ?? ''}`;
-    case 'get_security_artifact_info':
-      return `🔒 Reading security artifact ${a.name ?? ''}`;
-    case 'get_security_coverage_for_object':
-      return `🔒 Reading security coverage for ${a.objectName ?? ''}`;
+    case 'security_info':
+      return a.mode === 'coverage'
+        ? `🔒 Reading security coverage for ${a.objectName ?? ''}`
+        : `🔒 Reading security artifact ${a.name ?? ''}`;
     case 'get_table_extension_info':
       return `🔧 Reading extensions of table ${a.tableName ?? ''}`;
     case 'analyze_extension_points':
       return `🔍 Analyzing extension points of ${a.objectName ?? ''}`;
     case 'recommend_extension_strategy':
       return `💡 Recommending extension strategy for "${a.goal ?? ''}"${a.objectName ? ` on ${a.objectName}` : ''}`;
-    case 'analyze_code_patterns':
-      return `📐 Analyzing code patterns: "${a.scenario ?? ''}"`;
-    case 'suggest_method_implementation':
-      return `💡 Suggesting implementation for ${a.className ?? ''}.${a.methodName ?? ''}`;
-    case 'analyze_class_completeness':
-      return `✅ Analyzing completeness of class ${a.className ?? ''}`;
-    case 'get_api_usage_patterns':
-      return `📐 API usage patterns for ${a.apiName ?? ''}`;
-    case 'create_d365fo_file':
-      return `📁 Creating ${a.objectType ?? 'object'} ${a.objectName ?? ''}`;
-    case 'generate_d365fo_xml':
-      return `🔧 Generating XML for ${a.objectType ?? 'object'} ${a.objectName ?? ''}`;
-    case 'modify_d365fo_file':
-      return `✏️ ${a.operation ?? 'Modifying'} on ${a.objectType ?? 'object'} ${a.objectName ?? ''}`;
+    case 'analyze_code':
+      switch (a.mode) {
+        case 'implementations': return `💡 Suggesting implementation for ${a.className ?? ''}.${a.methodName ?? ''}`;
+        case 'completeness':    return `✅ Analyzing completeness of class ${a.className ?? ''}`;
+        case 'api-usage':       return `📐 API usage patterns for ${a.apiName ?? ''}`;
+        default:                return `📐 Analyzing code patterns: "${a.scenario ?? ''}"`;
+      }
+    case 'd365fo_file':
+      switch (a.action) {
+        case 'modify':   return `✏️ ${a.operation ?? 'Modifying'} on ${a.objectType ?? 'object'} ${a.objectName ?? ''}`;
+        case 'generate': return `🔧 Generating XML for ${a.objectType ?? 'object'} ${a.objectName ?? ''}`;
+        default:         return `📁 Creating ${a.objectType ?? 'object'} ${a.objectName ?? ''}`;
+      }
     case 'generate_smart': {
       const kind = (a.objectType as string) ?? 'object';
       return `🏗️ Generating smart ${kind} ${a.name ?? ''}`;
     }
     case 'get_table_patterns':
       return `📐 Getting table patterns${a.tableGroup ? ` [${a.tableGroup}]` : ''}${a.similarTo ? ` similar to ${a.similarTo}` : ''}`;
-    case 'get_form_patterns':
-      return `📐 Getting form patterns${a.formPattern ? ` [${a.formPattern}]` : ''}`;
+    case 'form_pattern':
+      switch (a.action) {
+        case 'validate': return `✅ Validating form pattern${a.formName ? ` of ${a.formName}` : ''}`;
+        case 'spec':     return `📐 Form pattern spec${a.pattern ? `: ${a.pattern}` : ''}`;
+        default:         return `📐 Analyzing form patterns${a.formPattern ? ` [${a.formPattern}]` : ''}`;
+      }
     case 'suggest_edt':
       return `💡 Suggesting EDT for field "${a.fieldName ?? ''}"`;
+    case 'prepare':
+      return `🧭 Preparing ${a.mode === 'create' ? 'create' : 'change'} context${a.objectName ? ` for ${a.objectName}` : ''}`;
     case 'labels': {
       const action = (a.action as string) ?? '';
       switch (action) {
@@ -94,10 +99,10 @@ export function buildProgressMessage(toolName: string, args: Record<string, any>
       return `↩️ Undoing last modification${a.filePath ? ` of ${a.filePath}` : ''}`;
     case 'get_workspace_info':
       return `⚙️ Reading workspace configuration`;
-    case 'get_xpp_knowledge':
-      return `📚 Reading X++ knowledge: "${a.topic ?? ''}"`;
-    case 'get_d365fo_error_help':
-      return `🆘 Looking up D365FO error: "${String(a.errorText ?? '').slice(0, 80)}"`;
+    case 'get_knowledge':
+      return a.kind === 'error'
+        ? `🆘 Looking up D365FO error: "${String(a.errorText ?? '').slice(0, 80)}"`
+        : `📚 Reading X++ knowledge: "${a.topic ?? ''}"`;
     case 'generate_code':
       return `🔧 Generating code pattern "${a.pattern ?? ''}" for ${a.name ?? ''}`;
     case 'code_completion':

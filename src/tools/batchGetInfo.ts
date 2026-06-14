@@ -14,7 +14,7 @@ import { READER_DISPATCH, BATCH_INFO_TYPES } from './objectInfoRegistry.js';
 
 export const BatchGetInfoArgsSchema = z.object({
   objects: z.array(z.object({
-    name: z.string().describe('Exact object name (use search/batch_search first if unsure)'),
+    name: z.string().describe('Exact object name (use search/search(queries=[...]) first if unsure)'),
     type: z.enum(BATCH_INFO_TYPES).describe('Object type — selects the underlying reader'),
   })).min(1).max(10).describe('Objects to fetch in parallel (max 10)'),
 });

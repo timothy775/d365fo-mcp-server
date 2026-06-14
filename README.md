@@ -2,12 +2,12 @@
 
 <div align="center">
 
-**47 AI tools that know every X++ class, table, form, and EDT in your D365FO codebase**
+**34 AI tools that know every X++ class, table, form, and EDT in your D365FO codebase**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D24.0.0-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0-blue.svg)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/tests-750%2B-brightgreen.svg)](docs/TESTING.md)
+[![Tests](https://img.shields.io/badge/tests-850%2B-brightgreen.svg)](docs/TESTING.md)
 
 *Grounded AI development for Dynamics 365 Finance & Operations — works with GitHub Copilot and Claude Code*
 
@@ -25,7 +25,7 @@
 
 AI assistants excel at C#, Python, and JavaScript. X++ is different: your D365FO codebase is private, deeply customized, and invisible to every model — so AI confidently generates code that doesn't compile.
 
-This server pre-indexes your entire D365FO installation (580 000+ symbols across standard, ISV, and custom models) and exposes it as 47 specialized MCP tools. Every signature, every CoC wrapper, every label, every form pattern — verified against your real metadata **before** the AI writes a single line.
+This server pre-indexes your entire D365FO installation (580 000+ symbols across standard, ISV, and custom models) and exposes it as 34 specialized MCP tools. Every signature, every CoC wrapper, every label, every form pattern — verified against your real metadata **before** the AI writes a single line.
 
 ![Solution Architecture](docs/img/solution-architecture-diagram.svg)
 
@@ -45,7 +45,7 @@ This server pre-indexes your entire D365FO installation (580 000+ symbols across
 | Feature | Description |
 |---|---|
 | 🔍 **Full-codebase intelligence** | 580K+ symbols indexed: classes, tables, forms, EDTs, enums, labels (20M+ rows), security artifacts — FTS5 search in < 10 ms |
-| 🛡️ **Grounded generation** | Fail-closed gates: `prepare_change`/`prepare_create` issue grounding tokens, `resolve_references` proves every identifier, `validate_xpp` enforces best practices — hallucinated code never reaches disk |
+| 🛡️ **Grounded generation** | Fail-closed gates: `prepare` issues grounding tokens, `resolve_references` proves every identifier, `validate_xpp` enforces best practices — hallucinated code never reaches disk |
 | 🧩 **Form pattern engine** | Complete catalog of Microsoft form patterns and sub-patterns: recommends the right pattern, clones reference forms with datasource re-binding, validates structure and blocks invalid writes |
 | ✍️ **Safe metadata writes** | C# bridge uses Microsoft's own `IMetadataProvider` — no string-replacement XML corruption, automatic `.rnrproj` registration, one-call undo |
 | 🏗️ **SDLC integration** | MSBuild compilation with structured diagnostics, DB sync, xppbp best practices, SysTestRunner — all from chat |
@@ -57,10 +57,10 @@ Forms are the hardest artifact to generate correctly — each pattern dictates r
 
 ```mermaid
 flowchart LR
-    A["get_form_patterns<br/>(recommend)"] --> B["get_form_pattern_spec<br/>structure + reference forms"]
+    A["form_pattern<br/>(action=analyze)"] --> B["form_pattern<br/>(action=spec)"]
     B --> C["generate_smart<br/>objectType=form, cloneFrom"]
-    C --> D["validate_form_pattern<br/>FP001–FP010"]
-    D -->|clean| E["create_d365fo_file<br/>write + project"]
+    C --> D["form_pattern<br/>(action=validate) FP001–FP010"]
+    D -->|clean| E["d365fo_file<br/>(action=create) write + project"]
     D -->|errors| C
 ```
 
@@ -162,7 +162,7 @@ Deployment guide: [docs/SETUP_AZURE.md](docs/SETUP_AZURE.md) · CI/CD automation
 
 | Getting started | Reference | Operations |
 |-----------------|-----------|------------|
-| [Quick Start](docs/QUICK_START.md) — 5 steps to running | [All 47 tools](docs/MCP_TOOLS.md) | [Azure deployment](docs/SETUP_AZURE.md) |
+| [Quick Start](docs/QUICK_START.md) — 5 steps to running | [All 34 tools](docs/MCP_TOOLS.md) | [Azure deployment](docs/SETUP_AZURE.md) |
 | [Setup scenarios A–F](docs/SETUP.md) | [`.mcp.json` reference](docs/MCP_CONFIG.md) | [DevOps pipelines](docs/PIPELINES.md) |
 | [Claude Code setup](docs/CLAUDE_CODE_SETUP.md) | [Architecture](docs/ARCHITECTURE.md) | [Testing](docs/TESTING.md) |
 | [Usage examples](docs/USAGE_EXAMPLES.md) — real tool chains | [C# Bridge](docs/BRIDGE.md) | [Custom / ISV models](docs/CUSTOM_EXTENSIONS.md) |

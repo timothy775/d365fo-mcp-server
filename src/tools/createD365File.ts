@@ -115,7 +115,7 @@ const CreateD365FileArgsSchema = z.object({
     .string()
     .optional()
     .describe(
-      'Provenance token returned by prepare_change. Proves the change was grounded in the indexed codebase. ' +
+      'Provenance token returned by prepare(mode="change"). Proves the change was grounded in the indexed codebase. ' +
       'Required for *-extension objectTypes when GROUNDING_ENFORCE=true on the server.'
     ),
 });
@@ -583,7 +583,7 @@ ${methodsXml}\t</SourceCode>
     const baseClass = properties?.baseClass || extensionName.replace(/_[^_]+_Extension$/, '');
 
     const defaultSource = sourceCode ||
-      `[ExtensionOf(classStr(${baseClass}))]\nfinal class ${extensionName}\n{\n    // ⚠️  ALWAYS call next <methodName>() — verify exact signature with:\n    //     get_method_signature("${baseClass}", "methodName")\n    //\n    // Template for wrapping a method:\n    //   public ReturnType methodName(ParamType _param)\n    //   {\n    //       ReturnType result = next methodName(_param);\n    //       return result;\n    //   }\n}`;
+      `[ExtensionOf(classStr(${baseClass}))]\nfinal class ${extensionName}\n{\n    // ⚠️  ALWAYS call next <methodName>() — verify exact signature with:\n    //     get_method(include="signature", "${baseClass}", "methodName")\n    //\n    // Template for wrapping a method:\n    //   public ReturnType methodName(ParamType _param)\n    //   {\n    //       ReturnType result = next methodName(_param);\n    //       return result;\n    //   }\n}`;
 
     return XmlTemplateGenerator.generateAxClassXml(extensionName, defaultSource, { ...properties });
   }
@@ -3325,7 +3325,7 @@ export async function handleCreateD365File(
   if (args.objectType.endsWith('-extension')) {
     const groundingError = enforceGrounding(
       args.groundingToken,
-      `create_d365fo_file(objectType="${args.objectType}", objectName="${args.objectName}")`,
+      `d365fo_file(action="create", objectType="${args.objectType}", objectName="${args.objectName}")`,
       args.objectName,
     );
     if (groundingError) return groundingError;
@@ -3336,7 +3336,7 @@ export async function handleCreateD365File(
   const referenceError = gateOnReferenceErrors(
     args.sourceCode,
     context?.symbolIndex,
-    `create_d365fo_file(objectType="${args.objectType}", objectName="${args.objectName}")`,
+    `d365fo_file(action="create", objectType="${args.objectType}", objectName="${args.objectName}")`,
   );
   if (referenceError) return referenceError;
 
@@ -3819,7 +3819,7 @@ export async function handleCreateD365File(
               type: 'text',
               text: `⚠️ File already exists: ${normalizedFullPath}\n\nOptions:\n` +
                 `  1. Pass overwrite=true together with xmlContent to replace the file.\n` +
-                `  2. Use modify_d365fo_file to make targeted changes (rename-field, replace-all-fields, modify-property, …).\n` +
+                `  2. Use d365fo_file(action="modify") to make targeted changes (rename-field, replace-all-fields, modify-property, …).\n` +
                 `  3. Choose a different objectName.`,
             },
           ],
@@ -4023,7 +4023,7 @@ export async function handleCreateD365File(
     if (args.objectType === 'form') {
       const gate = await gateOnFormPatternErrors(
         xmlContent,
-        `create_d365fo_file(form ${finalObjectName})`,
+        `d365fo_file(action="create", form ${finalObjectName})`,
       );
       if (gate.blocked) {
         return gate.blocked;
@@ -4203,7 +4203,7 @@ export async function handleCreateD365File(
             formPatternWarnings +
             projectMessage +
             `\n${nextSteps}\n` +
-            `⛔ TASK COMPLETE — do NOT call \`generate_smart\`, \`generate_smart\`, or \`create_d365fo_file\` again for this object.`,
+            `⛔ TASK COMPLETE — do NOT call \`generate_smart\`, \`generate_smart\`, or \`d365fo_file(action="create")\` again for this object.`,
         },
       ],
     };

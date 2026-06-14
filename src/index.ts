@@ -675,10 +675,8 @@ async function main() {
 
       const toolCatalog = [
         { icon: '🔍', category: 'Search & Discovery', tools: [
-          { name: 'search',                       desc: 'Search 584K+ D365FO symbols by name or keyword' },
-          { name: 'batch_search',                 desc: 'Execute multiple searches in parallel (3x faster)' },
+          { name: 'search',                       desc: 'Search 584K+ symbols: single, batch (queries[]) or scope=extensions' },
           { name: 'batch_get_info',               desc: 'Get detailed info for up to 10 objects in one parallel call' },
-          { name: 'search_extensions',            desc: 'Search only custom/ISV models (filters out standard code)' },
           { name: 'code_completion',              desc: 'IntelliSense-style method/field listing on any object' },
         ]},
         { icon: '🏷️ ', category: 'Label Management', tools: [
@@ -686,35 +684,26 @@ async function main() {
         ]},
         { icon: '📊', category: 'Advanced Object Info', tools: [
           { name: 'get_object_info',              desc: 'Read any object by objectType: class/table/form/query/view/enum/edt/report/data-entity/menu-item/service/map/config-key/security-policy/macro' },
-          { name: 'get_method_signature',         desc: 'Exact method signature (required before CoC extensions)' },
-          { name: 'get_method_source',            desc: 'Full X++ source code of a method (complete business logic)' },
+          { name: 'get_method',                   desc: 'Method signature/source/both via include= (required before CoC extensions)' },
           { name: 'find_references',              desc: 'Where-used analysis across the entire codebase' },
         ]},
         { icon: '🧠', category: 'Intelligent Code Generation', tools: [
-          { name: 'get_xpp_knowledge',            desc: 'X++ knowledge base: D365FO patterns, best practices, AX2012→D365FO migration' },
-          { name: 'get_d365fo_error_help',        desc: 'Explain D365FO compiler, runtime and BP errors with concrete fixes' },
-          { name: 'analyze_code_patterns',        desc: 'Find common patterns used in a scenario' },
-          { name: 'suggest_method_implementation',desc: 'Real examples of similar method implementations' },
-          { name: 'analyze_class_completeness',   desc: 'Find missing standard methods on a class' },
-          { name: 'get_api_usage_patterns',       desc: 'Show how an API is initialized and called' },
+          { name: 'get_knowledge',                desc: 'kind=knowledge|error — X++ rulebook/patterns or D365FO error diagnosis' },
+          { name: 'analyze_code',                 desc: 'Learn from the codebase: mode=patterns|implementations|completeness|api-usage' },
         ]},
         { icon: '🎨', category: 'Smart Object Generation', tools: [
           { name: 'generate_smart',               desc: 'Unified pattern-aware generator: objectType=table|form|report' },
           { name: 'suggest_edt',                  desc: 'Suggest EDT for field name using fuzzy matching' },
         ]},
         { icon: '📝', category: 'File & Metadata Operations', tools: [
-          { name: 'generate_d365fo_xml',          desc: 'Generate D365FO XML content (preview / cloud-ready)' },
-          { name: 'create_d365fo_file',           desc: 'Create D365FO file in correct AOT location (Windows)' },
-          { name: 'modify_d365fo_file',           desc: 'Safely edit D365FO XML (Windows)' },
+          { name: 'd365fo_file',                  desc: 'action=create|modify|generate — write/edit AOT objects or emit XML (cloud)' },
         ]},
         { icon: '📈', category: 'Pattern Analysis', tools: [
           { name: 'get_table_patterns',           desc: 'Analyze common field/index patterns for table groups' },
-          { name: 'get_form_patterns',            desc: 'Analyze common datasource/control patterns for forms' },
           { name: 'generate_code',                desc: 'Generate X++ boilerplate (class, SysOperation, CoC, event-handler, …)' },
         ]},
         { icon: '🔐', category: 'Security & Extensions', tools: [
-          { name: 'get_security_artifact_info',   desc: 'Privilege/Duty/Role details and full hierarchy chain' },
-          { name: 'get_security_coverage_for_object', desc: 'Which roles can access a form/table/class?' },
+          { name: 'security_info',                desc: 'mode=artifact|coverage — Privilege/Duty/Role chain, or who can access an object' },
           { name: 'find_coc_extensions',          desc: 'Which classes use CoC to wrap a given method?' },
           { name: 'find_event_handlers',          desc: 'Find all [SubscribesTo] handlers for a table or class event' },
           { name: 'get_table_extension_info',     desc: 'All extensions of a table: added fields, indexes, methods' },
@@ -737,11 +726,9 @@ async function main() {
         ]},
         { icon: '✅', category: 'Code Quality & Grounding', tools: [
           { name: 'validate_xpp',                 desc: 'Offline BP validator: 18 rules (SEL/COC/BP/TTS/XML), <50 ms, no Windows required' },
-          { name: 'validate_form_pattern',        desc: 'Form pattern validator: control hierarchy/order, sub-patterns, versions (FP001-FP010)' },
-          { name: 'get_form_pattern_spec',        desc: 'Form pattern spec: required structure, sub-patterns, reference forms to clone, lifecycle guidance' },
+          { name: 'form_pattern',                 desc: 'action=analyze|validate|spec — recommend, validate (FP001-FP010), or full structure spec' },
           { name: 'resolve_references',           desc: 'Semantic resolver: every type/field/method/label in generated code proven against the index' },
-          { name: 'prepare_change',               desc: 'Single-call context aggregator: signature + CoC wrappers + grounding token' },
-          { name: 'prepare_create',               desc: 'Single-call aggregator for NEW objects: collisions + naming + EDTs + labels + token' },
+          { name: 'prepare',                      desc: 'Single-call context aggregator + grounding token: mode=change|create' },
         ]},
       ];
 

@@ -22,7 +22,7 @@ const GetObjectInfoArgsSchema = z.object({
     'Kind of object to read: class, table, form, query, view, enum, edt, report, ' +
     'data-entity, menu-item, service, map, config-key, security-policy, macro.',
   ),
-  name: z.string().min(1).describe('Exact object name (use search/batch_search first if unsure).'),
+  name: z.string().min(1).describe('Exact object name (use search/search(queries=[...]) first if unsure).'),
   options: z.record(z.string(), z.any()).optional().describe(
     'Optional type-specific flags forwarded to the reader, e.g. ' +
     '{ "compact": false } for class, { "includeRdl": true } for report, ' +

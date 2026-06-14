@@ -30,8 +30,8 @@ describe('tool inventory contract', () => {
   });
 
   it('exposes the expected total tool count', () => {
-    expect(mcpServerToolNames).toHaveLength(47);
-    expect(startupCatalogToolNames).toHaveLength(47);
+    expect(mcpServerToolNames).toHaveLength(34);
+    expect(startupCatalogToolNames).toHaveLength(34);
   });
 
   it('keeps local-only tool set aligned with the published tool inventory', () => {
@@ -40,8 +40,8 @@ describe('tool inventory contract', () => {
       expect(publishedTools.has(toolName)).toBe(true);
     }
 
-    expect(LOCAL_TOOLS.size).toBe(13);
-    expect(mcpServerToolNames.filter(name => !LOCAL_TOOLS.has(name))).toHaveLength(34);
+    expect(LOCAL_TOOLS.size).toBe(10);
+    expect(mcpServerToolNames.filter(name => !LOCAL_TOOLS.has(name))).toHaveLength(24);
   });
 
   it('has a tool annotation (title + hints) for every published tool', () => {
@@ -62,7 +62,7 @@ describe('tool inventory contract', () => {
 
   it('marks write tools as non-read-only in annotations', () => {
     const writeTools = [
-      'create_d365fo_file', 'modify_d365fo_file', 'labels',
+      'd365fo_file', 'labels',
       'undo_last_modification', 'generate_smart',
       'update_symbol_index', 'build_d365fo_project',
       'trigger_db_sync', 'run_systest_class',
@@ -75,7 +75,7 @@ describe('tool inventory contract', () => {
   it('includes critical diagnostics and SDLC tools in both inventories', () => {
     const criticalTools = [
       'get_workspace_info',
-      'get_d365fo_error_help',
+      'get_knowledge',
       'update_symbol_index',
       'build_d365fo_project',
       'run_bp_check',

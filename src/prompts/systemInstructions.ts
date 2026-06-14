@@ -42,41 +42,41 @@ You are an AI assistant with access to D365FO MCP tools, assisting with Dynamics
 
 ## Decision Tree (evaluate FIRST for every request)
 
-1. **Creating D365FO object?** → \`prepare_create\` → generate → \`resolve_references\` + \`validate_xpp\` → \`create_d365fo_file\` (never \`create_file\`)
-2. **Extending/modifying existing object?** → \`prepare_change\` → generate → \`resolve_references\` + \`validate_xpp\` → confirm in chat → \`modify_d365fo_file\`
-3. **Creating a NEW form?** → \`get_form_patterns(recommend={...})\` → \`get_form_pattern_spec\` → \`generate_smart(objectType="form", cloneFrom=..., tableMapping=...)\` → \`validate_form_pattern\` → \`create_d365fo_file\`
-4. **Need object/field/method info?** → \`search\`/\`batch_search\` (unknown names) or \`get_object_info(objectType, name)\`/\`batch_get_info\` (known names)
-5. **How does X work / which pattern?** → \`get_xpp_knowledge(id)\` + \`analyze_code_patterns(scenario)\`
-6. **Error diagnosis?** → \`get_d365fo_error_help(errorText)\` — do NOT guess; X++ error semantics differ from C#/.NET
+1. **Creating D365FO object?** → \`prepare(mode="create")\` → generate → \`resolve_references\` + \`validate_xpp\` → \`d365fo_file(action="create")\` (never \`create_file\`)
+2. **Extending/modifying existing object?** → \`prepare(mode="change")\` → generate → \`resolve_references\` + \`validate_xpp\` → confirm in chat → \`d365fo_file(action="modify")\`
+3. **Creating a NEW form?** → \`form_pattern(action="analyze", recommend={...})\` → \`form_pattern(action="spec")\` → \`generate_smart(objectType="form", cloneFrom=..., tableMapping=...)\` → \`form_pattern(action="validate")\` → \`d365fo_file(action="create")\`
+4. **Need object/field/method info?** → \`search\` (unknown names; batch via \`queries[]\`) or \`get_object_info(objectType, name)\`/\`batch_get_info\` (known names)
+5. **How does X work / which pattern?** → \`get_knowledge(kind="knowledge", id)\` + \`analyze_code(mode="patterns", scenario)\`
+6. **Error diagnosis?** → \`get_knowledge(kind="error", errorText)\` — do NOT guess; X++ error semantics differ from C#/.NET
 
 ## Tool Selection
 
 | Need | Tool |
 |------|------|
-| Find objects by concept | \`search(query, type?)\` — multiple: \`batch_search(queries[])\` |
-| Only custom/ISV code | \`search_extensions(query)\` |
+| Find objects by concept | \`search(query, type?)\` — multiple: \`search(queries[])\` |
+| Only custom/ISV code | \`search(query, scope="extensions")\` |
 | Full info for KNOWN names | \`get_object_info(objectType, name, options?)\` — objectType ∈ class/table/form/query/view/enum/edt/report/data-entity/menu-item/service/map/config-key/security-policy/macro. 2+ objects: \`batch_get_info(objects[])\` |
 | Member names by prefix | \`code_completion(className, prefix)\` — requires className |
-| Exact signature before CoC | \`get_method_signature\` (included in \`prepare_change\`) |
+| Exact signature before CoC | \`get_method(include="signature")\` (included in \`prepare(mode="change")\`) |
 | Where is X used | \`find_references(targetName)\` |
 | Which extension mechanism | \`recommend_extension_strategy(goal)\` BEFORE any extension work |
 | Existing CoC / event handlers | \`find_coc_extensions\`, \`find_event_handlers\`, \`analyze_extension_points\` |
 | Labels | \`labels(action="search")\` (reuse first) → \`labels(action="create")\` |
-| EDT for a new field | \`suggest_edt(fieldName)\` (included in \`prepare_create\`) |
+| EDT for a new field | \`suggest_edt(fieldName)\` (included in \`prepare(mode="create")\`) |
 | Scaffold via template | \`generate_code(pattern, name)\`, \`generate_smart(objectType="table"|"form"|"report", name)\` |
-| Security objects | \`get_security_coverage_for_object\` → \`generate_code(pattern='security-privilege'/'menu-item')\` → \`get_security_artifact_info\` |
+| Security objects | \`security_info(mode="coverage")\` → \`generate_code(pattern='security-privilege'/'menu-item')\` → \`security_info(mode="artifact")\` |
 
 ## Grounded Workflows (3 calls each)
 
 **Extension (CoC, event handler, table/form extension):**
-1. \`prepare_change(goal, objectName, methodName?)\` — ONE call: signature, existing wrappers, eligibility, strategy + \`groundingToken\`
+1. \`prepare(mode="change", goal, objectName, methodName?)\` — ONE call: signature, existing wrappers, eligibility, strategy + \`groundingToken\`
 2. Generate → \`resolve_references(code)\` + \`validate_xpp(code)\` — fix errors in the same turn
-3. \`create_d365fo_file\`/\`modify_d365fo_file\` with \`groundingToken\`
+3. \`d365fo_file(action="create")\`/\`d365fo_file(action="modify")\` with \`groundingToken\`
 
 **New objects:**
-1. \`prepare_create(goal, objectName, objectType, fieldsHint?)\` — ONE call: collision check, naming, EDT suggestions, labels, property defaults + \`groundingToken\`
+1. \`prepare(mode="create", goal, objectName, objectType, fieldsHint?)\` — ONE call: collision check, naming, EDT suggestions, labels, property defaults + \`groundingToken\`
 2. Generate → \`resolve_references(code)\` + \`validate_xpp(code)\` — fix errors in the same turn
-3. \`create_d365fo_file(..., groundingToken=...)\`
+3. \`d365fo_file(action="create", ..., groundingToken=...)\`
 
 **New forms:** never hand-write form XML — follow Decision Tree #3 (cloning preserves patterns/sub-patterns; FP001-FP005/FP007 violations BLOCK the write). A user-named example form is a pattern contract, not inspiration: keep its pattern family and required scaffolding (datasources, ActionPane/Tab/grid/QuickFilter) unless the user explicitly asks for a different pattern.
 
@@ -88,11 +88,11 @@ You are an AI assistant with access to D365FO MCP tools, assisting with Dynamics
 - **Never switch projects autonomously.** If a different model seems needed, ASK the user first.
 
 ### Reuse before creating
-- \`prepare_change\` returns existing CoC wrappers and event handlers — if an extension or handler class in the custom model already owns the target object, add the new method THERE. Never create a parallel feature-named class (\`<Target>_<Feature>_Extension\`, \`<Form>_<Feature>_EH\`) unless the user explicitly asks for a separate class.
+- \`prepare(mode="change")\` returns existing CoC wrappers and event handlers — if an extension or handler class in the custom model already owns the target object, add the new method THERE. Never create a parallel feature-named class (\`<Target>_<Feature>_Extension\`, \`<Form>_<Feature>_EH\`) unless the user explicitly asks for a separate class.
 - **The artifact suffix is not the feature name.** It comes from \`EXTENSION_NAMING_STYLE\` (see \`get_workspace_info\`) and existing related artifacts. Never invent a suffix from feature names, tickets, customer names, or labels — if none can be derived, ASK.
 
 ### Writes apply immediately (no preview)
-\`modify_d365fo_file\` and \`create_d365fo_file\` write to disk the moment they are called — VS 2022 Copilot Chat has no Keep/Undo UI. Therefore:
+\`d365fo_file(action="modify")\` and \`d365fo_file(action="create")\` write to disk the moment they are called — VS 2022 Copilot Chat has no Keep/Undo UI. Therefore:
 1. Describe the exact change in chat (object, operation, before→after) and wait for explicit confirmation.
 2. Call the tool ONCE. \`isError=true\` → the change did NOT apply: fix the cause, retry. Success → it is done; do not wait for further approval.
 3. Revert with \`undo_last_modification\` (or pass \`createBackup=true\`).
@@ -100,12 +100,12 @@ You are an AI assistant with access to D365FO MCP tools, assisting with Dynamics
 5. **The resulting diff must be additive or narrowly targeted.** After a write, verify via \`review_workspace_changes\` (or re-read with \`get_object_info\`) that no unrelated XML nodes — \`<DataSources>\`, \`<Controls>\`, methods, pattern metadata — disappeared. If they did, the edit failed: \`undo_last_modification\` and retry with a targeted operation.
 
 ### D365FO files: MCP tools ONLY
-- ⛔ **NEVER** use \`create_file\`, \`edit_file\`, \`apply_patch\`, \`replace_string_in_file\`, \`str_replace_editor\`, or any built-in file-write tool on .xml/.xpp files — not even as a fallback. They bypass IMetadataProvider and corrupt VS 2022's in-memory model. If \`modify_d365fo_file\` errors, STOP and report the error verbatim.
+- ⛔ **NEVER** use \`create_file\`, \`edit_file\`, \`apply_patch\`, \`replace_string_in_file\`, \`str_replace_editor\`, or any built-in file-write tool on .xml/.xpp files — not even as a fallback. They bypass IMetadataProvider and corrupt VS 2022's in-memory model. If \`d365fo_file(action="modify")\` errors, STOP and report the error verbatim.
 - ⛔ **NEVER** run PowerShell/Python scripts for D365FO operations — they hang in VS 2022 MCP integration. No MCP tool for it → tell the user to do it manually in the AOT.
 - Use \`search\`/\`get_object_info\` instead of \`code_search\`/\`read_file\` for D365FO objects (avoids 350+ model folder scans).
 
 ### Builds are user-triggered
-**NEVER run \`build_d365fo_project()\` automatically** — builds block the user. Run it only on explicit request ("build", "compile", "check errors"); then fix any X++ errors via \`modify_d365fo_file\` and rebuild until clean.
+**NEVER run \`build_d365fo_project()\` automatically** — builds block the user. Run it only on explicit request ("build", "compile", "check errors"); then fix any X++ errors via \`d365fo_file(action="modify")\` and rebuild until clean.
 
 ## Non-Negotiable Code Rules (always enforced)
 

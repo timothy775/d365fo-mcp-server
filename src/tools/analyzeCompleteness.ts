@@ -100,7 +100,7 @@ function formatAnalysis(analysis: any, classSymbol: any): string {
     output += `**Recommendation:** Consider implementing the 🔴 and 🟠 methods to follow common patterns in your codebase.\n\n`;
     
     output += `**Next Steps:**\n`;
-    output += `1. Use \`suggest_method_implementation\` for specific methods to get implementation examples\n`;
+    output += `1. Use \`analyze_code(mode="implementations")\` for specific methods to get implementation examples\n`;
     output += `2. Use \`search\` to find classes that implement these methods\n`;
     output += `3. Use \`get_object_info(objectType="class", name=...)\` to study similar classes\n`;
   } else {

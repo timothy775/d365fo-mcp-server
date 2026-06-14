@@ -146,8 +146,8 @@ export const generateSmartTableTool: Tool = {
           'ALWAYS pass ["find", "exist"] when the user asks for those methods. ' +
           'Methods are embedded directly in the generated XML. ' +
           'Supported values: "find", "exist". ' +
-          '⛔ NEVER omit this and then call modify_d365fo_file to add methods afterwards — ' +
-          'modify_d365fo_file CANNOT write files on Azure/Linux.',
+          '⛔ NEVER omit this and then call d365fo_file(action="modify") to add methods afterwards — ' +
+          'd365fo_file(action="modify") CANNOT write files on Azure/Linux.',
       },
     },
     required: ['name'],
@@ -660,8 +660,8 @@ export async function handleGenerateSmartTable(
           `| "platnost do" / "to date" / "valid to" | \`ValidTo\` |`,
           `| "active" / "aktivní" / "flag" | \`Active\` |`,
           ``,
-          `⛔ NEVER call \`create_d365fo_file\` without first regenerating — there is no XML to use.`,
-          `⛔ NEVER call \`modify_d365fo_file\` to add missing fields — it CANNOT write on Azure/Linux.`,
+          `⛔ NEVER call \`d365fo_file(action="create")\` without first regenerating — there is no XML to use.`,
+          `⛔ NEVER call \`d365fo_file(action="modify")\` to add missing fields — it CANNOT write on Azure/Linux.`,
         ].join('\n'),
       }],
       isError: true,
@@ -689,9 +689,9 @@ export async function handleGenerateSmartTable(
       : `\n> ⚠️  No model resolved — XML generated without prefix. Pass \`modelName\` with the actual model name from .mcp.json (e.g. \`"ContosoExt"\`) for correct object naming.\n> 🚨 **IMPORTANT**: Do NOT add a prefix to the \`name\` parameter when calling this tool — the tool applies the prefix automatically from \`modelName\`. Passing a name that already includes the prefix will result in double-prefixing.`;
     const nextStep = [
       ``,
-      `**✅ MANDATORY NEXT STEP — immediately call \`create_d365fo_file\` with the XML below:**`,
+      `**✅ MANDATORY NEXT STEP — immediately call \`d365fo_file(action="create")\` with the XML below:**`,
       `\`\`\``,
-      `create_d365fo_file(`,
+      `d365fo_file(action="create", `,
       `  objectType="table",`,
       `  objectName="${finalName}",`,
       `  xmlContent="<copy the full XML block below>",`,
@@ -699,8 +699,8 @@ export async function handleGenerateSmartTable(
       `)`,
       `\`\`\``,
       `⛔ NEVER use \`create_file\`, PowerShell scripts, or any built-in file tool — they corrupt D365FO metadata and break VS project integration.`,
-      `⛔ NEVER call \`modify_d365fo_file\` to add methods — the \`methods\` parameter in \`generate_smart\` already embedded them in the XML above.`,
-      `⛔ NEVER call \`suggest_method_implementation\` or \`get_api_usage_patterns\` between this step and \`create_d365fo_file\` — those tools are expensive and their result is not needed for file creation. Call them AFTER the file is created if the user explicitly asks.`,
+      `⛔ NEVER call \`d365fo_file(action="modify")\` to add methods — the \`methods\` parameter in \`generate_smart\` already embedded them in the XML above.`,
+      `⛔ NEVER call \`analyze_code(mode="implementations")\` or \`analyze_code(mode="api-usage")\` between this step and \`d365fo_file(action="create")\` — those tools are expensive and their result is not needed for file creation. Call them AFTER the file is created if the user explicitly asks.`,
     ].join('\n');
     const edtWarningBlock = edtWarnings.length > 0
       ? `\n### ⚠️ EDT Validation Warnings\n${edtWarnings.join('\n')}\n`
@@ -737,7 +737,7 @@ export async function handleGenerateSmartTable(
       throw new Error(
         `⚠️ Table "${finalName}" already exists at:\n${bridgeTargetPath}\n\n` +
         `\`generate_smart(objectType="table")\` is for **NEW** tables only.\n` +
-        `Use \`modify_d365fo_file\` to add fields, methods, or indexes to an existing table.\n` +
+        `Use \`d365fo_file(action="modify")\` to add fields, methods, or indexes to an existing table.\n` +
         `Use \`get_object_info(objectType="table", name="${finalName}")\` to inspect the current structure.`
       );
     }
@@ -832,7 +832,7 @@ export async function handleGenerateSmartTable(
               edtWarningBlock,
               projectMessage,
               ``,
-              `⛔ DO NOT call \`create_d365fo_file\` — the file is already written to disk.`,
+              `⛔ DO NOT call \`d365fo_file(action="create")\` — the file is already written to disk.`,
               `⛔ DO NOT call \`generate_smart\` again — task is COMPLETE.`,
               ``,
               `Next steps for the user:`,
@@ -902,7 +902,7 @@ export async function handleGenerateSmartTable(
     throw new Error(
       `⚠️ Table "${finalName}" already exists at:\n${normalizedPath}\n\n` +
       `\`generate_smart(objectType="table")\` is for **NEW** tables only.\n` +
-      `Use \`modify_d365fo_file\` to add fields, methods, or indexes to an existing table.\n` +
+      `Use \`d365fo_file(action="modify")\` to add fields, methods, or indexes to an existing table.\n` +
       `Use \`get_object_info(objectType="table", name="${finalName}")\` to inspect the current structure.`
     );
   }
@@ -955,7 +955,7 @@ export async function handleGenerateSmartTable(
           edtWarningBlock,
           projectMessage,
           ``,
-          `⛔ DO NOT call \`create_d365fo_file\` — the file is already written to disk.`,
+          `⛔ DO NOT call \`d365fo_file(action="create")\` — the file is already written to disk.`,
           `⛔ DO NOT call \`generate_smart\` again — task is COMPLETE.`,
           ``,
           `Next steps for the user:`,

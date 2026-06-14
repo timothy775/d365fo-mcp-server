@@ -335,7 +335,7 @@ while (qr.next())
     rules: [
       'Extension class MUST be [ExtensionOf(classStr/tableStr/formStr(Target))]',
       'Extension class MUST be final',
-      'Method signature MUST match the original exactly (use get_method_signature tool)',
+      'Method signature MUST match the original exactly (use get_method(include="signature") tool)',
       'ALWAYS call next <methodName>() — skipping it breaks the chain for other extensions',
       'Cannot access private members of the original class',
       'Can wrap: public, protected methods; cannot wrap: private, static',
@@ -599,7 +599,7 @@ class MyReportDP extends SRSReportDataProviderBase
       'infolog.add() → info()/warning()/error() global functions',
       'fieldnum(tableName, fieldName) → still valid but use fieldNum() macro for compile-time safety',
       '[SysObsolete] attribute: ALWAYS read the message — it names the replacement',
-      'When get_method_source returns a method with [SysObsolete], do NOT call it — use the stated replacement',
+      'When get_method(include="source") returns a method with [SysObsolete], do NOT call it — use the stated replacement',
     ],
     related: ['labels', 'data-entities', 'sysoperation'],
   },
@@ -677,7 +677,7 @@ MyDocumentId newId = numSeq.num();
       'BPXmlDocNoDocumentationComments: every public/protected class and method needs a MEANINGFUL /// <summary> — "MyClass class." or "validateWrite." fail BP review; describe what it does, parameters, and the semantic meaning of the return value',
       'EDT extensions (AxEdtExtension, objectType="edt-extension") can ONLY change Label, HelpText, FormHelp, ConfigurationKey, HelpAlign, Alignment, NoOfDecimals, DecimalSeparator, SignDisplay — and only when the base EDT has IsExtensible=Yes',
       'EDT extensions can NEVER change Extends (re-parenting) or StringSize/DisplayLength on a derived EDT — to widen a string, create a new EDT extending the existing one, or use a table extension modify-field with stringSize (mind databaseStringSize so data is not truncated)',
-      'The modify_d365fo_file validator refuses illegal EDT-extension property changes up-front — relay the message verbatim, do not work around it',
+      'The d365fo_file(action="modify") validator refuses illegal EDT-extension property changes up-front — relay the message verbatim, do not work around it',
     ],
     related: ['labels', 'deprecated', 'set-based'],
   },
@@ -692,19 +692,19 @@ MyDocumentId newId = numSeq.num();
       'Extensions add controls/overrides without modifying the original form.',
     rules: [
       'Standard patterns: SimpleList, SimpleListDetails, DetailsMaster, DetailsTransaction, Dialog, DropDialog, ListPage, TableOfContents, Lookup, Workspace — each defines REQUIRED containers in a REQUIRED order',
-      'NEW FORM workflow: get_form_patterns(recommend={...}) → get_form_pattern_spec(pattern) → generate_smart(objectType="form", cloneFrom=referenceForm, tableMapping={...}) → validate_form_pattern → create_d365fo_file',
+      'NEW FORM workflow: form_pattern(action="analyze", recommend={...}) → form_pattern(action="spec", pattern) → generate_smart(objectType="form", cloneFrom=referenceForm, tableMapping={...}) → form_pattern(action="validate") → d365fo_file(action="create")',
       'CLONING an existing reference form (CustGroup for SimpleList, CustTable for DetailsMaster, SalesTable for DetailsTransaction, PaymTerm for SimpleListDetails, CustParameters for TableOfContents) is the PREFERRED strategy — patterns and sub-patterns are preserved',
-      'Container sub-patterns (Pattern element on Group/TabPage): FieldsFieldGroups (fields + max 1 level of groups, NO static text/images), CustomAndQuickFilters (QuickFilter required), ToolbarAndList, SidePanel — validate with validate_form_pattern',
-      'Structural pattern violations BLOCK create_d365fo_file while FORM_PATTERN_ENFORCE=true (default): wrong control order, missing required container, disallowed child type, unknown pattern/version',
+      'Container sub-patterns (Pattern element on Group/TabPage): FieldsFieldGroups (fields + max 1 level of groups, NO static text/images), CustomAndQuickFilters (QuickFilter required), ToolbarAndList, SidePanel — validate with form_pattern(action="validate")',
+      'Structural pattern violations BLOCK d365fo_file(action="create") while FORM_PATTERN_ENFORCE=true (default): wrong control order, missing required container, disallowed child type, unknown pattern/version',
       'ALWAYS use form extensions — never modify standard forms (overlayering is blocked)',
       'Form extension file: AxFormExtension XML — holds new controls, data sources, property overrides',
       'Form extension class: [ExtensionOf(formStr(Target))] — holds CoC logic for form methods',
       'Use get_object_info(objectType="form", name=formName, options={searchControl:"..."}) to find exact control names before extending',
-      'New controls: add via modify_d365fo_file(operation="add-control", parentControl="TabGeneral") — the control type is checked against the parent container\'s sub-pattern',
-      'Data sources: add via modify_d365fo_file(operation="add-data-source")',
+      'New controls: add via d365fo_file(action="modify", operation="add-control", parentControl="TabGeneral") — the control type is checked against the parent container\'s sub-pattern',
+      'Data sources: add via d365fo_file(action="modify", operation="add-data-source")',
       'NEVER use PowerShell or read_file to inspect form XML — use get_object_info(objectType="form", name=...)',
       'A user-provided example form is a PATTERN CONTRACT: read it with get_object_info(objectType="form", name=...), keep the same pattern family, and verify the generated form keeps the required scaffolding (datasources, design pattern/version, ActionPane/Body/Tab/FastTab/grid/QuickFilter) — missing pattern elements are a failed generation even if the XML is well-formed',
-      'Edits must be additive: never drop unrelated <Controls>, <DataSources>, <DataSourceModifications>, methods, or pattern metadata — use targeted modify_d365fo_file operations and verify the diff with review_workspace_changes afterwards',
+      'Edits must be additive: never drop unrelated <Controls>, <DataSources>, <DataSourceModifications>, methods, or pattern metadata — use targeted d365fo_file(action="modify") operations and verify the diff with review_workspace_changes afterwards',
     ],
     related: ['coc', 'event-handlers', 'formrun-lifecycle'],
   },
@@ -725,8 +725,8 @@ MyDocumentId newId = numSeq.num();
       'Role = job function: "Accounts receivable clerk" → groups duties',
       'Table permissions: set on the privilege entry point, cascading to related tables',
       'XDS (Extensible Data Security): row-level security policies',
-      'Use get_security_coverage_for_object() to check what covers a form/table/menu item',
-      'Use get_security_artifact_info() to inspect a role/duty/privilege hierarchy',
+      'Use security_info(mode="coverage") to check what covers a form/table/menu item',
+      'Use security_info(mode="artifact") to inspect a role/duty/privilege hierarchy',
     ],
     related: ['form-patterns'],
   },
@@ -1907,7 +1907,7 @@ select salesTable where salesTable.ShippingDateRequested == cutoffDate;`,
     keywords: ['coc', 'chain of command', 'next', 'default parameter', 'wrappable', 'hookable', 'final', 'extensionof', 'wrapper', 'form coc', 'formdatasourcestr', 'static coc', 'replaceable', 'pre', 'post', 'wrap'],
     summary:
       'Strict rules for authoring CoC wrappers. The most common mistake is copying default parameter values. ' +
-      'next must always be called at first-level scope. Always use get_method_signature before writing any wrapper.',
+      'next must always be called at first-level scope. Always use get_method(include="signature") before writing any wrapper.',
     rules: [
       'NEVER copy default parameter values into the wrapper signature — wrapper uses bare parameter types only',
       'next must be at first-level statement scope: NOT inside if/while/for, NOT after return, NOT inside a logical expression. PU21+: permitted inside try/catch/finally',
@@ -1920,8 +1920,8 @@ select salesTable where salesTable.ShippingDateRequested == cutoffDate;`,
       'Form-nested wrapping uses formdatasourcestr, formdatafieldstr, formControlStr. Cannot ADD new methods via CoC — only wrap existing ones (init, validateWrite, clicked, …)',
       'Wrappers can read/call protected members of the augmented class (PU9+); cannot reach private',
       'Pre-processing: call business logic before next. Post-processing: call next first, then business logic. Wrap: call next inside the logic',
-      'Use get_method_signature tool to get exact parameter types before writing the wrapper',
-      'REUSE BEFORE CREATING: if a CoC extension class for the target already exists in the custom model (prepare_change / find_coc_extensions lists them), add the wrapper there — never create a parallel feature-named class (<Target>_<Feature>_Extension) unless the user explicitly requests separation',
+      'Use get_method(include="signature") tool to get exact parameter types before writing the wrapper',
+      'REUSE BEFORE CREATING: if a CoC extension class for the target already exists in the custom model (prepare(mode="change") / find_coc_extensions lists them), add the wrapper there — never create a parallel feature-named class (<Target>_<Feature>_Extension) unless the user explicitly requests separation',
       'The class suffix comes from EXTENSION_NAMING_STYLE and existing related artifacts — never from feature names, tickets, or customer names; if it cannot be derived, ask the user',
     ],
     examples: [
@@ -2115,10 +2115,10 @@ SysQuery::findOrCreateRange(
       'element.design().controlName(formControlStr(MyForm, MyControl)): access control instance by name at runtime',
       'NEVER guess control names — they differ from field names and are often prefixed; use get_object_info(objectType="form", name=formName, options={searchControl:"..."})',
       'Use [ExtensionOf(formStr(...))] for form-level CoC; forms cannot have static-method CoC',
-      'Add data sources via modify_d365fo_file(operation="add-data-source")',
-      'Add controls via modify_d365fo_file(operation="add-control", parentControl="TabGeneral")',
+      'Add data sources via d365fo_file(action="modify", operation="add-data-source")',
+      'Add controls via d365fo_file(action="modify", operation="add-control", parentControl="TabGeneral")',
       'Typical overrides per pattern — SimpleList/setup: DS initValue + validateWrite; DetailsMaster: form init + DS active/validateWrite; DetailsTransaction: lines DS initValue (defaults from header) + header DS active; Dialog: form init (read element.args()) + closeOk; Lookup: form init + DS executeQuery (caller-context filter)',
-      'generate_smart(objectType="form", includeMethodStubs=true) injects these pattern-appropriate stubs automatically; get_form_pattern_spec(pattern) lists them',
+      'generate_smart(objectType="form", includeMethodStubs=true) injects these pattern-appropriate stubs automatically; form_pattern(action="spec", pattern) lists them',
     ],
     related: ['coc', 'form-patterns'],
   },
@@ -2272,7 +2272,7 @@ export async function xppKnowledgeTool(request: CallToolRequest) {
       formatted =
         '# X++ Knowledge Base — All Topics\n\n' +
         entries.map(e => `- \`${e.id}\`: **${e.title}**`).join('\n') +
-        '\n\n_Query a specific topic with \`get_xpp_knowledge\` for rules and code examples._';
+        '\n\n_Query a specific topic with \`get_knowledge(kind="knowledge")\` for rules and code examples._';
     } else {
       formatted = args.format === 'detailed'
         ? formatDetailed(entries)
@@ -2286,7 +2286,7 @@ export async function xppKnowledgeTool(request: CallToolRequest) {
     return {
       content: [{
         type: 'text',
-        text: `Error in get_xpp_knowledge: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        text: `Error in get_knowledge(kind="knowledge"): ${error instanceof Error ? error.message : 'Unknown error'}`,
       }],
       isError: true,
     };

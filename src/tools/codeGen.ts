@@ -49,7 +49,7 @@ const CodeGenArgsSchema = z.object({
     ),
   groundingToken: z.string().optional()
     .describe(
-      'Provenance token from prepare_change(). Required for extension patterns when ' +
+      'Provenance token from prepare(mode="change"). Required for extension patterns when ' +
       'GROUNDING_ENFORCE=true. Proves the AI queried the real D365FO codebase before generating code.'
     ),
 });
@@ -1919,7 +1919,7 @@ export async function codeGenTool(request: CallToolRequest) {
             : `⚠️ **No prefix resolved** — set \`EXTENSION_PREFIX\` env var or pass \`modelName\` argument.\n  Generated bare name without prefix infix (e.g. \`${baseName}_Extension\`) which is **not MS-compliant**.`;
           namingNote = namingLine + '\n\n' +
             `🚨 **REQUIRED before adding CoC methods:**\n` +
-            `   Call \`get_method_signature("${baseName}", "methodName")\` for EACH method you want to wrap.\n` +
+            `   Call \`get_method(include="signature", "${baseName}", "methodName")\` for EACH method you want to wrap.\n` +
             `   X++ does NOT support method overloading — adding both \`public boolean foo()\` and \`public static boolean foo()\`\n` +
             `   in the same class will always cause a compile error.\n` +
             `   The signature tool tells you whether the original is \`static\` or instance, so you generate exactly ONE CoC method.`;
@@ -1976,16 +1976,16 @@ export async function codeGenTool(request: CallToolRequest) {
             `${namingNote}\n\n` +
             (args.pattern === 'class-extension'
               ? `💡 **Next Steps (class-extension CoC workflow):**\n\n` +
-                `1. 🚨 Use \`get_method_signature("${displayName}", "<methodName>")\` — **REQUIRED** to get the exact signature (static vs instance, return type, parameters) before writing any CoC method\n` +
+                `1. 🚨 Use \`get_method(include="signature", "${displayName}", "<methodName>")\` — **REQUIRED** to get the exact signature (static vs instance, return type, parameters) before writing any CoC method\n` +
                 `2. ✅ Use \`find_coc_extensions("${displayName}", "<methodName>")\` - See existing CoC wrappers for reference\n` +
-                `3. ✅ Use \`suggest_method_implementation("${displayName}", "<methodName>")\` - Get real implementation examples\n` +
-                `4. ✅ Use \`get_api_usage_patterns("<ClassName>")\` - See how to use D365FO APIs correctly\n\n` +
-                `⚠️ Never guess static vs instance — always use get_method_signature first.`
+                `3. ✅ Use \`analyze_code(mode="implementations", "${displayName}", "<methodName>")\` - Get real implementation examples\n` +
+                `4. ✅ Use \`analyze_code(mode="api-usage", "<ClassName>")\` - See how to use D365FO APIs correctly\n\n` +
+                `⚠️ Never guess static vs instance — always use get_method(include="signature") first.`
               : `💡 **Next Steps for Better Code Quality:**\n\n` +
-                `1. ✅ Use \`analyze_code_patterns("<scenario>")\` - Learn what D365FO classes are commonly used together\n` +
-                `2. ✅ Use \`suggest_method_implementation("${displayName}", "<methodName>")\` - Get real implementation examples\n` +
-                `3. ✅ Use \`analyze_class_completeness("${displayName}")\` - Check for missing common methods\n` +
-                `4. ✅ Use \`get_api_usage_patterns("<ClassName>")\` - See how to use D365FO APIs correctly\n\n` +
+                `1. ✅ Use \`analyze_code(mode="patterns", "<scenario>")\` - Learn what D365FO classes are commonly used together\n` +
+                `2. ✅ Use \`analyze_code(mode="implementations", "${displayName}", "<methodName>")\` - Get real implementation examples\n` +
+                `3. ✅ Use \`analyze_code(mode="completeness", "${displayName}")\` - Check for missing common methods\n` +
+                `4. ✅ Use \`analyze_code(mode="api-usage", "<ClassName>")\` - See how to use D365FO APIs correctly\n\n` +
                 `These tools provide patterns from the actual codebase, not generic templates.`),
         },
       ],

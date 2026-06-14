@@ -100,7 +100,7 @@ npm run build
 }
 ```
 
-The local companion also exposes the bridge-backed reader `get_object_info` (and `get_method_source`/`get_method_signature`), so freshly created objects are immediately readable without waiting for an Azure index refresh.
+The local companion also exposes the bridge-backed reader `get_object_info` (and `get_method`), so freshly created objects are immediately readable without waiting for an Azure index refresh.
 
 **Update:** `git pull && npm install && npm run build` whenever a new version ships.
 
@@ -200,7 +200,7 @@ Point a per-solution `.mcp.json` at the right port:
 
 ## Building the C# bridge
 
-**Mandatory on Windows D365FO VMs** — it is the only write path (`create_d365fo_file`, `modify_d365fo_file`). Without it the server runs read-only.
+**Mandatory on Windows D365FO VMs** — it is the only write path (`d365fo_file` action=create/modify). Without it the server runs read-only.
 
 ```powershell
 cd bridge\D365MetadataBridge
@@ -243,4 +243,4 @@ The server searches from the working directory up to 5 parent levels.
 
 ## Next steps
 
-[MCP_CONFIG.md](MCP_CONFIG.md) — every option · [MCP_TOOLS.md](MCP_TOOLS.md) — all 47 tools · [USAGE_EXAMPLES.md](USAGE_EXAMPLES.md) — real workflows · [CUSTOM_EXTENSIONS.md](CUSTOM_EXTENSIONS.md) — ISV/multi-model · [PIPELINES.md](PIPELINES.md) — automated index refresh
+[MCP_CONFIG.md](MCP_CONFIG.md) — every option · [MCP_TOOLS.md](MCP_TOOLS.md) — all 34 tools · [USAGE_EXAMPLES.md](USAGE_EXAMPLES.md) — real workflows · [CUSTOM_EXTENSIONS.md](CUSTOM_EXTENSIONS.md) — ISV/multi-model · [PIPELINES.md](PIPELINES.md) — automated index refresh

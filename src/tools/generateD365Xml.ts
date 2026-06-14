@@ -1533,7 +1533,7 @@ export async function handleGenerateD365Xml(
 2. **If you see encoding errors**, manually add UTF-8 BOM:
    - Open file in hex editor
    - Ensure first 3 bytes are: EF BB BF (UTF-8 BOM)
-   - Or use create_d365fo_file tool instead (if MCP server runs on local Windows)
+   - Or use d365fo_file(action="create") tool instead (if MCP server runs on local Windows)
 
 3. **Add to Visual Studio project** (.rnrproj):
    <Content Include="${recommendedPath.replace(/\\/g, '\\\\')}" />
@@ -1550,7 +1550,7 @@ ${xmlContent}
 
 ---
 
-💡 **Alternative:** If MCP server runs on local Windows, use \`create_d365fo_file\` tool instead - it handles UTF-8 BOM automatically and adds to VS project.`;
+💡 **Alternative:** If MCP server runs on local Windows, use \`d365fo_file(action="create")\` tool instead - it handles UTF-8 BOM automatically and adds to VS project.`;
 
     return {
       content: [
