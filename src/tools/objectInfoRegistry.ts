@@ -27,7 +27,7 @@ import { getMapInfoTool } from './mapInfo.js';
 import { getConfigKeyInfoTool } from './configKeyInfo.js';
 import { getSecurityPolicyInfoTool } from './securityPolicyInfo.js';
 import { getMacroInfoTool } from './macroInfo.js';
-import { tableExtensionInfoTool } from './tableExtensionInfo.js';
+import { tableExtensionInfoTool, formExtensionInfoTool, enumExtensionInfoTool, edtExtensionInfoTool, dataEntityExtensionInfoTool } from './tableExtensionInfo.js';
 import { securityArtifactInfoTool } from './securityArtifactInfo.js';
 
 export type InfoTool = (request: CallToolRequest, context: XppServerContext) => Promise<any>;
@@ -59,10 +59,12 @@ export const READER_DISPATCH: Record<string, ReaderDispatch> = {
   'config-key':         { tool: getConfigKeyInfoTool,     toolName: 'get_config_key_info',        buildArgs: byName('name') },
   'security-policy':    { tool: getSecurityPolicyInfoTool,toolName: 'get_security_policy_info',   buildArgs: byName('policyName') },
   'macro':              { tool: getMacroInfoTool,         toolName: 'get_macro_info',             buildArgs: byName('macroName') },
-  // Additional types reachable via batch_get_info AND still published as their
-  // own dedicated tools (different argument shape: type discriminator + name).
-  // Unlike the per-name OBJECT_INFO_TYPES above, these stay registered separately.
-  'table-extension':    { tool: tableExtensionInfoTool,   toolName: 'get_table_extension_info',   buildArgs: byName('tableName') },
+  'table-extension':         { tool: tableExtensionInfoTool,       toolName: 'get_table_extension_info',        buildArgs: (name, options) => ({ tableName: name.includes('.') ? name.split('.')[0] : name, ...(options ?? {}) }) },
+  'form-extension':          { tool: formExtensionInfoTool,        toolName: 'get_form_extension_info',         buildArgs: (name, options) => ({ baseName:   name.includes('.') ? name.split('.')[0] : name, ...(options ?? {}) }) },
+  'enum-extension':          { tool: enumExtensionInfoTool,        toolName: 'get_enum_extension_info',         buildArgs: (name, options) => ({ baseName:   name.includes('.') ? name.split('.')[0] : name, ...(options ?? {}) }) },
+  'edt-extension':           { tool: edtExtensionInfoTool,         toolName: 'get_edt_extension_info',          buildArgs: (name, options) => ({ baseName:   name.includes('.') ? name.split('.')[0] : name, ...(options ?? {}) }) },
+  'data-entity-extension':   { tool: dataEntityExtensionInfoTool,  toolName: 'get_data_entity_extension_info',  buildArgs: (name, options) => ({ baseName:   name.includes('.') ? name.split('.')[0] : name, ...(options ?? {}) }) },
+  'class-extension':         { tool: classInfoTool,                toolName: 'get_class_info',                  buildArgs: byName('className') },
   'security-privilege': { tool: securityArtifactInfoTool, toolName: 'get_security_artifact_info', buildArgs: n => ({ name: n, artifactType: 'privilege' }) },
   'security-duty':      { tool: securityArtifactInfoTool, toolName: 'get_security_artifact_info', buildArgs: n => ({ name: n, artifactType: 'duty' }) },
   'security-role':      { tool: securityArtifactInfoTool, toolName: 'get_security_artifact_info', buildArgs: n => ({ name: n, artifactType: 'role' }) },
@@ -72,10 +74,13 @@ export const READER_DISPATCH: Record<string, ReaderDispatch> = {
 export const OBJECT_INFO_TYPES = [
   'class', 'table', 'form', 'query', 'view', 'enum', 'edt', 'report',
   'data-entity', 'menu-item', 'service', 'map', 'config-key', 'security-policy', 'macro',
+  // Extension types
+  'table-extension', 'class-extension', 'form-extension', 'enum-extension',
+  'edt-extension', 'data-entity-extension',
 ] as const;
 
 /** Types accepted by batch_get_info (superset incl. extensions + security artifacts). */
 export const BATCH_INFO_TYPES = [
   ...OBJECT_INFO_TYPES,
-  'table-extension', 'security-privilege', 'security-duty', 'security-role',
+  'security-privilege', 'security-duty', 'security-role',
 ] as const;

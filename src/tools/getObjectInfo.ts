@@ -21,7 +21,10 @@ import { completionTool } from './completion.js';
 const GetObjectInfoArgsSchema = z.object({
   objectType: z.enum(OBJECT_INFO_TYPES).describe(
     'Kind of object to read: class, table, form, query, view, enum, edt, report, ' +
-    'data-entity, menu-item, service, map, config-key, security-policy, macro.',
+    'data-entity, menu-item, service, map, config-key, security-policy, macro, table-extension. ' +
+    'For table-extension the name may be either the full extension name ' +
+    '(e.g. "CustInvoiceJour.Extension") or just the base table name — ' +
+    'both are accepted; the base table name is extracted automatically.',
   ),
   name: z.string().min(1).describe('Exact object name (use search/search(queries=[...]) first if unsure).'),
   options: z.record(z.string(), z.any()).optional().describe(
