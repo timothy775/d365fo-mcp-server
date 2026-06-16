@@ -319,4 +319,80 @@ describe('find_references', () => {
     expect(result.content[0].text).toMatch(/heuristic|name-based/i);
     expect(result.content[0].text).toMatch(/ownerName|qualify/i);
   });
+
+  it('falls back to the heuristic (not an authoritative empty) when the xref bridge errors', async () => {
+    stubDbType(ctx, 'table');
+    // Bridge is up but the lookup throws (RPC/SQL failure) — must NOT be reported
+    // as a confident "0 references scoped to the declaring type".
+    ctx.bridge = {
+      isReady: true,
+      metadataAvailable: true,
+      xrefAvailable: true,
+      findReferences: vi.fn(async () => { throw new Error('SQL connection lost'); }),
+    } as any;
+
+    const result = await findReferencesTool(
+      req('find_references', { targetName: 'SalesTable.initFromSalesQuotationTable', targetType: 'method' }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).not.toMatch(/scoped to the declaring type/i);
+    expect(result.content[0].text).toMatch(/heuristic|name-based/i);
+  });
+
+  it('treats an in-band bridge error result as a failure, not an authoritative empty', async () => {
+    stubDbType(ctx, 'table');
+    // C# bridge resolves with count 0 but an `error` field set (e.g. SQL error).
+    ctx.bridge = {
+      isReady: true,
+      metadataAvailable: true,
+      xrefAvailable: true,
+      findReferences: vi.fn(async (path: string) => ({ objectPath: path, count: 0, references: [], error: 'SQL timeout' })),
+    } as any;
+
+    const result = await findReferencesTool(
+      req('find_references', { targetName: 'SalesTable.initFromSalesQuotationTable', targetType: 'method' }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).not.toMatch(/scoped to the declaring type/i);
+    expect(result.content[0].text).toMatch(/heuristic|name-based/i);
+  });
+
+  it('scopes a field-qualified target to "/Fields/" on the declaring type', async () => {
+    stubDbType(ctx, 'table');
+    const bridge = makeXrefBridge([
+      { sourcePath: '/Classes/Foo/Methods/bar', line: 3, column: 1, referenceType: 'field-access', callerClass: 'Foo', callerMethod: 'bar' },
+    ]);
+    ctx.bridge = bridge as any;
+
+    const result = await findReferencesTool(
+      req('find_references', { targetName: 'CustTable.AccountNum', targetType: 'field' }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(bridge.findReferences).toHaveBeenCalledWith('/Tables/CustTable/Fields/AccountNum');
+  });
+
+  it('builds both Methods and Fields variants for a member-qualified target with the default type', async () => {
+    stubDbType(ctx, 'table');
+    const bridge = makeXrefBridge([
+      { sourcePath: '/Classes/Foo/Methods/bar', line: 3, column: 1, referenceType: 'field-access', callerClass: 'Foo', callerMethod: 'bar' },
+    ]);
+    ctx.bridge = bridge as any;
+
+    // No targetType → don't yet know if AccountNum is a method or a field; both
+    // path variants must be queried so a field-qualified target still resolves.
+    const result = await findReferencesTool(
+      req('find_references', { targetName: 'CustTable.AccountNum' }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(bridge.findReferences).toHaveBeenCalledWith('/Tables/CustTable/Methods/AccountNum');
+    expect(bridge.findReferences).toHaveBeenCalledWith('/Tables/CustTable/Fields/AccountNum');
+  });
 });

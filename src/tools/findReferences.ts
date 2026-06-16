@@ -23,8 +23,9 @@ const FindReferencesArgsSchema = z.object({
 
 /**
  * Map a symbol-index `type` value to its DYNAMICSXREFDB container segment.
- * Only types that can own methods are listed — these are the containers the
- * xref path "/<Container>/<Owner>/Methods/<method>" is built from.
+ * Only types that can own methods/fields are listed — these are the containers
+ * the xref path "/<Container>/<Owner>/<Methods|Fields>/<member>" is built from.
+ * Enums are intentionally absent: their values are not methods or fields here.
  */
 const TYPE_TO_XREF_CONTAINER: Record<string, string> = {
   table: 'Tables',
@@ -33,7 +34,6 @@ const TYPE_TO_XREF_CONTAINER: Record<string, string> = {
   query: 'Queries',
   view: 'Views',
   map: 'Maps',
-  enum: 'Enums',
   'data-entity': 'DataEntityViews',
 };
 
@@ -52,16 +52,17 @@ function resolveXrefContainers(db: any, ownerName: string): string[] {
 }
 
 /**
- * Authoritative "no references" result for a method-scoped lookup when the xref
- * bridge is available and returned nothing. We deliberately do NOT fall back to
- * the name-only FTS scan here — that scan pools callers of every same-named
- * method across all types, which is exactly the wrong answer for where-used.
+ * Authoritative "no references" result for a member-scoped lookup when the xref
+ * bridge is available and cleanly returned nothing. We deliberately do NOT fall
+ * back to the name-only FTS scan here — that scan pools callers of every
+ * same-named member across all types, which is exactly the wrong answer for
+ * where-used. (Reached only on a clean empty, never on a bridge error.)
  */
 function buildScopedEmptyResult(displayName: string, bridgeTargets: string[]): { content: Array<{ type: 'text'; text: string }> } {
   let out = `# References to \`${displayName}\`\n\n`;
   out += `**Total References Found:** 0\n`;
   out += `_Source: C# bridge (DYNAMICSXREFDB) — scoped to the declaring type_\n\n`;
-  out += `No callers found for this specific method.\n\n`;
+  out += `No callers found for this specific member.\n\n`;
   out += `Resolved xref path(s):\n`;
   for (const t of bridgeTargets) out += `- \`${t}\`\n`;
   out += `\n**If you expected results:** verify the owner type and method name, `;
@@ -105,36 +106,45 @@ export async function findReferencesTool(request: CallToolRequest, context: XppS
       owner ?? ((targetType === 'class' || targetType === 'method') ? memberName : null);
 
     const wantsMethod = !targetType || targetType === 'method' || targetType === 'all';
+    // Which AOT child segments to scope an "Owner.member" target to. A method
+    // lookup hits "/Methods/", a field lookup "/Fields/"; the default ("all" /
+    // unset) covers both, since we don't know whether the member is a method or
+    // field. Building only "/Methods/" (the original bug) made a field-qualified
+    // target return an authoritative — and wrong — "no callers".
+    const memberSegments: string[] = [];
+    if (wantsMethod) memberSegments.push('Methods');
+    if (!targetType || targetType === 'field' || targetType === 'all') memberSegments.push('Fields');
 
     // --- Build the bridge target(s) ------------------------------------------
-    // The DYNAMICSXREFDB bridge scopes a method to its declaring type ONLY when
-    // given a method-qualified path. A bare method name matches no object there
+    // The DYNAMICSXREFDB bridge scopes a member to its declaring type ONLY when
+    // given a member-qualified path. A bare member name matches no object there
     // and silently returns 0 — so when an owner is known we resolve its container
-    // type and build "/<Container>/<Owner>/Methods/<method>" before querying.
+    // type and build "/<Container>/<Owner>/<Methods|Fields>/<member>" before querying.
     let bridgeTargets: string[] = [cleanTargetName];
-    let methodScoped = false;
+    let memberScoped = false;
     if (isAotPath) {
-      methodScoped = cleanTargetName.includes('/Methods/');
-    } else if (owner && wantsMethod) {
+      memberScoped = cleanTargetName.includes('/Methods/') || cleanTargetName.includes('/Fields/');
+    } else if (owner && memberSegments.length > 0) {
       const containers = resolveXrefContainers(symbolIndex.getReadDb(), owner);
       bridgeTargets = containers.length > 0
-        ? containers.map(c => `/${c}/${owner}/Methods/${memberName}`)
+        ? containers.flatMap(c => memberSegments.map(seg => `/${c}/${owner}/${seg}/${memberName}`))
         // Owner not indexed — hand the qualified name to the bridge, which (when
-        // built with method-variant expansion) resolves it across container types.
+        // built with member-variant expansion) resolves it across container types.
         : [`${owner}.${memberName}`];
-      methodScoped = true;
+      memberScoped = true;
     }
 
     // Try C# bridge first (DYNAMICSXREFDB — live cross-references)
-    const bridgeResult = await tryBridgeReferences(context.bridge, bridgeTargets, limit, targetName);
-    if (bridgeResult) return bridgeResult;
+    const bridgeOutcome = await tryBridgeReferences(context.bridge, bridgeTargets, limit, targetName);
+    if (bridgeOutcome.status === 'ok') return bridgeOutcome.result;
 
-    // For a method-scoped lookup the xref bridge is authoritative: if it is
-    // available and returned nothing, report the empty scoped result rather than
-    // dropping to the name-only FTS scan below (which pools callers of every
-    // same-named method across all types — the original "25 references" bug).
-    const bridgeXrefUp = !!(context.bridge?.isReady && context.bridge?.xrefAvailable);
-    if (methodScoped && bridgeXrefUp) {
+    // For a member-scoped lookup the xref bridge is authoritative — but ONLY when
+    // it cleanly returned no rows ('empty'). On 'error' (RPC/SQL failure) or
+    // 'unavailable' we deliberately fall through to the FTS heuristic rather than
+    // report a confident "0 references" we can't actually stand behind. Reporting
+    // the empty scoped result here is what avoids the name-only FTS scan pooling
+    // callers of every same-named member across all types (the "25 references" bug).
+    if (memberScoped && bridgeOutcome.status === 'empty') {
       return buildScopedEmptyResult(targetName, bridgeTargets);
     }
 

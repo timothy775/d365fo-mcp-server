@@ -421,25 +421,53 @@ function countControls(controls: BridgeFormControl[]): number {
 // FIND REFERENCES
 // ════════════════════════════════════════════════════════════════════════
 
+/**
+ * Outcome of a bridge where-used lookup. The caller must distinguish a clean
+ * empty result (authoritative "no references") from an error or an unavailable
+ * bridge — in the latter cases falling back to the name-only FTS scan is right,
+ * but for a clean empty it must NOT (that would re-introduce the over-reporting).
+ */
+export type BridgeReferencesOutcome =
+  | { status: 'ok'; result: ToolResult }
+  | { status: 'empty' }
+  | { status: 'error' }
+  | { status: 'unavailable' };
+
 export async function tryBridgeReferences(
   bridge: BridgeClient | undefined,
   target: string | string[],
   limit = 50,
   displayName?: string,
-): Promise<ToolResult | null> {
-  if (!bridge?.isReady || !bridge.xrefAvailable) return null;
+): Promise<BridgeReferencesOutcome> {
+  if (!bridge?.isReady || !bridge.xrefAvailable) return { status: 'unavailable' };
   // Accept several candidate paths (e.g. one per container type when an owner
   // name collides across Tables/Classes) — query each and merge. Each source
   // reference targets a distinct path, so there are no cross-candidate dupes.
   const targets = Array.isArray(target) ? target : [target];
   const label = displayName ?? targets[0];
-  try {
-    const merged: BridgeReferenceInfo[] = [];
-    for (const t of targets) {
+
+  // Query each candidate independently: a failing one — a thrown RPC error or an
+  // in-band SQL error from the C# bridge (resolves with `error` set, count 0) —
+  // must not abort the others, and must be remembered so we never report a
+  // transient failure as an authoritative "0 references".
+  const merged: BridgeReferenceInfo[] = [];
+  let errored = false;
+  for (const t of targets) {
+    try {
       const r = await bridge.findReferences(t);
+      if (r?.error) errored = true;
       if (r?.references?.length) merged.push(...r.references);
+    } catch (e) {
+      errored = true;
+      console.error(`[BridgeAdapter] findReferences(${t}) failed: ${e}`);
     }
-    if (merged.length === 0) return null;
+  }
+
+  // No rows: "empty" is authoritative only when nothing went wrong; otherwise
+  // signal "error" so the caller falls back instead of trusting the 0.
+  if (merged.length === 0) return errored ? { status: 'error' } : { status: 'empty' };
+
+  {
     const refs = { count: merged.length, references: merged };
 
     let out = `# References to \`${label}\`\n\n`;
@@ -496,10 +524,7 @@ export async function tryBridgeReferences(
       out += `\n> ⚠️ Showing first ${limit} of ${refs.count} references.\n`;
     }
 
-    return { content: [{ type: 'text', text: out }] };
-  } catch (e) {
-    console.error(`[BridgeAdapter] findReferences(${label}) failed: ${e}`);
-    return null;
+    return { status: 'ok', result: { content: [{ type: 'text', text: out }] } };
   }
 }
 
