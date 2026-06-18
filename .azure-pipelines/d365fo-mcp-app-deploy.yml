@@ -34,7 +34,7 @@ stages:
       - job: BuildJob
         displayName: 'Compile and package'
         steps:
-          - checkout: mcpServer
+          - checkout: self
             displayName: 'Checkout MCP Server from GitHub'
             path: mcp-server
             clean: true
