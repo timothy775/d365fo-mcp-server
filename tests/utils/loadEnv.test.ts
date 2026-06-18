@@ -60,10 +60,13 @@ afterEach(() => {
 
 // Simulate a caller at /repo/src/index.ts → callerDir = /repo/src
 // Default envPath resolves to /repo/src/../.env = /repo/.env
-// On Windows, file URLs require a drive letter — use C:/repo to keep the
-// path.resolve('/repo/...') expectations consistent (same drive root).
+// On Windows, file URLs require a drive letter, and path.resolve('/repo/...')
+// resolves against the *current working directory's* drive — which is not
+// necessarily C:. Derive the drive from process.cwd() so the URL-based path
+// and the path.resolve(...) expectations always share the same drive root.
+const WIN_DRIVE = process.cwd().slice(0, 1);
 const FAKE_CALLER_URL = process.platform === 'win32'
-  ? 'file:///C:/repo/src/index.ts'
+  ? `file:///${WIN_DRIVE}:/repo/src/index.ts`
   : 'file:///repo/src/index.ts';
 const REPO_ROOT_ENV = path.resolve('/repo/.env');
 
