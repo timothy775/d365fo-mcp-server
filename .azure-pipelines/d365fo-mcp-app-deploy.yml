@@ -29,7 +29,7 @@ parameters:
   - name: githubRepo
     type: string
     default: dynamics365ninja/d365fo-mcp-server
-s
+
 pool:
   vmImage: 'ubuntu-latest'
 
