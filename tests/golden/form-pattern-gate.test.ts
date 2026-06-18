@@ -47,16 +47,18 @@ vi.mock('../../src/utils/configManager', () => ({
 }));
 
 vi.mock('../../src/utils/packageResolver', () => ({
-  PackageResolver: vi.fn().mockImplementation(() => ({
-    resolve: vi.fn(async (modelName: string) => ({
-      packageName: modelName,
-      modelName,
-      rootPath: 'K:\\PackagesLocalDirectory',
-    })),
-    resolveWithPackage: vi.fn((m: string, p: string) => ({
-      packageName: p, modelName: m, rootPath: 'K:\\PackagesLocalDirectory',
-    })),
-  })),
+  PackageResolver: vi.fn().mockImplementation(function () {
+    return {
+      resolve: vi.fn(async (modelName: string) => ({
+        packageName: modelName,
+        modelName,
+        rootPath: 'K:\\PackagesLocalDirectory',
+      })),
+      resolveWithPackage: vi.fn((m: string, p: string) => ({
+        packageName: p, modelName: m, rootPath: 'K:\\PackagesLocalDirectory',
+      })),
+    };
+  }),
 }));
 
 vi.mock('../../src/utils/modelClassifier', () => ({
