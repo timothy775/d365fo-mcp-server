@@ -32,8 +32,8 @@ resources:
   repositories:
     - repository: mcpServer
       type: github
-      endpoint: github.com_dynamics365ninja
-      name: dynamics365ninja/d365fo-mcp-server
+      endpoint: ${{ parameters.githubServiceConnection }}
+      name: ${{ parameters.githubRepo }}
       ref: refs/heads/main
 
 variables:
@@ -47,7 +47,7 @@ variables:
   - name: LABELS_DB_PATH
     value: './database/xpp-metadata-labels.db'
   - name: PACKAGES_PATH
-    value: '$(Build.SourcesDirectory)/your/path/to/metadata' // Path to the metadata files from the Git repository
+    value: '$(Build.SourcesDirectory)/your/path/to/metadata' # Path to the metadata files from the Git repository
   - name: MCP_SERVER_PATH
     value: '$(Pipeline.Workspace)/mcp-server'
 
