@@ -4,6 +4,10 @@
 #
 # Parameter skipExtraction=true: skip steps 1-4 (download zip, extract, extract metadata,
 # upload metadata) and only download already-extracted metadata from blob, then rebuild DB.
+# Parameter githubServiceConnection:
+# Service connection used to connect to GitHub and retrieve MCP Server sources.
+# Parameter githubRepo:
+# Repository containing the MCP Server implementation to be referenced by the pipeline.
 
 trigger: none  # Manual execution only
 
@@ -12,6 +16,12 @@ parameters:
     displayName: 'Skip extraction (rebuild DB from existing blob metadata)'
     type: boolean
     default: false
+  - name: githubServiceConnection
+    type: string
+    default: github.com_dynamics365ninja
+  - name: githubRepo
+    type: string
+    default: dynamics365ninja/d365fo-mcp-server    
 
 pool:
   vmImage: 'ubuntu-latest'

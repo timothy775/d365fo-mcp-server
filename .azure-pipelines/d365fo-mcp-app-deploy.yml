@@ -4,6 +4,11 @@
 # with the same Node.js version as the App Service runtime.
 # Ships pre-built node_modules so no compilation is needed on the server.
 
+# Parameter githubServiceConnection:
+# Service connection used to connect to GitHub and retrieve MCP Server sources.
+# Parameter githubRepo:
+# Repository containing the MCP Server implementation to be referenced by the pipeline.
+
 trigger:
   branches:
     include:
@@ -17,6 +22,14 @@ trigger:
       - 'tsconfig.json'
       - '.azure-pipelines/d365fo-mcp-app-deploy.yml'
 
+parameters:
+  - name: githubServiceConnection
+    type: string
+    default: github.com_dynamics365ninja
+  - name: githubRepo
+    type: string
+    default: dynamics365ninja/d365fo-mcp-server
+s
 pool:
   vmImage: 'ubuntu-latest'
 

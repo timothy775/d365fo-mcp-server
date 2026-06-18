@@ -3,7 +3,20 @@
 # Downloads PackagesLocalDirectory.zip from Blob Storage, rebuilds the full metadata
 # database (standard + custom + labels), and uploads the result to Azure Blob Storage.
 
+# Parameter githubServiceConnection:
+# Service connection used to connect to GitHub and retrieve MCP Server sources.
+# Parameter githubRepo:
+# Repository containing the MCP Server implementation to be referenced by the pipeline.
+
 trigger: none  # Manual execution only
+
+parameters:
+  - name: githubServiceConnection
+    type: string
+    default: github.com_dynamics365ninja
+  - name: githubRepo
+    type: string
+    default: dynamics365ninja/d365fo-mcp-server
 
 pool:
   vmImage: 'ubuntu-latest'
