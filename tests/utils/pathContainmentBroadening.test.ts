@@ -18,7 +18,7 @@ import { assertWritePathAllowed } from '../../src/utils/pathContainment.js';
 describe('pathContainment — PLD-base broadening', () => {
   it('allows a sibling-package object when packagePath is a single package dir', async () => {
     const r = await assertWritePathAllowed(
-      'K:\\AosService\\PackagesLocalDirectory\\MyCustomPkg\\MyCustomModel\\AxTable\\AslRentEquipment.xml',
+      'K:\\AosService\\PackagesLocalDirectory\\MyCustomPkg\\MyCustomModel\\AxTable\\MyTable.xml',
       'MyCustomModel',
     );
     expect(r.ok).toBe(true);
@@ -33,12 +33,12 @@ describe('pathContainment — PLD-base broadening', () => {
   });
 
   it('suggests the exact package root for a repo-checkout layout', async () => {
-    // The real reported case: metadata lives in a Git checkout, not under PLD.
+    // Metadata lives in a Git checkout, not under PLD.
     const r = await assertWritePathAllowed(
-      'K:\\repos\\ASL\\src\\d365fo\\metadata\\fm-mcp\\fm-mcp\\AxTable\\AslRentEquipment.xml',
-      'fm-mcp',
+      'K:\\repos\\MyMetadataRepo\\metadata\\MyPackage\\MyModel\\AxTable\\MyTable.xml',
+      'MyModel',
     );
     expect(r.ok).toBe(false);
-    expect(r.reason).toContain('packagePath="K:/repos/ASL/src/d365fo/metadata"');
+    expect(r.reason).toContain('packagePath="K:/repos/MyMetadataRepo/metadata"');
   });
 });

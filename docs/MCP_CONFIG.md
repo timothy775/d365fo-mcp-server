@@ -133,16 +133,16 @@ Startup logs confirm the filtering:
 A common D365FO setup keeps custom metadata in a **Git working tree** and exposes it to the AOS by **junctioning** the package into `PackagesLocalDirectory`:
 
 ```
-K:\AosService\PackagesLocalDirectory\fm-mcp   ──junction──▶   K:\repos\ASL\src\d365fo\metadata\fm-mcp
+K:\AosService\PackagesLocalDirectory\MyPackage   ──junction──▶   K:\repos\MyMetadataRepo\metadata\MyPackage
 ```
 
 With this layout `create` works without extra config — it builds the target from `D365FO_PACKAGE_PATH` and writes straight through the junction. But `modify` (add field/index, edit a table) resolves the object via the C# bridge, and the write-path guard runs `realpath`, which **follows the junction to the real location**:
 
 ```
 ❌ Refusing to write outside configured D365FO package roots.
-   resolved path: K:/repos/ASL/src/d365fo/metadata/fm-mcp/...   ← realpath followed the junction
+   resolved path: K:/repos/MyMetadataRepo/metadata/MyPackage/...   ← realpath followed the junction
    allowed roots:
-     - K:/AosService/PackagesLocalDirectory                     ← junction target is not under here
+     - K:/AosService/PackagesLocalDirectory                        ← junction target is not under here
 ```
 
 This is **not** a path-separator issue, and the guard is working as intended — the junction *target* simply isn't a configured root.
@@ -152,15 +152,15 @@ This is **not** a path-separator issue, and the guard is working as intended —
 ```json
 "env": {
   "D365FO_PACKAGE_PATH": "K:\\AosService\\PackagesLocalDirectory",
-  "D365FO_CUSTOM_PACKAGES_PATH": "K:\\repos\\ASL\\src\\d365fo\\metadata"
+  "D365FO_CUSTOM_PACKAGES_PATH": "K:\\repos\\MyMetadataRepo\\metadata"
 }
 ```
 
 Then **restart the server** — re-spawn the node process; editing `.mcp.json` alone does not reload `env`. Verify it took effect: on the next failure the `allowed roots` list must now include the repo path. In traditional mode `D365FO_CUSTOM_PACKAGES_PATH` takes precedence over `D365FO_PACKAGE_PATH` as the write root, so `create` and `modify` both target the repo — and because the junction points there, they operate on the **same physical files** (no split-brain, no orphaned copies in PLD).
 
 Notes:
-- Confirm a path is a junction: `fsutil reparsepoint query "K:\AosService\PackagesLocalDirectory\fm-mcp"` or `dir /AL K:\AosService\PackagesLocalDirectory` (shows `<JUNCTION>` / `<SYMLINKD>`).
-- One-off without restarting: pass `packagePath="K:/repos/ASL/src/d365fo/metadata"` directly on the `d365fo_file` call — the error message also prints the exact value to use.
+- Confirm a path is a junction: `fsutil reparsepoint query "K:\AosService\PackagesLocalDirectory\MyPackage"` or `dir /AL K:\AosService\PackagesLocalDirectory` (shows `<JUNCTION>` / `<SYMLINKD>`).
+- One-off without restarting: pass `packagePath="K:/repos/MyMetadataRepo/metadata"` directly on the `d365fo_file` call — the error message also prints the exact value to use.
 - `add-index` runs through the C# bridge, which has its own startup roots; if it still can't resolve after the above, fall back to `overwrite=true` or an explicit `filePath`.
 
 ---
