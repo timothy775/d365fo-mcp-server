@@ -105,7 +105,10 @@ export const generateSmartTableTool: Tool = {
           '"platnost do" or "ValidTo" or "to date" → "ValidTo", ' +
           '"active" or "active flag" → "Active", ' +
           '"customer" or "customer account" → "CustAccount". ' +
-          'Example call: fieldsHint="AccountNum, Name, Description, ValidFrom, ValidTo"',
+          'Example call: fieldsHint="AccountNum, Name, Description, ValidFrom, ValidTo". ' +
+          '⚠️ EDT auto-suggestion is index-based: custom EDTs/enums created in the SAME SESSION are not yet in the ' +
+          'index and those fields will fall back to String255. Call update_symbol_index BEFORE scaffolding to ensure ' +
+          'the new custom EDTs are resolved correctly.',
       },
       primaryKeyFields: {
         type: 'array',
@@ -833,7 +836,7 @@ export async function handleGenerateSmartTable(
               edtWarningBlock,
               projectMessage,
               ``,
-              `⛔ DO NOT call \`d365fo_file(action="create")\` — the file is already written to disk.`,
+              `⛔ DO NOT call \`d365fo_file(action="create")\` — the file is already written to disk at the path above. Calling d365fo_file would create a DUPLICATE at a different path which causes build conflicts.`,
               `⛔ DO NOT call \`generate\` again — task is COMPLETE.`,
               ``,
               `Next steps for the user:`,
@@ -956,7 +959,7 @@ export async function handleGenerateSmartTable(
           edtWarningBlock,
           projectMessage,
           ``,
-          `⛔ DO NOT call \`d365fo_file(action="create")\` — the file is already written to disk.`,
+          `⛔ DO NOT call \`d365fo_file(action="create")\` — the file is already written to disk at the path above. Calling d365fo_file would create a DUPLICATE at a different path which causes build conflicts.`,
           `⛔ DO NOT call \`generate\` again — task is COMPLETE.`,
           ``,
           `Next steps for the user:`,

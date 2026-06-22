@@ -289,7 +289,16 @@ export class BridgeClient extends EventEmitter {
               this.pending.delete(msg.id);
               clearTimeout(pending.timer);
               if (msg.error) {
-                pending.reject(new Error(`Bridge error [${msg.error.code}]: ${msg.error.message}`));
+                // A read "object not found" (-32001 from the metadata read path) is a
+                // normal negative result, not an error — resolve null so read methods
+                // (typed T | null) return cleanly and callers don't log it as a failure.
+                // The write path's -32001 ("Write operation returned null") keeps a
+                // distinct message and still rejects.
+                if (msg.error.code === -32001 && /not found/i.test(msg.error.message ?? '')) {
+                  pending.resolve(null);
+                } else {
+                  pending.reject(new Error(`Bridge error [${msg.error.code}]: ${msg.error.message}`));
+                }
               } else {
                 pending.resolve(msg.result);
               }
@@ -329,9 +338,12 @@ export class BridgeClient extends EventEmitter {
 
       child.on('exit', (code, signal) => {
         if (this.process !== child) return;
+        clearTimeout(timeout);
         this._isReady = false;
         console.error(`[BridgeClient] Process exited: code=${code}, signal=${signal}`);
-        this.rejectAllPending(new Error(`Bridge process exited unexpectedly: code=${code}`));
+        const exitErr = new Error(`Bridge process exited before becoming ready: code=${code}, signal=${signal}`);
+        this.rejectAllPending(exitErr);
+        reject(exitErr);
       });
     });
   }

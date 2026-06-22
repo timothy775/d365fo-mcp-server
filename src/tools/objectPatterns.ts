@@ -22,9 +22,9 @@ function err(text: string) {
 
 export async function objectPatternsTool(request: CallToolRequest, context: XppServerContext) {
   const a = (request.params.arguments ?? {}) as Record<string, any>;
-  // Accept `patternType` / `type` as aliases for the `domain` discriminator —
-  // agents frequently reach for these names.
-  let domain = (a.domain ?? a.patternType ?? a.type) as string | undefined;
+  // Accept `patternType` / `type` / `objectType` as aliases for the `domain`
+  // discriminator — agents frequently reach for these names.
+  let domain = (a.domain ?? a.patternType ?? a.type ?? a.objectType) as string | undefined;
 
   // Infer the discriminator from form/table-specific params when omitted.
   if (domain !== 'table' && domain !== 'form') {
@@ -56,10 +56,14 @@ export async function objectPatternsTool(request: CallToolRequest, context: XppS
     return formPatternTool(formRequest, context);
   }
 
+  const got = a.domain ?? a.patternType ?? a.type ?? a.objectType ?? '';
   return err(
-    `object_patterns: could not determine domain (got domain/patternType="${a.domain ?? a.patternType ?? a.type ?? ''}"). ` +
-    `Pass domain="table" (table field/index/relation patterns) or domain="form" (form-pattern toolkit; with action=analyze|spec|validate). ` +
-    `Domain is also inferred from action/pattern/xml/formName (→ form) or tableGroup (→ table).`,
+    `object_patterns: could not determine domain (got domain/objectType="${got}"). ` +
+    `This tool only covers table and form patterns — pass domain="table" (table field/index/relation patterns) ` +
+    `or domain="form" (form-pattern toolkit; with action=analyze|spec|validate). ` +
+    `Domain is also inferred from action/pattern/xml/formName (→ form) or tableGroup (→ table).\n\n` +
+    `If you were after a feature/concept (e.g. "number-sequence", SysOperation, RunBase, data events), ` +
+    `that is a knowledge topic — use get_knowledge(topic="${typeof got === 'string' && got ? got : '<topic>'}") instead.`,
   );
 }
 
