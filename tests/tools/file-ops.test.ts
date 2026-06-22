@@ -9,7 +9,7 @@ import { validateObjectNamingTool } from '../../src/tools/validateObjectNaming';
 import { getExtensionNamingStyle } from '../../src/utils/modelClassifier';
 import { verifyD365ProjectTool } from '../../src/tools/verifyD365Project';
 import { handleCreateD365File } from '../../src/tools/createD365File';
-import { modifyD365FileTool } from '../../src/tools/modifyD365File';
+import { modifyD365FileTool, countTopLevelMethodBodies, isUnresolvedObjectError, extractMethodNameFromSource } from '../../src/tools/modifyD365File';
 import type { XppServerContext } from '../../src/types/context';
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 
@@ -647,6 +647,317 @@ describe('modify_d365fo_file', () => {
     );
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/bridge is not available/i);
+  });
+
+  it('add-index maps indexFields objects to a flat field-name string[] for the bridge', async () => {
+    // Regression: indexFields is documented as [{ fieldName, direction? }], but the
+    // bridge's addIndex expects string[]. Passing the objects straight through made
+    // the C# side fail to deserialize [{fieldName:…}] into List<string>, surfacing as
+    // a null bridge result misreported as "could not resolve table".
+    const fsMod = await import('fs/promises');
+    (fsMod.readFile as any).mockResolvedValueOnce(
+      `<?xml version="1.0"?><AxTable><Name>AslRentEquipmentTable</Name></AxTable>`,
+    );
+
+    const addIndex = vi.fn(async () => ({ success: true, api: 'IMetaTableProvider.Update' }));
+    (ctx as any).bridge = {
+      isReady: true,
+      metadataAvailable: true,
+      addIndex,
+      // bridgeValidateAfterWrite is fire-and-forget; provide a no-op surface.
+      validateObject: vi.fn(async () => null),
+    };
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'table',
+        objectName: 'AslRentEquipmentTable',
+        operation: 'add-index',
+        indexName: 'EquipmentIdx',
+        indexFields: [{ fieldName: 'AslRentEquipmentId' }],
+        indexAllowDuplicates: false,
+        indexAlternateKey: true,
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentEquipmentTable.xml',
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(addIndex).toHaveBeenCalledTimes(1);
+    const [tableName, indexName, fields, allowDuplicates, alternateKey] = addIndex.mock.calls[0];
+    expect(tableName).toBe('AslRentEquipmentTable');
+    expect(indexName).toBe('EquipmentIdx');
+    // The critical assertion: a flat array of strings, not [{ fieldName }] objects.
+    expect(fields).toEqual(['AslRentEquipmentId']);
+    expect(allowDuplicates).toBe(false);
+    expect(alternateKey).toBe(true);
+  });
+
+  it('add-relation maps relationConstraints {fieldName,relatedFieldName} to {field,relatedField}', async () => {
+    // Regression: relationConstraints is documented as [{ fieldName, relatedFieldName }] but the
+    // C# WriteRelationConstraint deserializes { field, relatedField }. Without remapping, C# sees
+    // null keys and silently writes a relation with empty constraints (no error, corruption at
+    // compile time).
+    const fsMod = await import('fs/promises');
+    (fsMod.readFile as any).mockResolvedValueOnce(
+      `<?xml version="1.0"?><AxTable><Name>AslRentEquipmentTable</Name></AxTable>`,
+    );
+
+    const addRelation = vi.fn(async () => ({ success: true, api: 'IMetaTableProvider.Update' }));
+    (ctx as any).bridge = {
+      isReady: true,
+      metadataAvailable: true,
+      addRelation,
+      validateObject: vi.fn(async () => null),
+    };
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'table',
+        objectName: 'AslRentEquipmentTable',
+        operation: 'add-relation',
+        relationName: 'AslRentCategory',
+        relatedTable: 'AslRentCategoryTable',
+        relationConstraints: [{ fieldName: 'CategoryId', relatedFieldName: 'CategoryId' }],
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentEquipmentTable.xml',
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(addRelation).toHaveBeenCalledTimes(1);
+    const [, , , constraints] = addRelation.mock.calls[0];
+    expect(constraints).toEqual([{ field: 'CategoryId', relatedField: 'CategoryId' }]);
+  });
+
+  it('surfaces the real bridge error (not a generic "could not resolve") on a non-resolution failure', async () => {
+    // Regression for the masking bug: adapter catch used to swallow the C# error and
+    // return null, which the tool reported as "could not resolve table". Now the real
+    // message must come through.
+    const fsMod = await import('fs/promises');
+    (fsMod.readFile as any).mockResolvedValueOnce(
+      `<?xml version="1.0"?><AxTable><Name>AslRentEquipmentTable</Name></AxTable>`,
+    );
+
+    const addIndex = vi.fn(async () => {
+      throw new Error("Bridge error [BadRequest]: index 'EquipmentIdx' already exists");
+    });
+    const refreshProvider = vi.fn(async () => ({ refreshed: true, elapsedMs: 1 }));
+    (ctx as any).bridge = { isReady: true, metadataAvailable: true, addIndex, refreshProvider };
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'table',
+        objectName: 'AslRentEquipmentTable',
+        operation: 'add-index',
+        indexName: 'EquipmentIdx',
+        indexFields: [{ fieldName: 'AslRentEquipmentId' }],
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentEquipmentTable.xml',
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/already exists/i);
+    // A non-resolution failure must NOT trigger the refresh+retry, and must NOT be
+    // dressed up as "could not resolve".
+    expect(result.content[0].text).not.toMatch(/could not resolve/i);
+    expect(addIndex).toHaveBeenCalledTimes(1);
+    expect(refreshProvider).not.toHaveBeenCalled();
+  });
+
+  it('refresh-retries once on an object-resolution failure, then surfaces guidance + bridge message', async () => {
+    const fsMod = await import('fs/promises');
+    (fsMod.readFile as any).mockResolvedValue(
+      `<?xml version="1.0"?><AxTable><Name>AslRentEquipmentTable</Name></AxTable>`,
+    );
+
+    const addIndex = vi.fn(async () => {
+      throw new Error("Bridge error [NotFound]: Table 'AslRentEquipmentTable' not found");
+    });
+    const refreshProvider = vi.fn(async () => ({ refreshed: true, elapsedMs: 1 }));
+    (ctx as any).bridge = { isReady: true, metadataAvailable: true, addIndex, refreshProvider };
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'table',
+        objectName: 'AslRentEquipmentTable',
+        operation: 'add-index',
+        indexName: 'EquipmentIdx',
+        indexFields: [{ fieldName: 'AslRentEquipmentId' }],
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentEquipmentTable.xml',
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBe(true);
+    // Resolution failure: retried exactly once (2 attempts), refresh attempted.
+    expect(addIndex).toHaveBeenCalledTimes(2);
+    expect(refreshProvider).toHaveBeenCalledTimes(1);
+    // Keeps the actionable same-session guidance AND shows what the bridge reported.
+    expect(result.content[0].text).toMatch(/could not resolve/i);
+    expect(result.content[0].text).toMatch(/Bridge reported:/);
+    expect(result.content[0].text).toMatch(/not found/i);
+  });
+
+  it('derives objectName from filePath when objectName is omitted', async () => {
+    const fsMod = await import('fs/promises');
+    (fsMod.readFile as any).mockResolvedValueOnce(
+      `<?xml version="1.0"?><AxTable><Name>AslRentEquipmentTable</Name></AxTable>`,
+    );
+
+    const addIndex = vi.fn(async () => ({ success: true, api: 'IMetaTableProvider.Update' }));
+    (ctx as any).bridge = { isReady: true, metadataAvailable: true, addIndex, refreshProvider: vi.fn() };
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'table',
+        // objectName intentionally omitted — must be derived from filePath basename
+        operation: 'add-index',
+        indexName: 'EquipmentIdx',
+        indexFields: [{ fieldName: 'AslRentEquipmentId' }],
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentEquipmentTable.xml',
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(addIndex).toHaveBeenCalledTimes(1);
+    expect(addIndex.mock.calls[0][0]).toBe('AslRentEquipmentTable');
+  });
+
+  it('errors clearly when both objectName and filePath are omitted', async () => {
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', { objectType: 'table', operation: 'add-index', indexName: 'X', indexFields: [{ fieldName: 'Y' }] }),
+      ctx,
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/objectName|filePath/);
+  });
+
+  it('rejects add-method whose sourceCode contains two methods', async () => {
+    const twoMethods =
+      `public int lastLineNum()\n{\n    return 0;\n}\n\n` +
+      `public AmountCur calcLineAmount()\n{\n    return this.Qty * this.Price;\n}`;
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'table',
+        objectName: 'AslRentAgreementLine',
+        operation: 'add-method',
+        methodName: 'lastLineNum',
+        sourceCode: twoMethods,
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentAgreementLine.xml',
+      }),
+      ctx,
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/exactly ONE method|2 method bodies/i);
+  });
+
+  it('countTopLevelMethodBodies counts methods, ignoring nested blocks/comments/strings', () => {
+    const oneWithNesting =
+      `public void run()\n{\n    if (this.x) { this.y(); }\n    while (a) { b(); }\n    str s = "a) { fake";\n}`;
+    expect(countTopLevelMethodBodies(oneWithNesting)).toBe(1);
+    // A CoC skeleton wraps the method in a class, so the method body is at depth 1,
+    // not top-level → counts 0. That's intended: class-wrapped methods are validly
+    // scoped, so the guard (reject > 1) never fires on them — it targets only BARE
+    // multi-method payloads, which are what land outside the class scope.
+    const cocSkeleton =
+      `[ExtensionOf(classStr(NumberSeqApplicationModule))]\nfinal class Foo_Extension\n{\n    public void loadModule()\n    {\n        next loadModule();\n    }\n}`;
+    expect(countTopLevelMethodBodies(cocSkeleton)).toBe(0);
+    const two =
+      `public int a()\n{\n    return 0;\n}\npublic int b()\n{\n    return 1;\n}`;
+    expect(countTopLevelMethodBodies(two)).toBe(2);
+  });
+
+  it('resolves an unprefixed objectName via the model prefix (RentEquipmentTable → AslRentEquipmentTable)', async () => {
+    const fsMod = await import('fs/promises');
+    const mc = await import('../../src/utils/modelClassifier');
+    const origResolve = vi.mocked(mc.resolveObjectPrefix).getMockImplementation();
+    const origApply = vi.mocked(mc.applyObjectPrefix).getMockImplementation();
+    vi.mocked(mc.resolveObjectPrefix).mockReturnValue('Asl');
+    vi.mocked(mc.applyObjectPrefix).mockImplementation((n: string) =>
+      n.toLowerCase().startsWith('asl') ? n : `Asl${n}`);
+    // Only the PREFIXED file exists on disk; the bare name does not.
+    (fsMod.access as any).mockImplementation(async (p: string) => {
+      if (/AslRentEquipmentTable\.xml$/i.test(p)) return;
+      if (/^[A-Za-z]:[\\/]?$/.test(p) || p === '/') return;
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    (fsMod.readFile as any).mockResolvedValue(
+      `<?xml version="1.0"?><AxTable><Name>AslRentEquipmentTable</Name></AxTable>`,
+    );
+
+    const addIndex = vi.fn(async () => ({ success: true, api: 'IMetaTableProvider.Update' }));
+    (ctx as any).bridge = { isReady: true, metadataAvailable: true, addIndex, refreshProvider: vi.fn() };
+
+    try {
+      const result = await modifyD365FileTool(
+        req('modify_d365fo_file', {
+          objectType: 'table',
+          objectName: 'RentEquipmentTable', // no Asl prefix — must be auto-resolved
+          operation: 'add-index',
+          indexName: 'AslRentEquipmentIdx',
+          indexFields: [{ fieldName: 'AslRentEquipmentId' }],
+          modelName: 'MyModel',
+        }),
+        ctx,
+      );
+      expect(result.isError).toBeFalsy();
+      // The bridge gets the prefixed name, derived from the resolved file basename.
+      expect(addIndex.mock.calls[0][0]).toBe('AslRentEquipmentTable');
+    } finally {
+      if (origResolve) vi.mocked(mc.resolveObjectPrefix).mockImplementation(origResolve);
+      if (origApply) vi.mocked(mc.applyObjectPrefix).mockImplementation(origApply);
+    }
+  });
+
+  it('isUnresolvedObjectError distinguishes object resolution from content/member misses', () => {
+    // Genuine object-resolution failures (retry-worthy)
+    expect(isUnresolvedObjectError("Table 'AslRentEquipmentTable' not found")).toBe(true);
+    expect(isUnresolvedObjectError("Form 'AslX' not found")).toBe(true);
+    expect(isUnresolvedObjectError("Cannot determine model for existing object 'AslRentModule'")).toBe(true);
+    expect(isUnresolvedObjectError('could not resolve table')).toBe(true);
+    // Content / member misses (NOT object resolution — must not trigger retry/guidance)
+    expect(isUnresolvedObjectError('Error in replaceCode: oldCode not found in AslRentEquipmentTable.classDeclaration')).toBe(false);
+    expect(isUnresolvedObjectError("Index 'EquipmentIdx' not found on table 'AslRentEquipmentTable'")).toBe(false);
+    expect(isUnresolvedObjectError('index already exists')).toBe(false);
+    expect(isUnresolvedObjectError(undefined)).toBe(false);
+  });
+
+  it('extractMethodNameFromSource reads the name from the signature', () => {
+    expect(extractMethodNameFromSource('public static AslRentParameters find(boolean _f = false)\n{\n}')).toBe('find');
+    expect(extractMethodNameFromSource('/// <summary>x</summary>\npublic void run()\n{\n}')).toBe('run');
+    expect(extractMethodNameFromSource('[ExtensionOf(classStr(Foo))]\nfinal class B\n{\n  public void loadModule() {}\n}')).toBe('loadModule');
+    expect(extractMethodNameFromSource(undefined)).toBeNull();
+  });
+
+  it('add-method derives methodName from the source signature and decodes XML entities', async () => {
+    const fsMod = await import('fs/promises');
+    (fsMod.readFile as any).mockResolvedValueOnce(
+      `<?xml version="1.0"?><AxTable><Name>AslRentParameters</Name></AxTable>`,
+    );
+    const addMethod = vi.fn(async () => ({ success: true, api: 'IMetaTableProvider.Update' }));
+    (ctx as any).bridge = { isReady: true, metadataAvailable: true, addMethod, refreshProvider: vi.fn(), validateObject: vi.fn(async () => null) };
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'table',
+        objectName: 'AslRentParameters',
+        operation: 'add-method',
+        // methodName omitted on purpose; entity-escaped doc comment
+        methodCode: '/// &lt;summary&gt;Finds the params.&lt;/summary&gt;\npublic static AslRentParameters find(boolean _forUpdate = false)\n{\n    AslRentParameters p;\n    return p;\n}',
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentParameters.xml',
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(addMethod).toHaveBeenCalledTimes(1);
+    const [, , methodName, source] = addMethod.mock.calls[0];
+    expect(methodName).toBe('find');                 // derived from signature
+    expect(source).toContain('/// <summary>');       // entities decoded
+    expect(source).not.toContain('&lt;');
   });
 
   it('replace-code returns bridge-required error when oldCode is not found (no bridge)', async () => {

@@ -809,11 +809,27 @@ namespace D365MetadataBridge.Protocol
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[ERROR] {request.Method}: {ex.Message}\n{ex.StackTrace}");
+                // createObject / createSmartTable always have a TS-side XML-generation
+                // fallback, so a failure here is a recoverable fast-path miss, not a
+                // server error. Log it at [INFO] (the TS side does not forward [INFO]
+                // to the MCP client) so it doesn't surface as an alarming warning. The
+                // error response is still returned so the caller falls back to XML.
+                if (IsRecoverableWrite(request.Method))
+                    Console.Error.WriteLine($"[INFO] {request.Method} failed (recoverable — caller falls back to XML generation): {ex.Message}");
+                else
+                    Console.Error.WriteLine($"[ERROR] {request.Method}: {ex.Message}\n{ex.StackTrace}");
                 return Task.FromResult(
                     BridgeResponse.CreateError(request.Id, -32603, $"Error in {request.Method}: {ex.Message}"));
             }
         }
+
+        /// <summary>
+        /// Write methods that have a guaranteed caller-side fallback (TS XML generation),
+        /// so a bridge failure is recoverable and should not be logged as a hard error.
+        /// </summary>
+        private static bool IsRecoverableWrite(string method) =>
+            string.Equals(method, "createObject", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(method, "createSmartTable", StringComparison.OrdinalIgnoreCase);
 
         private Task<BridgeResponse> HandleXref(BridgeRequest request, Func<object?> handler)
         {
