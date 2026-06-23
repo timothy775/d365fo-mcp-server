@@ -656,7 +656,7 @@ describe('modify_d365fo_file', () => {
     // a null bridge result misreported as "could not resolve table".
     const fsMod = await import('fs/promises');
     (fsMod.readFile as any).mockResolvedValueOnce(
-      `<?xml version="1.0"?><AxTable><Name>AslRentEquipmentTable</Name></AxTable>`,
+      `<?xml version="1.0"?><AxTable><Name>ContosoRentEquipmentTable</Name></AxTable>`,
     );
 
     const addIndex = vi.fn(async () => ({ success: true, api: 'IMetaTableProvider.Update' }));
@@ -671,13 +671,13 @@ describe('modify_d365fo_file', () => {
     const result = await modifyD365FileTool(
       req('modify_d365fo_file', {
         objectType: 'table',
-        objectName: 'AslRentEquipmentTable',
+        objectName: 'ContosoRentEquipmentTable',
         operation: 'add-index',
         indexName: 'EquipmentIdx',
-        indexFields: [{ fieldName: 'AslRentEquipmentId' }],
+        indexFields: [{ fieldName: 'ContosoRentEquipmentId' }],
         indexAllowDuplicates: false,
         indexAlternateKey: true,
-        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentEquipmentTable.xml',
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\ContosoRentEquipmentTable.xml',
       }),
       ctx,
     );
@@ -685,10 +685,10 @@ describe('modify_d365fo_file', () => {
     expect(result.isError).toBeFalsy();
     expect(addIndex).toHaveBeenCalledTimes(1);
     const [tableName, indexName, fields, allowDuplicates, alternateKey] = addIndex.mock.calls[0];
-    expect(tableName).toBe('AslRentEquipmentTable');
+    expect(tableName).toBe('ContosoRentEquipmentTable');
     expect(indexName).toBe('EquipmentIdx');
     // The critical assertion: a flat array of strings, not [{ fieldName }] objects.
-    expect(fields).toEqual(['AslRentEquipmentId']);
+    expect(fields).toEqual(['ContosoRentEquipmentId']);
     expect(allowDuplicates).toBe(false);
     expect(alternateKey).toBe(true);
   });
@@ -700,7 +700,7 @@ describe('modify_d365fo_file', () => {
     // compile time).
     const fsMod = await import('fs/promises');
     (fsMod.readFile as any).mockResolvedValueOnce(
-      `<?xml version="1.0"?><AxTable><Name>AslRentEquipmentTable</Name></AxTable>`,
+      `<?xml version="1.0"?><AxTable><Name>ContosoRentEquipmentTable</Name></AxTable>`,
     );
 
     const addRelation = vi.fn(async () => ({ success: true, api: 'IMetaTableProvider.Update' }));
@@ -714,12 +714,12 @@ describe('modify_d365fo_file', () => {
     const result = await modifyD365FileTool(
       req('modify_d365fo_file', {
         objectType: 'table',
-        objectName: 'AslRentEquipmentTable',
+        objectName: 'ContosoRentEquipmentTable',
         operation: 'add-relation',
-        relationName: 'AslRentCategory',
-        relatedTable: 'AslRentCategoryTable',
+        relationName: 'ContosoRentCategory',
+        relatedTable: 'ContosoRentCategoryTable',
         relationConstraints: [{ fieldName: 'CategoryId', relatedFieldName: 'CategoryId' }],
-        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentEquipmentTable.xml',
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\ContosoRentEquipmentTable.xml',
       }),
       ctx,
     );
@@ -736,7 +736,7 @@ describe('modify_d365fo_file', () => {
     // message must come through.
     const fsMod = await import('fs/promises');
     (fsMod.readFile as any).mockResolvedValueOnce(
-      `<?xml version="1.0"?><AxTable><Name>AslRentEquipmentTable</Name></AxTable>`,
+      `<?xml version="1.0"?><AxTable><Name>ContosoRentEquipmentTable</Name></AxTable>`,
     );
 
     const addIndex = vi.fn(async () => {
@@ -748,11 +748,11 @@ describe('modify_d365fo_file', () => {
     const result = await modifyD365FileTool(
       req('modify_d365fo_file', {
         objectType: 'table',
-        objectName: 'AslRentEquipmentTable',
+        objectName: 'ContosoRentEquipmentTable',
         operation: 'add-index',
         indexName: 'EquipmentIdx',
-        indexFields: [{ fieldName: 'AslRentEquipmentId' }],
-        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentEquipmentTable.xml',
+        indexFields: [{ fieldName: 'ContosoRentEquipmentId' }],
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\ContosoRentEquipmentTable.xml',
       }),
       ctx,
     );
@@ -769,11 +769,11 @@ describe('modify_d365fo_file', () => {
   it('refresh-retries once on an object-resolution failure, then surfaces guidance + bridge message', async () => {
     const fsMod = await import('fs/promises');
     (fsMod.readFile as any).mockResolvedValue(
-      `<?xml version="1.0"?><AxTable><Name>AslRentEquipmentTable</Name></AxTable>`,
+      `<?xml version="1.0"?><AxTable><Name>ContosoRentEquipmentTable</Name></AxTable>`,
     );
 
     const addIndex = vi.fn(async () => {
-      throw new Error("Bridge error [NotFound]: Table 'AslRentEquipmentTable' not found");
+      throw new Error("Bridge error [NotFound]: Table 'ContosoRentEquipmentTable' not found");
     });
     const refreshProvider = vi.fn(async () => ({ refreshed: true, elapsedMs: 1 }));
     (ctx as any).bridge = { isReady: true, metadataAvailable: true, addIndex, refreshProvider };
@@ -781,11 +781,11 @@ describe('modify_d365fo_file', () => {
     const result = await modifyD365FileTool(
       req('modify_d365fo_file', {
         objectType: 'table',
-        objectName: 'AslRentEquipmentTable',
+        objectName: 'ContosoRentEquipmentTable',
         operation: 'add-index',
         indexName: 'EquipmentIdx',
-        indexFields: [{ fieldName: 'AslRentEquipmentId' }],
-        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentEquipmentTable.xml',
+        indexFields: [{ fieldName: 'ContosoRentEquipmentId' }],
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\ContosoRentEquipmentTable.xml',
       }),
       ctx,
     );
@@ -803,7 +803,7 @@ describe('modify_d365fo_file', () => {
   it('derives objectName from filePath when objectName is omitted', async () => {
     const fsMod = await import('fs/promises');
     (fsMod.readFile as any).mockResolvedValueOnce(
-      `<?xml version="1.0"?><AxTable><Name>AslRentEquipmentTable</Name></AxTable>`,
+      `<?xml version="1.0"?><AxTable><Name>ContosoRentEquipmentTable</Name></AxTable>`,
     );
 
     const addIndex = vi.fn(async () => ({ success: true, api: 'IMetaTableProvider.Update' }));
@@ -815,15 +815,15 @@ describe('modify_d365fo_file', () => {
         // objectName intentionally omitted — must be derived from filePath basename
         operation: 'add-index',
         indexName: 'EquipmentIdx',
-        indexFields: [{ fieldName: 'AslRentEquipmentId' }],
-        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentEquipmentTable.xml',
+        indexFields: [{ fieldName: 'ContosoRentEquipmentId' }],
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\ContosoRentEquipmentTable.xml',
       }),
       ctx,
     );
 
     expect(result.isError).toBeFalsy();
     expect(addIndex).toHaveBeenCalledTimes(1);
-    expect(addIndex.mock.calls[0][0]).toBe('AslRentEquipmentTable');
+    expect(addIndex.mock.calls[0][0]).toBe('ContosoRentEquipmentTable');
   });
 
   it('errors clearly when both objectName and filePath are omitted', async () => {
@@ -842,11 +842,11 @@ describe('modify_d365fo_file', () => {
     const result = await modifyD365FileTool(
       req('modify_d365fo_file', {
         objectType: 'table',
-        objectName: 'AslRentAgreementLine',
+        objectName: 'ContosoRentAgreementLine',
         operation: 'add-method',
         methodName: 'lastLineNum',
         sourceCode: twoMethods,
-        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentAgreementLine.xml',
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\ContosoRentAgreementLine.xml',
       }),
       ctx,
     );
@@ -870,22 +870,22 @@ describe('modify_d365fo_file', () => {
     expect(countTopLevelMethodBodies(two)).toBe(2);
   });
 
-  it('resolves an unprefixed objectName via the model prefix (RentEquipmentTable → AslRentEquipmentTable)', async () => {
+  it('resolves an unprefixed objectName via the model prefix (RentEquipmentTable → ContosoRentEquipmentTable)', async () => {
     const fsMod = await import('fs/promises');
     const mc = await import('../../src/utils/modelClassifier');
     const origResolve = vi.mocked(mc.resolveObjectPrefix).getMockImplementation();
     const origApply = vi.mocked(mc.applyObjectPrefix).getMockImplementation();
-    vi.mocked(mc.resolveObjectPrefix).mockReturnValue('Asl');
+    vi.mocked(mc.resolveObjectPrefix).mockReturnValue('Contoso');
     vi.mocked(mc.applyObjectPrefix).mockImplementation((n: string) =>
-      n.toLowerCase().startsWith('asl') ? n : `Asl${n}`);
+      n.toLowerCase().startsWith('contoso') ? n : `Contoso${n}`);
     // Only the PREFIXED file exists on disk; the bare name does not.
     (fsMod.access as any).mockImplementation(async (p: string) => {
-      if (/AslRentEquipmentTable\.xml$/i.test(p)) return;
+      if (/ContosoRentEquipmentTable\.xml$/i.test(p)) return;
       if (/^[A-Za-z]:[\\/]?$/.test(p) || p === '/') return;
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
     (fsMod.readFile as any).mockResolvedValue(
-      `<?xml version="1.0"?><AxTable><Name>AslRentEquipmentTable</Name></AxTable>`,
+      `<?xml version="1.0"?><AxTable><Name>ContosoRentEquipmentTable</Name></AxTable>`,
     );
 
     const addIndex = vi.fn(async () => ({ success: true, api: 'IMetaTableProvider.Update' }));
@@ -895,17 +895,17 @@ describe('modify_d365fo_file', () => {
       const result = await modifyD365FileTool(
         req('modify_d365fo_file', {
           objectType: 'table',
-          objectName: 'RentEquipmentTable', // no Asl prefix — must be auto-resolved
+          objectName: 'RentEquipmentTable', // no Contoso prefix — must be auto-resolved
           operation: 'add-index',
-          indexName: 'AslRentEquipmentIdx',
-          indexFields: [{ fieldName: 'AslRentEquipmentId' }],
+          indexName: 'ContosoRentEquipmentIdx',
+          indexFields: [{ fieldName: 'ContosoRentEquipmentId' }],
           modelName: 'MyModel',
         }),
         ctx,
       );
       expect(result.isError).toBeFalsy();
       // The bridge gets the prefixed name, derived from the resolved file basename.
-      expect(addIndex.mock.calls[0][0]).toBe('AslRentEquipmentTable');
+      expect(addIndex.mock.calls[0][0]).toBe('ContosoRentEquipmentTable');
     } finally {
       if (origResolve) vi.mocked(mc.resolveObjectPrefix).mockImplementation(origResolve);
       if (origApply) vi.mocked(mc.applyObjectPrefix).mockImplementation(origApply);
@@ -914,19 +914,19 @@ describe('modify_d365fo_file', () => {
 
   it('isUnresolvedObjectError distinguishes object resolution from content/member misses', () => {
     // Genuine object-resolution failures (retry-worthy)
-    expect(isUnresolvedObjectError("Table 'AslRentEquipmentTable' not found")).toBe(true);
-    expect(isUnresolvedObjectError("Form 'AslX' not found")).toBe(true);
-    expect(isUnresolvedObjectError("Cannot determine model for existing object 'AslRentModule'")).toBe(true);
+    expect(isUnresolvedObjectError("Table 'ContosoRentEquipmentTable' not found")).toBe(true);
+    expect(isUnresolvedObjectError("Form 'ContosoX' not found")).toBe(true);
+    expect(isUnresolvedObjectError("Cannot determine model for existing object 'ContosoRentModule'")).toBe(true);
     expect(isUnresolvedObjectError('could not resolve table')).toBe(true);
     // Content / member misses (NOT object resolution — must not trigger retry/guidance)
-    expect(isUnresolvedObjectError('Error in replaceCode: oldCode not found in AslRentEquipmentTable.classDeclaration')).toBe(false);
-    expect(isUnresolvedObjectError("Index 'EquipmentIdx' not found on table 'AslRentEquipmentTable'")).toBe(false);
+    expect(isUnresolvedObjectError('Error in replaceCode: oldCode not found in ContosoRentEquipmentTable.classDeclaration')).toBe(false);
+    expect(isUnresolvedObjectError("Index 'EquipmentIdx' not found on table 'ContosoRentEquipmentTable'")).toBe(false);
     expect(isUnresolvedObjectError('index already exists')).toBe(false);
     expect(isUnresolvedObjectError(undefined)).toBe(false);
   });
 
   it('extractMethodNameFromSource reads the name from the signature', () => {
-    expect(extractMethodNameFromSource('public static AslRentParameters find(boolean _f = false)\n{\n}')).toBe('find');
+    expect(extractMethodNameFromSource('public static ContosoRentParameters find(boolean _f = false)\n{\n}')).toBe('find');
     expect(extractMethodNameFromSource('/// <summary>x</summary>\npublic void run()\n{\n}')).toBe('run');
     expect(extractMethodNameFromSource('[ExtensionOf(classStr(Foo))]\nfinal class B\n{\n  public void loadModule() {}\n}')).toBe('loadModule');
     expect(extractMethodNameFromSource(undefined)).toBeNull();
@@ -935,7 +935,7 @@ describe('modify_d365fo_file', () => {
   it('add-method derives methodName from the source signature and decodes XML entities', async () => {
     const fsMod = await import('fs/promises');
     (fsMod.readFile as any).mockResolvedValueOnce(
-      `<?xml version="1.0"?><AxTable><Name>AslRentParameters</Name></AxTable>`,
+      `<?xml version="1.0"?><AxTable><Name>ContosoRentParameters</Name></AxTable>`,
     );
     const addMethod = vi.fn(async () => ({ success: true, api: 'IMetaTableProvider.Update' }));
     (ctx as any).bridge = { isReady: true, metadataAvailable: true, addMethod, refreshProvider: vi.fn(), validateObject: vi.fn(async () => null) };
@@ -943,11 +943,11 @@ describe('modify_d365fo_file', () => {
     const result = await modifyD365FileTool(
       req('modify_d365fo_file', {
         objectType: 'table',
-        objectName: 'AslRentParameters',
+        objectName: 'ContosoRentParameters',
         operation: 'add-method',
         // methodName omitted on purpose; entity-escaped doc comment
-        methodCode: '/// &lt;summary&gt;Finds the params.&lt;/summary&gt;\npublic static AslRentParameters find(boolean _forUpdate = false)\n{\n    AslRentParameters p;\n    return p;\n}',
-        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentParameters.xml',
+        methodCode: '/// &lt;summary&gt;Finds the params.&lt;/summary&gt;\npublic static ContosoRentParameters find(boolean _forUpdate = false)\n{\n    ContosoRentParameters p;\n    return p;\n}',
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\ContosoRentParameters.xml',
       }),
       ctx,
     );
@@ -991,7 +991,7 @@ describe('modify_d365fo_file', () => {
     // as List<string> with null entries — silently creates an index with no fields.
     const fsMod = await import('fs/promises');
     (fsMod.readFile as any).mockResolvedValueOnce(
-      `<?xml version="1.0"?><AxTable><Name>AslRentEquipmentTable</Name></AxTable>`,
+      `<?xml version="1.0"?><AxTable><Name>ContosoRentEquipmentTable</Name></AxTable>`,
     );
 
     const addIndex = vi.fn(async () => ({ success: true, api: 'IMetaTableProvider.Update' }));
@@ -1005,13 +1005,13 @@ describe('modify_d365fo_file', () => {
     const result = await modifyD365FileTool(
       req('modify_d365fo_file', {
         objectType: 'table',
-        objectName: 'AslRentEquipmentTable',
+        objectName: 'ContosoRentEquipmentTable',
         operation: 'add-index',
         indexName: 'EquipmentIdx',
-        indexFields: [{ fieldName: 'AslRentEquipmentId' }],
+        indexFields: [{ fieldName: 'ContosoRentEquipmentId' }],
         indexAllowDuplicates: false,
         indexAlternateKey: true,
-        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentEquipmentTable.xml',
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\ContosoRentEquipmentTable.xml',
       }),
       ctx,
     );
@@ -1019,10 +1019,10 @@ describe('modify_d365fo_file', () => {
     expect(result.isError).toBeFalsy();
     expect(addIndex).toHaveBeenCalledTimes(1);
     const [tableName, indexName, fields, allowDuplicates, alternateKey] = addIndex.mock.calls[0];
-    expect(tableName).toBe('AslRentEquipmentTable');
+    expect(tableName).toBe('ContosoRentEquipmentTable');
     expect(indexName).toBe('EquipmentIdx');
     // The critical assertion: a flat array of strings, not [{ fieldName }] objects.
-    expect(fields).toEqual(['AslRentEquipmentId']);
+    expect(fields).toEqual(['ContosoRentEquipmentId']);
     expect(allowDuplicates).toBe(false);
     expect(alternateKey).toBe(true);
   });
@@ -1033,7 +1033,7 @@ describe('modify_d365fo_file', () => {
     // null keys and silently writes a relation with empty constraints.
     const fsMod = await import('fs/promises');
     (fsMod.readFile as any).mockResolvedValueOnce(
-      `<?xml version="1.0"?><AxTable><Name>AslRentEquipmentTable</Name></AxTable>`,
+      `<?xml version="1.0"?><AxTable><Name>ContosoRentEquipmentTable</Name></AxTable>`,
     );
 
     const addRelation = vi.fn(async () => ({ success: true, api: 'IMetaTableProvider.Update' }));
@@ -1047,12 +1047,12 @@ describe('modify_d365fo_file', () => {
     const result = await modifyD365FileTool(
       req('modify_d365fo_file', {
         objectType: 'table',
-        objectName: 'AslRentEquipmentTable',
+        objectName: 'ContosoRentEquipmentTable',
         operation: 'add-relation',
-        relationName: 'AslRentCategory',
-        relatedTable: 'AslRentCategoryTable',
+        relationName: 'ContosoRentCategory',
+        relatedTable: 'ContosoRentCategoryTable',
         relationConstraints: [{ fieldName: 'CategoryId', relatedFieldName: 'CategoryId' }],
-        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentEquipmentTable.xml',
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\ContosoRentEquipmentTable.xml',
       }),
       ctx,
     );
@@ -1066,7 +1066,7 @@ describe('modify_d365fo_file', () => {
   it('derives objectName from filePath when objectName is omitted', async () => {
     const fsMod = await import('fs/promises');
     (fsMod.readFile as any).mockResolvedValueOnce(
-      `<?xml version="1.0"?><AxTable><Name>AslRentEquipmentTable</Name></AxTable>`,
+      `<?xml version="1.0"?><AxTable><Name>ContosoRentEquipmentTable</Name></AxTable>`,
     );
 
     const addIndex = vi.fn(async () => ({ success: true, api: 'IMetaTableProvider.Update' }));
@@ -1078,15 +1078,15 @@ describe('modify_d365fo_file', () => {
         // objectName intentionally omitted — must be derived from filePath basename
         operation: 'add-index',
         indexName: 'EquipmentIdx',
-        indexFields: [{ fieldName: 'AslRentEquipmentId' }],
-        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\AslRentEquipmentTable.xml',
+        indexFields: [{ fieldName: 'ContosoRentEquipmentId' }],
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\ContosoRentEquipmentTable.xml',
       }),
       ctx,
     );
 
     expect(result.isError).toBeFalsy();
     expect(addIndex).toHaveBeenCalledTimes(1);
-    expect(addIndex.mock.calls[0][0]).toBe('AslRentEquipmentTable');
+    expect(addIndex.mock.calls[0][0]).toBe('ContosoRentEquipmentTable');
   });
 
   it('errors clearly when both objectName and filePath are omitted', async () => {
@@ -1096,5 +1096,80 @@ describe('modify_d365fo_file', () => {
     );
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/objectName|filePath/);
+  });
+
+  it('add-menu-item-to-menu falls back to XML when bridge fails (new menu not in bridge model)', async () => {
+    // Regression: bridge throws NullRef for menus created this session because they
+    // aren't in its startup-fixed metadata roots. The XML fallback must succeed.
+    const fsMod = await import('fs/promises');
+    const menuXml =
+      `<?xml version="1.0" encoding="utf-8"?>\n` +
+      `<AxMenu xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V1">\n` +
+      `\t<Name>ContosoRentMenu</Name>\n` +
+      `\t<Label>@TODO:LabelId</Label>\n` +
+      `\t<Elements />\n` +
+      `</AxMenu>`;
+    // readFile is called twice: once to check for JSON metadata, once in the XML fallback.
+    (fsMod.readFile as any).mockResolvedValue(menuXml);
+
+    const addMenuItemToMenu = vi.fn(async () => {
+      throw new Error('Object reference not set to an instance of an object');
+    });
+    (ctx as any).bridge = { isReady: true, metadataAvailable: true, addMenuItemToMenu, refreshProvider: vi.fn() };
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'menu',
+        objectName: 'ContosoRentMenu',
+        operation: 'add-menu-item-to-menu',
+        menuItemToAdd: 'ContosoRentEquipmentTable',
+        menuItemToAddType: 'display',
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxMenu\\ContosoRentMenu.xml',
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    // Bridge was attempted first (and failed), XML fallback wrote the file.
+    expect(addMenuItemToMenu).toHaveBeenCalledTimes(1);
+    const written = (fsMod.writeFile as any).mock.calls.find((c: any[]) =>
+      c[0].includes('ContosoRentMenu.xml'),
+    );
+    expect(written).toBeDefined();
+    const writtenContent: string = written[1];
+    expect(writtenContent).toContain('AxMenuFunctionItem');
+    expect(writtenContent).toContain('<MenuItemName>ContosoRentEquipmentTable</MenuItemName>');
+    expect(writtenContent).toContain('<MenuItemType>Display</MenuItemType>');
+  });
+
+  it('replace-code "oldCode not found" error includes a tip to use get_object_info or add-method', async () => {
+    const fsMod = await import('fs/promises');
+    // File exists but the oldCode snippet isn't in it (bridge also won't find it).
+    (fsMod.readFile as any).mockResolvedValue(
+      `<?xml version="1.0"?><AxTable><Name>ContosoRentAgreementLine</Name></AxTable>`,
+    );
+
+    const replaceCode = vi.fn(async () => {
+      throw new Error('oldCode not found in ContosoRentAgreementLine.initValue');
+    });
+    (ctx as any).bridge = { isReady: true, metadataAvailable: true, replaceCode, refreshProvider: vi.fn() };
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'table',
+        objectName: 'ContosoRentAgreementLine',
+        operation: 'replace-code',
+        methodName: 'initValue',
+        oldCode: 'super();',
+        newCode: 'super();\nthis.Qty = 1;',
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\ContosoRentAgreementLine.xml',
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBe(true);
+    // Must surface the original error AND the add-method/get_object_info tip.
+    expect(result.content[0].text).toMatch(/oldCode not found/i);
+    expect(result.content[0].text).toMatch(/get_object_info|add-method/i);
   });
 });

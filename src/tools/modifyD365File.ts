@@ -257,6 +257,55 @@ async function directXmlReplaceCode(
 }
 
 /**
+ * Direct XML fallback for add-menu-item-to-menu.
+ * The C# bridge can only modify menus it has loaded from its startup roots;
+ * newly created menus trigger a NullRef because they aren't in the bridge's
+ * in-memory model yet (even after update_symbol_index). This function edits
+ * the XML file directly as a last-resort fallback.
+ */
+async function directXmlAddMenuItemToMenu(
+  filePath: string,
+  menuItemToAdd: string,
+  menuItemToAddType: string,
+): Promise<{ success: boolean; message: string } | null> {
+  try {
+    const rawContent = await fs.readFile(filePath, 'utf-8');
+    const content = rawContent.replace(/^﻿/, '').replace(/\r\n/g, '\n');
+
+    const typeMap: Record<string, string> = { display: 'Display', action: 'Action', output: 'Output' };
+    const menuItemType = typeMap[menuItemToAddType?.toLowerCase()] ?? 'Display';
+
+    const newElement =
+      `\t\t<AxMenuFunctionItem>\n` +
+      `\t\t\t<Name>${menuItemToAdd}</Name>\n` +
+      `\t\t\t<MenuItemName>${menuItemToAdd}</MenuItemName>\n` +
+      `\t\t\t<MenuItemType>${menuItemType}</MenuItemType>\n` +
+      `\t\t</AxMenuFunctionItem>`;
+
+    let updated: string;
+    if (content.includes('<Elements />')) {
+      updated = content.replace('<Elements />', `<Elements>\n${newElement}\n\t</Elements>`);
+    } else if (content.includes('</Elements>')) {
+      updated = content.replace('</Elements>', `${newElement}\n\t</Elements>`);
+    } else {
+      return null;
+    }
+
+    if (updated === content) return null;
+
+    await fs.writeFile(filePath, normalizeD365Xml(updated), 'utf-8');
+    console.error(`[modify_d365fo_file] ✅ directXmlAddMenuItemToMenu: added '${menuItemToAdd}' to ${filePath}`);
+    return {
+      success: true,
+      message: `✅ Menu item '${menuItemToAdd}' (${menuItemType}) added via direct XML fallback. File: ${filePath}`,
+    };
+  } catch (err) {
+    console.error(`[modify_d365fo_file] directXmlAddMenuItemToMenu failed: ${err}`);
+    return null;
+  }
+}
+
+/**
  * Heuristic: does a bridge failure message indicate the C# provider could not
  * resolve the target object (vs. a genuine operation error like "index already
  * exists")? An unresolved object is the one failure worth a refresh+retry,
@@ -1331,6 +1380,18 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
             (args as any).menuItemToAdd,
             (args as any).menuItemToAddType,
           );
+          // Fallback: bridge requires the menu to exist in its loaded metadata roots.
+          // Newly created menus aren't there yet — write directly to the XML file.
+          if (!bridgeResult || !bridgeResult.success) {
+            const xmlFallbackResult = await directXmlAddMenuItemToMenu(
+              actualFilePath,
+              (args as any).menuItemToAdd,
+              (args as any).menuItemToAddType ?? 'display',
+            );
+            if (xmlFallbackResult) {
+              bridgeResult = xmlFallbackResult;
+            }
+          }
         }
         break;
       }
@@ -1437,7 +1498,15 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
           unresolvedObjectError(operation, objectType, objectName, actualFilePath, bridgeResult!.message),
         );
       }
-      throw new Error(`Bridge operation '${operation}' failed: ${bridgeResult!.message}`);
+      let opErrorMsg = `Bridge operation '${operation}' failed: ${bridgeResult!.message}`;
+      if (operation === 'replace-code' && /oldCode not found/i.test(bridgeResult!.message ?? '')) {
+        opErrorMsg +=
+          `\n\n💡 Tip: The oldCode must match the exact source currently on disk.\n` +
+          `  • Fetch the current source first: get_object_info(objectType="${objectType}", name="${objectName}")\n` +
+          `  • Then copy the exact snippet from the output as oldCode.\n` +
+          `  • Alternative: use add-method with the complete new method body — it overwrites the existing method.`;
+      }
+      throw new Error(opErrorMsg);
     }
 
     console.error(`[modify_d365fo_file] ✅ Bridge ${operation}: ${bridgeResult.message}`);
