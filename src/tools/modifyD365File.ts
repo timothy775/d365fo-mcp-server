@@ -180,7 +180,7 @@ const ModifyD365FileArgsSchema = z.object({
     'menu', 'menu-extension',
     'security-privilege', 'security-duty', 'security-role',
   ]).describe('Type of D365FO object'),
-  objectName: z.string().describe('Name of the object to modify'),
+  objectName: z.string().optional().describe('Name of the object to modify'),
   operation: z.enum([
     'add-method', 'remove-method', 'replace-code',
     'add-field', 'modify-field', 'rename-field', 'replace-all-fields', 'remove-field',
@@ -450,6 +450,23 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
   try {
     const args = ModifyD365FileArgsSchema.parse(request.params.arguments);
 
+    // objectName is optional when filePath is given — derive it from the file
+    // basename using path.win32.basename (handles Windows backslash paths on
+    // all platforms — path.posix.basename treats '\\' as a regular character).
+    if (!args.objectName) {
+      if (args.filePath) {
+        (args as any).objectName = path.win32.basename(args.filePath, '.xml');
+      } else {
+        return {
+          content: [{
+            type: 'text',
+            text: "\u274c Provide 'objectName' \u2014 or 'filePath', from which the object name is derived.",
+          }],
+          isError: true,
+        };
+      }
+    }
+
     // Grounding enforcement: modifying an extension changes the behaviour of an
     // existing base object — when GROUNDING_ENFORCE=true the model must prove
     // (via prepare_change) that it inspected the real object first.
@@ -484,13 +501,15 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
     const { symbolIndex } = context;
     const {
       objectType,
-      objectName,
       operation,
       createBackup,
       modelName,
       workspacePath,
       filePath: explicitFilePath,
     } = args;
+    // objectName guaranteed non-null by the derivation block above.
+    // Declared as `let` so it can be corrected from the resolved file basename below.
+    let objectName = args.objectName!;
 
     // ── Auto-resolve parentControl for add-control on form-extension ─────────
     // When `parentControl` is a fuzzy / lowercase string (e.g. "general"), look
@@ -669,6 +688,17 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
       await createFileBackup(actualFilePath);
     }
 
+    // 3b. Derive the authoritative object name from the resolved file path.
+    //     The caller may pass objectName="RentEquipment" while the file on disk
+    //     is AslRentEquipment.xml (auto-prefixed at create time). The C# bridge
+    //     resolves objects by name — if the name doesn't match the file it will
+    //     always return null. Use path.win32.basename so Windows backslash paths
+    //     are handled correctly on all platforms (posix treats '\\' as a char).
+    const fileBaseName = path.win32.basename(actualFilePath, '.xml');
+    if (fileBaseName && fileBaseName !== objectName) {
+      objectName = fileBaseName;
+    }
+
     // ── Bridge-only modify via IMetadataProvider.Update() ────────────────────
     // ALL modify operations go through the C# bridge. The bridge reads, modifies,
     // and writes via the official D365FO metadata API — no xml2js needed.
@@ -845,11 +875,16 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
       }
       case 'add-index': {
         if ((args as any).indexName) {
+          // indexFields is documented as [{fieldName, direction?}] but the bridge
+          // expects a flat string[]. Map objects to their fieldName strings here.
+          const indexFieldNames: string[] | undefined = Array.isArray((args as any).indexFields)
+            ? (args as any).indexFields.map((f: any) => (typeof f === 'string' ? f : f?.fieldName)).filter(Boolean)
+            : undefined;
           bridgeResult = await bridgeAddIndex(
             context.bridge,
             objectName,
             (args as any).indexName,
-            (args as any).indexFields,
+            indexFieldNames,
             (args as any).indexAllowDuplicates,
             (args as any).indexAlternateKey,
           );
@@ -868,12 +903,20 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
       }
       case 'add-relation': {
         if ((args as any).relationName && (args as any).relatedTable) {
+          // relationConstraints is documented as [{fieldName, relatedFieldName}] but
+          // the bridge's WriteRelationConstraint deserializes {field, relatedField}.
+          const constraints = Array.isArray((args as any).relationConstraints)
+            ? (args as any).relationConstraints.map((c: any) => ({
+                field: c.fieldName ?? c.field,
+                relatedField: c.relatedFieldName ?? c.relatedField,
+              }))
+            : (args as any).relationConstraints;
           bridgeResult = await bridgeAddRelation(
             context.bridge,
             objectName,
             (args as any).relationName,
             (args as any).relatedTable,
-            (args as any).relationConstraints,
+            constraints,
           );
         }
         break;
