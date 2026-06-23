@@ -116,6 +116,22 @@ export async function getMethodSignatureTool(request: CallToolRequest, context: 
       return { content: [{ type: 'text', text: output }] };
     }
 
+    // classDeclaration is the class header pseudo-member — it has no
+    // parenthesised signature, so the signature path can never parse it even
+    // though its source is retrievable. Give an accurate pointer instead of the
+    // misleading "delegate / SubscribesTo" not-found message below.
+    if (methodName.toLowerCase() === 'classdeclaration') {
+      return {
+        content: [{
+          type: 'text',
+          text: `ℹ️ \`${className}.classDeclaration\` is the class header, not a method — it has no signature.\n\n` +
+            `Use \`get_method(className="${className}", methodName="classDeclaration", include="source")\` to read the declaration source, ` +
+            `or \`get_object_info(objectType="class", name="${className}")\` for the class overview.`,
+        }],
+        isError: true,
+      };
+    }
+
     // Method not in SQLite and not reachable via bridge/XML.
     // Delegates and SubscribesTo handlers are commonly absent from the index.
     if (!methodRow) {

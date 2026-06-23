@@ -66,9 +66,25 @@ export async function getMethodTool(request: CallToolRequest, context: XppServer
   // both: signature first (cheap context), then full source.
   const sig = await getMethodSignatureTool(subRequest('get_method_signature', rest), context);
   const src = await getMethodSourceTool(subRequest('get_method_source', rest), context);
+  const sigOk = Boolean(sig && !sig.isError);
+  const srcOk = Boolean(src && !src.isError);
+
+  // Source is the authoritative payload. Some members (e.g. classDeclaration)
+  // have a valid source but no parseable signature, so the signature path emits
+  // a misleading "method not found" error. When the source succeeded, only keep
+  // the parts that actually succeeded — never surface a signature-only failure.
+  const parts = [
+    ...(sigOk ? sig!.content : []),
+    ...(srcOk ? src!.content : []),
+  ];
+  if (parts.length > 0) {
+    return { content: parts, isError: false };
+  }
+
+  // Both failed — return the source error (its "not found" hint is more useful).
   return {
-    content: [...(sig?.content ?? []), ...(src?.content ?? [])],
-    isError: Boolean(sig?.isError || src?.isError),
+    content: [...(src?.content ?? sig?.content ?? [])],
+    isError: true,
   };
 }
 
