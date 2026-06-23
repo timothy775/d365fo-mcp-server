@@ -96,6 +96,16 @@ process.on('unhandledRejection', (reason) => {
   process.stderr.write(`[d365fo-mcp] ⚠️ Unhandled promise rejection (server staying up): ${msg}\n`);
 });
 
+// Same protection for SYNCHRONOUS uncaught exceptions — a throw that escapes a
+// timer/stream/event callback (not an awaited promise) would otherwise stop the
+// process outright. For a stdio server that means the MCP client must respawn
+// the subprocess after the very first failing request. Log the full stack so the
+// root cause is diagnosable, then keep serving. (Genuinely fatal startup errors
+// are still surfaced via main().catch → process.exit below.)
+process.on('uncaughtException', (err) => {
+  process.stderr.write(`[d365fo-mcp] ⚠️ Uncaught exception (server staying up): ${err?.stack ?? err}\n`);
+});
+
 const PORT = parseInt(process.env.PORT || '8080');
 // Derive server root from this file's location so paths are absolute
 // regardless of process.cwd() — critical when VS Code launches this as stdio subprocess.
