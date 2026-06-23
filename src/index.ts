@@ -210,10 +210,16 @@ async function initializeServices() {
     console.log(`📚 Loading metadata from: ${DB_PATH}`);
     console.log(`📚 Labels database: ${LABELS_DB_PATH}`);
     serverState.statusMessage = 'Loading metadata database...';
-    
+
+    // Yield event loop so any pending MCP protocol messages (initialize exchange,
+    // roots/list, first tool call) can be queued before new Database() blocks.
+    // better-sqlite3 open is synchronous — a 1.5 GB file can stall the loop for
+    // several seconds, causing the first client request to time out and cancel.
+    await new Promise<void>(r => setImmediate(r));
+
     let symbolIndex: XppSymbolIndex;
     let symbolCount = 0;
-    
+
     try {
       symbolIndex = new XppSymbolIndex(DB_PATH, LABELS_DB_PATH);
       symbolCount = symbolIndex.getSymbolCount();
