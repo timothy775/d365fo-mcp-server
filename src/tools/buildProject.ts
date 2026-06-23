@@ -253,9 +253,16 @@ async function readWholeLog(logFile: string): Promise<string> {
 //   2. Include a context window around each such line.
 //   3. Always include the last TAIL_LINES of the log (build summary).
 //   4. Fall back to head+tail only when no diagnostics are found.
+//
+// The number of diagnostic windows is capped at MAX_DIAGS so a build with
+// hundreds of scattered errors cannot blow up the (now uncapped) response —
+// the goal is to optimise the signal, not to dump the whole log. The first
+// MAX_DIAGS diagnostics (in log order, i.e. earliest/most actionable) are
+// shown; the structured diagnostics section above already summarises counts.
 async function readFullLog(logFile: string, maxLines = 300): Promise<string> {
-  const CONTEXT = 3;   // lines before/after each diagnostic
+  const CONTEXT = 3;     // lines before/after each diagnostic
   const TAIL_LINES = 30; // always-included trailing lines
+  const MAX_DIAGS = 30;  // cap on diagnostic windows to bound response size
 
   try {
     const content = await readFile(logFile, 'utf-8');
@@ -269,8 +276,11 @@ async function readFullLog(logFile: string, maxLines = 300): Promise<string> {
     }
 
     if (diagIndices.length > 0) {
+      const totalDiags = diagIndices.length;
+      const shownDiags = diagIndices.slice(0, MAX_DIAGS);
+
       const included = new Set<number>();
-      for (const idx of diagIndices) {
+      for (const idx of shownDiags) {
         for (let i = Math.max(0, idx - CONTEXT); i <= Math.min(all.length - 1, idx + CONTEXT); i++) {
           included.add(i);
         }
@@ -280,9 +290,10 @@ async function readFullLog(logFile: string, maxLines = 300): Promise<string> {
       }
 
       const sorted = [...included].sort((a, b) => a - b);
-      const out: string[] = [
-        `[Phase table omitted — ${diagIndices.length} diagnostic line(s) with context shown below]\n`,
-      ];
+      const header = totalDiags > shownDiags.length
+        ? `[Phase table omitted — first ${shownDiags.length} of ${totalDiags} diagnostic line(s) with context shown below]\n`
+        : `[Phase table omitted — ${totalDiags} diagnostic line(s) with context shown below]\n`;
+      const out: string[] = [header];
       let prev = -1;
       for (const i of sorted) {
         if (prev !== -1 && i > prev + 1) {
