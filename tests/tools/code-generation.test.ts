@@ -320,6 +320,11 @@ describe('XmlTemplateGenerator.generateAxSecurityPrivilegeXml', () => {
     expect(xml).toContain('<Correct>Allow</Correct>');
     expect(xml).toContain('<Fields />');
     expect(xml).toContain('<Methods />');
+    // Canonical Microsoft serializer order (verified against shipped
+    // ApplicationCommon privileges): Grant before Name, CRUD alphabetical.
+    expect(xml).toMatch(
+      /<AxSecurityDataEntityPermission>\s*<Grant>\s*<Correct>Allow<\/Correct>\s*<Create>Allow<\/Create>\s*<Delete>Allow<\/Delete>\s*<Read>Allow<\/Read>\s*<Update>Allow<\/Update>\s*<\/Grant>\s*<Name>MyEntityMaintain<\/Name>\s*<Fields \/>\s*<Methods \/>/,
+    );
   });
 
   it('defaults to view (Read only) when accessLevel is omitted', () => {
