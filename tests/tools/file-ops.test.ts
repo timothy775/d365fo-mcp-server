@@ -1003,22 +1003,22 @@ describe('modify_d365fo_file', () => {
     // skipped and only the actual methods are added.
     const fsMod = await import('fs/promises');
     (fsMod.readFile as any).mockResolvedValueOnce(
-      `<?xml version="1.0"?><AxClass><Name>AslRentAgreementTable_Extension</Name></AxClass>`,
+      `<?xml version="1.0"?><AxClass><Name>ContosoRentAgreementTable_Extension</Name></AxClass>`,
     );
     const addMethod = vi.fn(async () => ({ success: true, api: 'IMetaTableProvider.Update' }));
     (ctx as any).bridge = { isReady: true, metadataAvailable: true, addMethod, refreshProvider: vi.fn(), validateObject: vi.fn(async () => null) };
 
-    const classDecl = `[ExtensionOf(tableStr(AslRentAgreementTable))]\nfinal class AslRentAgreementTable_Extension\n{\n}`;
+    const classDecl = `[ExtensionOf(tableStr(ContosoRentAgreementTable))]\nfinal class ContosoRentAgreementTable_Extension\n{\n}`;
     const method1  = `public void validateStatus()\n{\n    // TODO\n}`;
     const method2  = `public void computeTotals()\n{\n    // TODO\n}`;
 
     const result = await modifyD365FileTool(
       req('modify_d365fo_file', {
         objectType: 'table',
-        objectName: 'AslRentAgreementTable_Extension',
+        objectName: 'ContosoRentAgreementTable_Extension',
         operation: 'add-method',
         sourceCode: `${classDecl}\n\n${method1}\n\n${method2}`,
-        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxClass\\AslRentAgreementTable_Extension.xml',
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxClass\\ContosoRentAgreementTable_Extension.xml',
       }),
       ctx,
     );
@@ -1211,6 +1211,92 @@ describe('modify_d365fo_file', () => {
     expect(writtenContent).toContain('AxMenuFunctionItem');
     expect(writtenContent).toContain('<MenuItemName>ContosoRentEquipmentTable</MenuItemName>');
     expect(writtenContent).toContain('<MenuItemType>Display</MenuItemType>');
+  });
+
+  it('add-control on a form-extension falls back to XML when the bridge fails (extension never resolves as a form)', async () => {
+    // Root cause: the C# bridge's AddControl reads _provider.Forms.Read(name), which
+    // can never resolve a form EXTENSION ("Base.Suffix") — it always reports
+    // 'Form "<ext>" not found'. The XML fallback must write the control element.
+    const fsMod = await import('fs/promises');
+    const extXml =
+      `<?xml version="1.0" encoding="utf-8"?>\n` +
+      `<AxFormExtension xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">\n` +
+      `\t<Name>ContosoRentConfiguration.MyExt</Name>\n` +
+      `\t<ControlModifications />\n` +
+      `\t<Controls />\n` +
+      `\t<DataSourceModifications />\n` +
+      `\t<PropertyModifications />\n` +
+      `</AxFormExtension>`;
+    (fsMod.readFile as any).mockResolvedValue(extXml);
+
+    const addControl = vi.fn(async () => {
+      throw new Error("Form 'ContosoRentConfiguration.MyExt' not found");
+    });
+    (ctx as any).bridge = { isReady: true, metadataAvailable: true, addControl, refreshProvider: vi.fn() };
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'form-extension',
+        objectName: 'ContosoRentConfiguration.MyExt',
+        operation: 'add-control',
+        controlName: 'ContosoPaymentReference',
+        parentControl: 'DetailsPropertiesFastTabPage',
+        controlType: 'String',
+        controlDataSource: 'ContosoRentRule',
+        controlDataField: 'ContosoPaymentReference',
+        controlLabel: '@ContosoLabels:PaymentReference',
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxFormExtension\\ContosoRentConfiguration.MyExt.xml',
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    // Bridge was attempted first (and failed), XML fallback wrote the file.
+    expect(addControl).toHaveBeenCalledTimes(1);
+    const written = (fsMod.writeFile as any).mock.calls.find((c: any[]) =>
+      String(c[0]).includes('ContosoRentConfiguration.MyExt.xml'),
+    );
+    expect(written).toBeDefined();
+    const writtenContent: string = written[1];
+    expect(writtenContent).toContain('<AxFormControlExtension>');
+    expect(writtenContent).toContain('<ParentControlName>DetailsPropertiesFastTabPage</ParentControlName>');
+    expect(writtenContent).toContain('AxFormStringControl');
+    expect(writtenContent).toContain('ContosoPaymentReference');
+    expect(writtenContent).toContain('<d4p1:DataSource>ContosoRentRule</d4p1:DataSource>');
+  });
+
+  it('add-control maps controlType to the matching AxForm*Control element (Integer → AxFormIntControl)', async () => {
+    const fsMod = await import('fs/promises');
+    const extXml =
+      `<?xml version="1.0" encoding="utf-8"?>\n` +
+      `<AxFormExtension xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V6">\n` +
+      `\t<Name>SomeForm.MyExt</Name>\n` +
+      `\t<Controls />\n` +
+      `</AxFormExtension>`;
+    (fsMod.readFile as any).mockResolvedValue(extXml);
+
+    const addControl = vi.fn(async () => ({ success: false }));
+    (ctx as any).bridge = { isReady: true, metadataAvailable: true, addControl, refreshProvider: vi.fn() };
+
+    const result = await modifyD365FileTool(
+      req('modify_d365fo_file', {
+        objectType: 'form-extension',
+        objectName: 'SomeForm.MyExt',
+        operation: 'add-control',
+        controlName: 'MyCount',
+        parentControl: 'TabGeneral',
+        controlType: 'Integer',
+        filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxFormExtension\\SomeForm.MyExt.xml',
+      }),
+      ctx,
+    );
+
+    expect(result.isError).toBeFalsy();
+    const written = (fsMod.writeFile as any).mock.calls.find((c: any[]) =>
+      String(c[0]).includes('SomeForm.MyExt.xml'),
+    );
+    expect(written).toBeDefined();
+    expect(written[1]).toContain('AxFormIntControl');
   });
 
   it('replace-code "oldCode not found" error includes a tip to use get_object_info or add-method', async () => {

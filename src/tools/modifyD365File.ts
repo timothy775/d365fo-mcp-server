@@ -347,6 +347,108 @@ async function directXmlAddMenuItemToMenu(
 }
 
 /**
+ * controlType (as passed to add-control) → the AxForm*Control element emitted
+ * inside a form-extension's <FormControlExtension> wrapper. Mirrors the bridge's
+ * CreateFormControl type map and the field→control resolution in fieldControlTypes.
+ * Unknown types fall back to a plain String control, which is always valid.
+ */
+const CONTROL_TYPE_TO_ELEMENT: Record<string, string> = {
+  string: 'AxFormStringControl',
+  integer: 'AxFormIntControl',
+  int: 'AxFormIntControl',
+  int64: 'AxFormInt64Control',
+  real: 'AxFormRealControl',
+  date: 'AxFormDateControl',
+  datetime: 'AxFormDateTimeControl',
+  utcdatetime: 'AxFormDateTimeControl',
+  time: 'AxFormTimeControl',
+  guid: 'AxFormGuidControl',
+  checkbox: 'AxFormCheckBoxControl',
+  combobox: 'AxFormComboBoxControl',
+  button: 'AxFormButtonControl',
+  commandbutton: 'AxFormCommandButtonControl',
+  menufunctionbutton: 'AxFormMenuFunctionButtonControl',
+  group: 'AxFormGroupControl',
+};
+
+/**
+ * Direct XML fallback for add-control on a form-extension.
+ *
+ * The C# bridge's AddControl resolves its target via _provider.Forms.Read(name),
+ * which can NEVER find a form EXTENSION (named "BaseForm.Suffix") — it always
+ * reports 'Form "<ext>" not found'. add-control on a form-extension therefore has
+ * no working bridge path at all (independent of metadata-root freshness). This
+ * writes the AxFormControlExtension element straight into the extension's
+ * <Controls> collection, matching the shape the D365FO SDK serializes. It edits
+ * the file on disk, so it is unaffected by what the bridge has loaded.
+ */
+async function directXmlAddControl(
+  filePath: string,
+  controlName: string,
+  parentControl: string,
+  controlType: string,
+  dataSource?: string,
+  dataField?: string,
+  label?: string,
+): Promise<{ success: boolean; message: string } | null> {
+  try {
+    const rawContent = await fs.readFile(filePath, 'utf-8');
+    const content = rawContent.replace(/^﻿/, '').replace(/\r\n/g, '\n');
+
+    // Idempotency: a control extension with this Name already present → skip.
+    // (controlName is a D365 identifier, so a literal substring match is safe.)
+    if (content.includes(`<Name>${controlName}</Name>`)) {
+      return {
+        success: true,
+        message: `✅ Control '${controlName}' already present in ${filePath} — skipped (idempotent).`,
+      };
+    }
+
+    const element = CONTROL_TYPE_TO_ELEMENT[(controlType || 'String').toLowerCase()] ?? 'AxFormStringControl';
+    const ns = 'Microsoft.Dynamics.AX.Metadata.V6';
+
+    // Inner control properties, in the order shipped extensions serialize them:
+    // Name → DataField → DataSource → Label.
+    const inner = [`\t\t\t\t\t<d4p1:Name>${controlName}</d4p1:Name>`];
+    if (dataField) inner.push(`\t\t\t\t\t<d4p1:DataField>${dataField}</d4p1:DataField>`);
+    if (dataSource) inner.push(`\t\t\t\t\t<d4p1:DataSource>${dataSource}</d4p1:DataSource>`);
+    if (label) inner.push(`\t\t\t\t\t<d4p1:Label>${label}</d4p1:Label>`);
+
+    const newElement =
+      `\t\t<AxFormControlExtension>\n` +
+      `\t\t\t<Name>${controlName}</Name>\n` +
+      `\t\t\t<ParentControlName>${parentControl}</ParentControlName>\n` +
+      `\t\t\t<FormControlExtension>\n` +
+      `\t\t\t\t<${element} xmlns:d4p1="${ns}">\n` +
+      inner.join('\n') + '\n' +
+      `\t\t\t\t</${element}>\n` +
+      `\t\t\t</FormControlExtension>\n` +
+      `\t\t</AxFormControlExtension>`;
+
+    let updated: string;
+    if (content.includes('<Controls />')) {
+      updated = content.replace('<Controls />', `<Controls>\n${newElement}\n\t</Controls>`);
+    } else if (content.includes('</Controls>')) {
+      updated = content.replace('</Controls>', `${newElement}\n\t</Controls>`);
+    } else {
+      return null; // no <Controls> collection — not a form-extension shape we recognise
+    }
+
+    if (updated === content) return null;
+
+    await fs.writeFile(filePath, normalizeD365Xml(updated), 'utf-8');
+    console.error(`[modify_d365fo_file] ✅ directXmlAddControl: added '${controlName}' (${element}) to ${filePath}`);
+    return {
+      success: true,
+      message: `✅ Control '${controlName}' (${element}) added to '${parentControl}' via direct XML fallback. File: ${filePath}`,
+    };
+  } catch (err) {
+    console.error(`[modify_d365fo_file] directXmlAddControl failed: ${err}`);
+    return null;
+  }
+}
+
+/**
  * Heuristic: does a bridge failure message indicate the C# provider could not
  * resolve the target object (vs. a genuine operation error like "index already
  * exists")? An unresolved object is the one failure worth a refresh+retry,
@@ -1443,6 +1545,22 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
             (args as any).controlDataField,
             (args as any).controlLabel,
           );
+          // Fallback: the bridge's AddControl resolves its target via _provider.Forms,
+          // which can never find a form EXTENSION (named "Base.Suffix") — it always
+          // reports 'Form "<ext>" not found', regardless of metadata-root freshness.
+          // For form extensions, write the control element straight into the XML.
+          if (objectType === 'form-extension' && (!bridgeResult || !bridgeResult.success)) {
+            const xmlFallbackResult = await directXmlAddControl(
+              actualFilePath,
+              (args as any).controlName,
+              (args as any).parentControl,
+              (args as any).controlType ?? 'String',
+              (args as any).controlDataSource,
+              (args as any).controlDataField,
+              (args as any).controlLabel,
+            );
+            if (xmlFallbackResult) bridgeResult = xmlFallbackResult;
+          }
         }
         break;
       }
