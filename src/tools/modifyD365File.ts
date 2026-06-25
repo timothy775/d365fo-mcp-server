@@ -347,29 +347,37 @@ async function directXmlAddMenuItemToMenu(
 }
 
 /**
- * controlType (as passed to add-control) → the AxForm*Control element emitted
- * inside a form-extension's <FormControlExtension> wrapper. Mirrors the bridge's
- * CreateFormControl type map and the field→control resolution in fieldControlTypes.
- * Unknown types fall back to a plain String control, which is always valid.
+ * controlType (as passed to add-control) → the form control element emitted inside
+ * a form-extension's <FormControl>, together with its <Type> value. Verified against
+ * shipped standard form extensions (e.g. InventItemSampling.AdvancedQualityManagement).
+ * NOTE: an integer control is `AxFormIntegerControl` (Type=Integer) — NOT
+ * `AxFormIntControl`. Unknown types fall back to String, which is always valid.
  */
-const CONTROL_TYPE_TO_ELEMENT: Record<string, string> = {
-  string: 'AxFormStringControl',
-  integer: 'AxFormIntControl',
-  int: 'AxFormIntControl',
-  int64: 'AxFormInt64Control',
-  real: 'AxFormRealControl',
-  date: 'AxFormDateControl',
-  datetime: 'AxFormDateTimeControl',
-  utcdatetime: 'AxFormDateTimeControl',
-  time: 'AxFormTimeControl',
-  guid: 'AxFormGuidControl',
-  checkbox: 'AxFormCheckBoxControl',
-  combobox: 'AxFormComboBoxControl',
-  button: 'AxFormButtonControl',
-  commandbutton: 'AxFormCommandButtonControl',
-  menufunctionbutton: 'AxFormMenuFunctionButtonControl',
-  group: 'AxFormGroupControl',
+const CONTROL_TYPE_TO_FORM_CONTROL: Record<string, { iType: string; typeValue: string }> = {
+  string:      { iType: 'AxFormStringControl',   typeValue: 'String' },
+  integer:     { iType: 'AxFormIntegerControl',  typeValue: 'Integer' },
+  int:         { iType: 'AxFormIntegerControl',  typeValue: 'Integer' },
+  int64:       { iType: 'AxFormInt64Control',    typeValue: 'Int64' },
+  real:        { iType: 'AxFormRealControl',     typeValue: 'Real' },
+  date:        { iType: 'AxFormDateControl',     typeValue: 'Date' },
+  datetime:    { iType: 'AxFormDateTimeControl', typeValue: 'DateTime' },
+  utcdatetime: { iType: 'AxFormDateTimeControl', typeValue: 'DateTime' },
+  time:        { iType: 'AxFormTimeControl',     typeValue: 'Time' },
+  guid:        { iType: 'AxFormGuidControl',     typeValue: 'Guid' },
+  checkbox:    { iType: 'AxFormCheckBoxControl', typeValue: 'CheckBox' },
+  combobox:    { iType: 'AxFormComboBoxControl', typeValue: 'ComboBox' },
+  button:      { iType: 'AxFormButtonControl',   typeValue: 'Button' },
+  group:       { iType: 'AxFormGroupControl',    typeValue: 'Group' },
 };
+const DEFAULT_FORM_CONTROL = { iType: 'AxFormStringControl', typeValue: 'String' };
+
+/** Random 9-char lowercase-alphanumeric suffix, matching the SDK's
+ *  `FormExtensionControl<rand>` wrapper-name convention (e.g. "fh5riowy1"). */
+function formExtensionControlName(): string {
+  let s = '';
+  while (s.length < 9) s += Math.random().toString(36).slice(2);
+  return `FormExtensionControl${s.slice(0, 9)}`;
+}
 
 /**
  * Direct XML fallback for add-control on a form-extension.
@@ -378,8 +386,10 @@ const CONTROL_TYPE_TO_ELEMENT: Record<string, string> = {
  * which can NEVER find a form EXTENSION (named "BaseForm.Suffix") — it always
  * reports 'Form "<ext>" not found'. add-control on a form-extension therefore has
  * no working bridge path at all (independent of metadata-root freshness). This
- * writes the AxFormControlExtension element straight into the extension's
- * <Controls> collection, matching the shape the D365FO SDK serializes. It edits
+ * writes an <AxFormExtensionControl> element straight into the extension's
+ * <Controls> collection, in the exact shape the D365FO SDK serializes (verified
+ * against shipped standard extensions): an empty-namespace <FormControl i:type="…">
+ * wrapped by <AxFormExtensionControl xmlns=""> with a <Parent> reference. It edits
  * the file on disk, so it is unaffected by what the bridge has loaded.
  */
 async function directXmlAddControl(
@@ -395,7 +405,7 @@ async function directXmlAddControl(
     const rawContent = await fs.readFile(filePath, 'utf-8');
     const content = rawContent.replace(/^﻿/, '').replace(/\r\n/g, '\n');
 
-    // Idempotency: a control extension with this Name already present → skip.
+    // Idempotency: a control with this Name already present → skip.
     // (controlName is a D365 identifier, so a literal substring match is safe.)
     if (content.includes(`<Name>${controlName}</Name>`)) {
       return {
@@ -404,26 +414,28 @@ async function directXmlAddControl(
       };
     }
 
-    const element = CONTROL_TYPE_TO_ELEMENT[(controlType || 'String').toLowerCase()] ?? 'AxFormStringControl';
-    const ns = 'Microsoft.Dynamics.AX.Metadata.V6';
+    const { iType, typeValue } = CONTROL_TYPE_TO_FORM_CONTROL[(controlType || 'String').toLowerCase()] ?? DEFAULT_FORM_CONTROL;
 
-    // Inner control properties, in the order shipped extensions serialize them:
-    // Name → DataField → DataSource → Label.
-    const inner = [`\t\t\t\t\t<d4p1:Name>${controlName}</d4p1:Name>`];
-    if (dataField) inner.push(`\t\t\t\t\t<d4p1:DataField>${dataField}</d4p1:DataField>`);
-    if (dataSource) inner.push(`\t\t\t\t\t<d4p1:DataSource>${dataSource}</d4p1:DataSource>`);
-    if (label) inner.push(`\t\t\t\t\t<d4p1:Label>${label}</d4p1:Label>`);
+    // Inner <FormControl> children, in the order shipped extensions serialize them:
+    // Name → Type → FormControlExtension(nil) → DataField → DataSource → Label → [Items].
+    const inner = [
+      `\t\t\t\t<Name>${controlName}</Name>`,
+      `\t\t\t\t<Type>${typeValue}</Type>`,
+      `\t\t\t\t<FormControlExtension i:nil="true" />`,
+    ];
+    if (dataField) inner.push(`\t\t\t\t<DataField>${dataField}</DataField>`);
+    if (dataSource) inner.push(`\t\t\t\t<DataSource>${dataSource}</DataSource>`);
+    if (label) inner.push(`\t\t\t\t<Label>${label}</Label>`);
+    if (typeValue === 'ComboBox') inner.push(`\t\t\t\t<Items />`);
 
     const newElement =
-      `\t\t<AxFormControlExtension>\n` +
-      `\t\t\t<Name>${controlName}</Name>\n` +
-      `\t\t\t<ParentControlName>${parentControl}</ParentControlName>\n` +
-      `\t\t\t<FormControlExtension>\n` +
-      `\t\t\t\t<${element} xmlns:d4p1="${ns}">\n` +
+      `\t\t<AxFormExtensionControl xmlns="">\n` +
+      `\t\t\t<Name>${formExtensionControlName()}</Name>\n` +
+      `\t\t\t<FormControl xmlns="" i:type="${iType}">\n` +
       inner.join('\n') + '\n' +
-      `\t\t\t\t</${element}>\n` +
-      `\t\t\t</FormControlExtension>\n` +
-      `\t\t</AxFormControlExtension>`;
+      `\t\t\t</FormControl>\n` +
+      `\t\t\t<Parent>${parentControl}</Parent>\n` +
+      `\t\t</AxFormExtensionControl>`;
 
     let updated: string;
     if (content.includes('<Controls />')) {
@@ -437,10 +449,10 @@ async function directXmlAddControl(
     if (updated === content) return null;
 
     await fs.writeFile(filePath, normalizeD365Xml(updated), 'utf-8');
-    console.error(`[modify_d365fo_file] ✅ directXmlAddControl: added '${controlName}' (${element}) to ${filePath}`);
+    console.error(`[modify_d365fo_file] ✅ directXmlAddControl: added '${controlName}' (${iType}) to ${filePath}`);
     return {
       success: true,
-      message: `✅ Control '${controlName}' (${element}) added to '${parentControl}' via direct XML fallback. File: ${filePath}`,
+      message: `✅ Control '${controlName}' (${iType}) added to '${parentControl}' via direct XML fallback. File: ${filePath}`,
     };
   } catch (err) {
     console.error(`[modify_d365fo_file] directXmlAddControl failed: ${err}`);

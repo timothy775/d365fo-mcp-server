@@ -352,7 +352,7 @@ describe('verify_d365fo_project', () => {
     const result = await verifyD365ProjectTool(
       req('verify_d365fo_project', {
         objects: [{ objectType: 'class', objectName: 'MyHelper' }],
-        modelName: 'MyModel',
+        modelName: 'Contoso',
         packageName: 'MyPackage',
         projectPath: 'K:\\VSProjects\\MySolution\\MyProject\\MyProject.rnrproj',
       }),
@@ -373,7 +373,7 @@ describe('verify_d365fo_project', () => {
     const result = await verifyD365ProjectTool(
       req('verify_d365fo_project', {
         objects: [{ objectType: 'class', objectName: 'MissingClass' }],
-        modelName: 'MyModel',
+        modelName: 'Contoso',
         packageName: 'MyPackage',
         projectPath: 'K:\\VSProjects\\MySolution\\MyProject\\MyProject.rnrproj',
       }),
@@ -403,7 +403,7 @@ describe('verify_d365fo_project', () => {
           { objectType: 'table', objectName: 'MyTable' },
           { objectType: 'enum', objectName: 'MyEnum' },
         ],
-        modelName: 'MyModel',
+        modelName: 'Contoso',
         packageName: 'MyPackage',
         projectPath: 'K:\\VSProjects\\MySolution\\MyProject\\MyProject.rnrproj',
       }),
@@ -451,8 +451,8 @@ describe('create_d365fo_file', () => {
       req('create_d365fo_file', {
         objectType: 'class',
         objectName: 'MyNewClass',
-        modelName: 'FmMcp',
-        packageName: 'FmMcp',
+        modelName: 'Contoso',
+        packageName: 'Contoso',
         packagePath: 'K:\\PackagesLocalDirectory',
         addToProject: false,
       }),
@@ -467,14 +467,54 @@ describe('create_d365fo_file', () => {
       req('create_d365fo_file', {
         objectType: 'table-extension',
         objectName: 'CustTable.MY_Extension',
-        modelName: 'FmMcp',
-        packageName: 'FmMcp',
+        modelName: 'Contoso',
+        packageName: 'Contoso',
         packagePath: 'K:\\PackagesLocalDirectory',
         addToProject: false,
       }),
     );
     // fs is fully mocked — writes succeed on all platforms.
     expect((result as any).isError).toBeFalsy();
+  });
+
+  it('table-extension create passes properties.fields to the bridge (normalized to WriteFieldParam keys)', async () => {
+    // Regression: the bridge create path only forwarded fields for objectType==='table',
+    // so a table-extension's properties.fields were dropped and the file got an empty
+    // <Fields />. Fields must be forwarded AND normalized ({ edt, type } → { extendedDataType, fieldType }).
+    const createObject = vi.fn(async () => ({
+      success: true,
+      filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTableExtension\\CustTable.MyExt.xml',
+      api: 'IMetaTableExtensionProvider.Create',
+    }));
+    const ctx = buildContext();
+    (ctx as any).bridge = { isReady: true, metadataAvailable: true, createObject, validateObject: vi.fn(async () => null) };
+
+    const result = await handleCreateD365File(
+      req('create_d365fo_file', {
+        objectType: 'table-extension',
+        objectName: 'CustTable.MyExt',
+        modelName: 'Contoso',
+        packageName: 'Contoso',
+        packagePath: 'K:\\PackagesLocalDirectory',
+        addToProject: false,
+        properties: {
+          fields: [
+            { name: 'LookAheadMonths', edt: 'BudgetNumberOfPeriods', type: 'Integer' },
+            { name: 'LookBackMonths', edt: 'BudgetNumberOfPeriods', type: 'Integer' },
+          ],
+        },
+      }),
+      ctx,
+    );
+
+    expect((result as any).isError).toBeFalsy();
+    expect(createObject).toHaveBeenCalledTimes(1);
+    const sentParams = createObject.mock.calls[0][0];
+    expect(sentParams.objectType).toBe('table-extension');
+    expect(sentParams.fields).toEqual([
+      { name: 'LookAheadMonths', fieldType: 'Integer', extendedDataType: 'BudgetNumberOfPeriods' },
+      { name: 'LookBackMonths', fieldType: 'Integer', extendedDataType: 'BudgetNumberOfPeriods' },
+    ]);
   });
 
   it('auto-converts bare extension name to dot-notation (Case C fix)', async () => {
@@ -485,18 +525,18 @@ describe('create_d365fo_file', () => {
       req('create_d365fo_file', {
         objectType: 'table-extension',
         objectName: 'PurchTable',
-        modelName: 'FmMcp',
-        packageName: 'FmMcp',
+        modelName: 'Contoso',
+        packageName: 'Contoso',
         packagePath: 'K:\\PackagesLocalDirectory',
         addToProject: false,
       }),
     );
     // fs is fully mocked — writes succeed on all platforms.
     // We inspect the path embedded in the message: it must use dot-notation
-    // (PurchTable.<something>Extension.xml) and NOT a flat prefix (FmMcpPurchTable.xml).
+    // (PurchTable.<something>Extension.xml) and NOT a flat prefix (MyModelPurchTable.xml).
     const text: string = result.content[0].text;
     expect(text).toMatch(/PurchTable[.][^/\\]*[Ee]xtension/);
-    expect(text).not.toMatch(/FmMcpPurchTable|[A-Za-z]+PurchTable\.xml/);
+    expect(text).not.toMatch(/MyModelPurchTable|[A-Za-z]+PurchTable\.xml/);
   });
 
   it('auto-converts bare class-extension name to _Extension form (Case D fix)', async () => {
@@ -512,8 +552,8 @@ describe('create_d365fo_file', () => {
       req('create_d365fo_file', {
         objectType: 'class-extension',
         objectName: 'SalesFormLetter',
-        modelName: 'FmMcp',
-        packageName: 'FmMcp',
+        modelName: 'Contoso',
+        packageName: 'Contoso',
         packagePath: 'K:\\PackagesLocalDirectory',
         addToProject: false,
       }),
@@ -567,8 +607,8 @@ describe('create_d365fo_file', () => {
       req('create_d365fo_file', {
         objectType: 'class',
         objectName: 'MyHybridClass',
-        modelName: 'FmMcp',
-        packageName: 'FmMcp',
+        modelName: 'Contoso',
+        packageName: 'Contoso',
         packagePath: 'K:\\PackagesLocalDirectory',
         xmlContent: xml,
         addToProject: false,
@@ -580,13 +620,13 @@ describe('create_d365fo_file', () => {
 
   it('returns error when objectType is missing', async () => {
     await expect(
-      handleCreateD365File(req('create_d365fo_file', { objectName: 'Foo', modelName: 'MyModel' })),
+      handleCreateD365File(req('create_d365fo_file', { objectName: 'Foo', modelName: 'Contoso' })),
     ).rejects.toThrow();
   });
 
   it('returns error when objectName is missing', async () => {
     await expect(
-      handleCreateD365File(req('create_d365fo_file', { objectType: 'class', modelName: 'MyModel' })),
+      handleCreateD365File(req('create_d365fo_file', { objectType: 'class', modelName: 'Contoso' })),
     ).rejects.toThrow();
   });
 });
@@ -935,7 +975,7 @@ describe('modify_d365fo_file', () => {
           operation: 'add-index',
           indexName: 'ContosoRentEquipmentIdx',
           indexFields: [{ fieldName: 'ContosoRentEquipmentId' }],
-          modelName: 'MyModel',
+          modelName: 'Contoso',
         }),
         ctx,
       );
@@ -1258,14 +1298,20 @@ describe('modify_d365fo_file', () => {
     );
     expect(written).toBeDefined();
     const writtenContent: string = written[1];
-    expect(writtenContent).toContain('<AxFormControlExtension>');
-    expect(writtenContent).toContain('<ParentControlName>DetailsPropertiesFastTabPage</ParentControlName>');
-    expect(writtenContent).toContain('AxFormStringControl');
+    // Must match the SDK-serialized shape: <AxFormExtensionControl xmlns=""> wrapping
+    // an empty-namespace <FormControl i:type="…"> with a <Parent> reference.
+    expect(writtenContent).toContain('<AxFormExtensionControl xmlns="">');
+    expect(writtenContent).toContain('<FormControl xmlns="" i:type="AxFormStringControl">');
+    expect(writtenContent).toContain('<Type>String</Type>');
+    expect(writtenContent).toContain('<Parent>DetailsPropertiesFastTabPage</Parent>');
     expect(writtenContent).toContain('ContosoPaymentReference');
-    expect(writtenContent).toContain('<d4p1:DataSource>ContosoRentRule</d4p1:DataSource>');
+    expect(writtenContent).toContain('<DataSource>ContosoRentRule</DataSource>');
+    // Must NOT use the malformed AxFormControlExtension/ParentControlName shape.
+    expect(writtenContent).not.toContain('<AxFormControlExtension>');
+    expect(writtenContent).not.toContain('ParentControlName');
   });
 
-  it('add-control maps controlType to the matching AxForm*Control element (Integer → AxFormIntControl)', async () => {
+  it('add-control maps controlType to the matching AxForm*Control element (Integer → AxFormIntegerControl)', async () => {
     const fsMod = await import('fs/promises');
     const extXml =
       `<?xml version="1.0" encoding="utf-8"?>\n` +
@@ -1296,7 +1342,8 @@ describe('modify_d365fo_file', () => {
       String(c[0]).includes('SomeForm.MyExt.xml'),
     );
     expect(written).toBeDefined();
-    expect(written[1]).toContain('AxFormIntControl');
+    expect(written[1]).toContain('<FormControl xmlns="" i:type="AxFormIntegerControl">');
+    expect(written[1]).toContain('<Type>Integer</Type>');
   });
 
   it('replace-code "oldCode not found" error includes a tip to use get_object_info or add-method', async () => {

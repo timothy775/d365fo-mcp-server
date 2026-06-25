@@ -228,6 +228,36 @@ function fieldTypeToAxType(fieldType: string, edtName?: string): string {
 }
 
 /**
+ * Normalize the flexible field specs accepted by the tool / XML generators
+ * (`{ name, edt?, type?, fieldType?, enumType?, mandatory?, label? }`) into the
+ * key shape the C# bridge's WriteFieldParam expects
+ * (`{ name, fieldType, extendedDataType, enumType, mandatory, label }`).
+ *
+ * Without this, fields handed to the bridge as `{ edt, type }` silently lose their
+ * EDT and base type — the bridge sees FieldType="" and creates a bare String field
+ * with no ExtendedDataType. `fieldType` may arrive either as a base-type keyword
+ * ("Integer") or as a full i:type ("AxTableFieldInt"); the latter is stripped back
+ * to the keyword the bridge's CreateTableField switch understands.
+ */
+export function normalizeFieldSpecsForBridge(
+  fields: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  return fields.map((f) => {
+    let fieldType = f.type ?? f.fieldType;
+    if (typeof fieldType === 'string') fieldType = fieldType.replace(/^AxTableField/, '');
+    const out: Record<string, unknown> = { name: f.name };
+    if (fieldType != null && fieldType !== '') out.fieldType = fieldType;
+    if (f.edt != null) out.extendedDataType = f.edt;
+    else if (f.extendedDataType != null) out.extendedDataType = f.extendedDataType;
+    if (f.enumType != null) out.enumType = f.enumType;
+    if (f.mandatory != null) out.mandatory = f.mandatory;
+    if (f.label != null) out.label = f.label;
+    if (f.stringSize != null) out.stringSize = f.stringSize;
+    return out;
+  });
+}
+
+/**
  * XML Templates for different D365FO object types
  */
 export class XmlTemplateGenerator {
@@ -3915,10 +3945,14 @@ export async function handleCreateD365File(
           bridgeParams.methods = parsed.methods;
         }
 
-        // For tables: pass fields, fieldGroups, indexes, relations from properties
-        if (args.objectType === 'table' && args.properties) {
+        // For tables AND table-extensions: pass fields, fieldGroups, indexes, relations
+        // from properties. (Previously only 'table' was handled, so a table-extension's
+        // properties.fields were silently dropped and the file got an empty <Fields />.)
+        // Field specs are normalized to the bridge's WriteFieldParam key shape so that
+        // `{ edt, type }` keys are not lost — otherwise every field becomes a bare String.
+        if ((args.objectType === 'table' || args.objectType === 'table-extension') && args.properties) {
           const props = args.properties as Record<string, unknown>;
-          if (props.fields) bridgeParams.fields = props.fields as Record<string, unknown>[];
+          if (props.fields) bridgeParams.fields = normalizeFieldSpecsForBridge(props.fields as Record<string, unknown>[]);
           if (props.fieldGroups) bridgeParams.fieldGroups = props.fieldGroups as Record<string, unknown>[];
           if (props.indexes) bridgeParams.indexes = props.indexes as Record<string, unknown>[];
           if (props.relations) bridgeParams.relations = props.relations as Record<string, unknown>[];
