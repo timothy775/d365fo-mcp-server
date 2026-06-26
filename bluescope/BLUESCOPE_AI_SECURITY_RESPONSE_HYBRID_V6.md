@@ -23,7 +23,7 @@ Assumptions:
 - The Azure-hosted cloud resources in scope (as-is) are the Linux App Service hosting the read-only MCP server and the Azure Blob Storage account that holds the pre-built object-metadata databases (downloaded to the App Service on startup using an Azure Storage account-key connection string; a system-assigned Managed Identity is enabled on the App Service but is not currently used for this Blob access — moving Blob access onto that identity is a recommended uplift). In the target hardening architecture, an APIM instance, a Microsoft Entra ID application registration, a Key Vault for the backend secret, and Conditional Access policies are added to scope. No LLM is embedded in or hosted as part of the MCP tool itself in this Azure deployment model; the Azure-hosted component provides MCP tools only.
 - As currently deployed, the Azure-hosted MCP endpoint is internet-facing and protected by an API key over HTTPS. Additional network hardening and ingress restriction is recommended; the APIM front door described in this document is the recommended way to deliver it. Until that hardening is implemented and evidenced, the endpoint is treated as an internet-facing API.
 - BlueScope is responsible for approving, implementing, and operating the network and identity hardening, including APIM, the Entra application registration, Conditional Access policies, private access configuration, firewall rules, ingress restrictions, or equivalent network controls on the hosted endpoint.
-- The Azure-hosted MCP components are deployed and updated through the Azure DevOps pipelines described in `docs/SETUP_AZURE.md` and defined under `.azure-pipelines/`. Taking updates means updating the forked GitHub repository on which those build and release pipelines are based, then promoting that change through the BlueScope-controlled pipeline process.
+- The Azure-hosted MCP components are deployed and updated through the Azure DevOps pipelines described in the Azure setup guide and defined in the pipeline definitions. Taking updates means updating the forked GitHub repository on which those build and release pipelines are based, then promoting that change through the BlueScope-controlled pipeline process.
 - BlueScope would need to determine and implement the exact pipeline validation and software supply chain requirements for that delivery path. These may include controls such as CodeQL, Dependabot, Dependency Review, OpenSSF Scorecard, Gitleaks, Trivy, PSScriptAnalyzer, ESLint with security rules, SecurityCodeScan for .NET components, CycloneDX SBOM generation, Actionlint, and StepSecurity Harden Runner, or equivalent BlueScope-approved tooling.
 - The MCP server is read-only against metadata sources.
 - This is a customer response document. BlueScope remains ultimately responsible for security outcomes, approvals, and risk acceptance.
@@ -43,9 +43,9 @@ The strongest supportable position in this draft is that the Hybrid model could 
 
 ## Hybrid Installation Summary
 
-The documented hybrid installation separates Azure-hosted read-only search and analysis from any local environment-specific activity. In the project architecture, the Azure-hosted component runs as a read-only MCP server on Azure Linux App Service. It provides MCP tools only and does not itself host or execute an LLM. It is designed to serve search and analysis requests against prebuilt metadata databases rather than expose write-capable tooling on the hosted endpoint. The App Service downloads the metadata databases from Azure Blob Storage for runtime use (currently using an Azure Storage account-key connection string; a system-assigned Managed Identity is enabled on the App Service but is not yet used for this access), exposes the MCP endpoint over HTTPS with TLS 1.2 or higher (enforced by the App Service `httpsOnly` and `minTlsVersion 1.2` settings in the Bicep template), and applies request rate limiting. In the current pattern the MCP client connects to it directly over HTTPS and supplies an API key as an `X-Api-Key` header (enforced by the App Service `API_KEY` setting). Read-only operation is enforced at deployment time: the Bicep template and Azure DevOps pipeline set the server to read-only mode, so write-capable tooling is never advertised on the public endpoint.
+The documented hybrid installation separates Azure-hosted read-only search and analysis from any local environment-specific activity. In the project architecture, the Azure-hosted component runs as a read-only MCP server on Azure Linux App Service. It provides MCP tools only and does not itself host or execute an LLM. It is designed to serve search and analysis requests against prebuilt metadata databases rather than expose write-capable tooling on the hosted endpoint. The App Service downloads the metadata databases from Azure Blob Storage for runtime use (currently using an Azure Storage account-key connection string; a system-assigned Managed Identity is enabled on the App Service but is not yet used for this access), exposes the MCP endpoint over HTTPS with TLS 1.2 or higher (enforced by the App Service configuration in the infrastructure template), and applies request rate limiting. In the current pattern the MCP client connects to it directly over HTTPS and supplies an API key in a request header (validated by the App Service's API-key setting). Read-only operation is enforced at deployment time: the infrastructure template and Azure DevOps pipeline set the server to read-only mode, so write-capable tooling is never advertised on the public endpoint.
 
-The Azure-hosted MCP service is built and released through the Azure DevOps pipelines documented in `docs/SETUP_AZURE.md` and implemented in `.azure-pipelines/`, including the application deployment pipeline and the metadata build pipelines. Those YAML definitions show that the MCP server source is checked out from GitHub during pipeline execution and then deployed to Azure App Service in read-only mode. Taking updates means reviewing and merging or otherwise applying upstream changes into the forked GitHub repository used by the pipeline, then rebuilding and redeploying from that controlled source. This means software change control, release approval, and rollback are governed through the BlueScope delivery pipeline rather than by direct in-place modification of the hosted service.
+The Azure-hosted MCP service is built and released through the Azure DevOps pipelines documented in the Azure setup guide and implemented in the pipeline definitions, including the application deployment pipeline and the metadata build pipelines. Those YAML definitions show that the MCP server source is checked out from GitHub during pipeline execution and then deployed to Azure App Service in read-only mode. Taking updates means reviewing and merging or otherwise applying upstream changes into the forked GitHub repository used by the pipeline, then rebuilding and redeploying from that controlled source. This means software change control, release approval, and rollback are governed through the BlueScope delivery pipeline rather than by direct in-place modification of the hosted service.
 
 Where local context or local-only capability is needed, a second MCP server runs locally on the developer's Windows VM in write-only mode, exposing file operations and the C# metadata bridge. The MCP client connects to both servers and merges their tool lists, routing search and analysis requests to the cloud read-only server and write operations to the local server; the two servers operate independently and do not chain through one another. The local write-only server runs over stdio and is not internet-exposed, which keeps write-capable actions under customer-controlled local execution.
 
@@ -53,7 +53,7 @@ For this response, the key scope boundary is that the MCP server is read-only an
 
 ## Target Hardening Architecture — APIM + Entra OAuth Front Door
 
-This is the recommended target design for satisfying the internet-facing authentication, API gateway, and central-identity requirements **using Azure / APIM configuration only, with no change to the open-source MCP server**. APIM fronts the existing MCP HTTPS endpoint as a standard backend API: Entra token validation, rate limiting and quota, backend key injection, the OAuth discovery (Protected Resource Metadata) response, and private networking are all delivered through APIM policy and Azure resource configuration. The server is treated as an opaque HTTP backend and keeps its existing `X-Api-Key` validation and transport unchanged. On the client side, Visual Studio Code / GitHub Copilot provide the Microsoft Entra OAuth sign-in flow natively, so no custom client is required.
+This is the recommended target design for satisfying the internet-facing authentication, API gateway, and central-identity requirements **using Azure / APIM configuration only, with no change to the open-source MCP server**. APIM fronts the existing MCP HTTPS endpoint as a standard backend API: Entra token validation, rate limiting and quota, backend key injection, the OAuth discovery (Protected Resource Metadata) response, and private networking are all delivered through APIM policy and Azure resource configuration. The server is treated as an opaque HTTP backend and keeps its existing API-key validation and transport unchanged. On the client side, Visual Studio Code / GitHub Copilot provide the Microsoft Entra OAuth sign-in flow natively, so no custom client is required.
 
 ### Request flow
 
@@ -117,10 +117,10 @@ Read-only D365 X++ object metadata  (no business or transaction data)
 
 ### Key properties
 
-- **Per-user enterprise identity.** The client authenticates each user against Microsoft Entra ID. **MFA is enforced by Conditional Access at sign-in** (a BlueScope-configured policy), not by APIM. APIM validates the resulting token with the `validate-azure-ad-token` policy and rejects any request without a valid token.
+- **Per-user enterprise identity.** The client authenticates each user against Microsoft Entra ID. **MFA is enforced by Conditional Access at sign-in** (a BlueScope-configured policy), not by APIM. APIM validates the resulting token and rejects any request without a valid token.
 - **APIM is the proposed API gateway** and the only internet-facing component in the target design. Whether it is BlueScope-approved must be confirmed by BlueScope.
 - **The backend is private.** The App Service runs behind a private endpoint with public network access disabled, reachable only from APIM. The static API key is no longer the user-facing control — it becomes an internal service-to-service secret that APIM injects, held only in Key Vault / APIM named values and never exposed to clients.
-- **No change to the open-source server.** The server keeps its existing `X-Api-Key` validation. APIM supplies that key; all enterprise authentication is added in front. This preserves upstream compatibility and shortens delivery.
+- **No change to the open-source server.** The server keeps its existing API-key validation. APIM supplies that key; all enterprise authentication is added in front. This preserves upstream compatibility and shortens delivery.
 - **Defence in depth.** Two independent controls must fail for exposure: the private endpoint blocks any external caller, and the backend key is still required even from inside the network.
 - **Gateway-level observability.** APIM logs all gateway activity to Azure Monitor / Application Insights, which can be forwarded to the BlueScope SIEM with correlation identifiers.
 
@@ -146,7 +146,7 @@ Read-only D365 X++ object metadata  (no business or transaction data)
 | AI-34 — RBAC for actions                                         | Partially Satisfied           | Strengthened                       | APIM/Entra adds enforced access gating (group/app-role membership); per-operation RBAC is not applicable (single consumer role), so RBAC applies to administration. See SEC-FR-03.                                            |
 | SEC-AI-DTCTLG-01 — Central identity                              | Partially Satisfied           | **Satisfied**                | Entra token validated at the gateway before the backend is reached.                                                                                                                                                          |
 | SEC-AI-DTCTLG-02 — Per-user tokens / no fixed backend credential | Partially Satisfied           | Largely Satisfied                  | Per-user JWT inbound.**Residual:** APIM→backend uses a static key rather than managed identity (mitigated by private networking, Key Vault storage, and rotation). Managed identity available as the stricter option. |
-| SEC-AI-DTCTLG-03 — Trusted proxy / egress                        | Partially Satisfied           | Satisfied (inbound)                | APIM is the trusted proxy; add the outbound allowlist for any downstream calls.                                                                                                                                              |
+| SEC-AI-DTCTLG-03 — Trusted proxy / egress                        | Partially Satisfied           | **Satisfied**                | APIM is the trusted proxy inbound; the server makes no third-party outbound calls, so no egress allowlist is needed.                                                                                                          |
 | SEC-FR-09 — WAF                                                  | Not Relevant                  | Optional uplift                    | Add Application Gateway / Front Door WAF upstream of APIM if L7 filtering is required.                                                                                                                                       |
 | SEC-FR-05 / DTCTLG-06 — Secrets                                  | Partially Satisfied / Project | Strengthened                       | Backend key moves to a Key Vault-backed APIM named value, never client-held.                                                                                                                                                 |
 
@@ -178,7 +178,7 @@ Read-only D365 X++ object metadata  (no business or transaction data)
 | -------------------------------------------------------------------------------- | ------------------------------------ | ----: | ---------------------------------------------------------------------------------------------- |
 | BSL-ARC-S-01-05 - Security only.docx                                             | SEC-FR-01 to SEC-FR-16               |    16 | Mixed; several auth/gateway items move to Satisfied with the APIM front door                   |
 | ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-01 to AI-37                       |    37 | Mostly Project / Operational Control and Met by Design, with several Partially Satisfied items |
-| ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-01 to SEC-AI-DTCTLG-06 |     6 | Identity/gateway items move to Satisfied/Largely Satisfied with the APIM front door            |
+| ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-01 to SEC-AI-DTCTLG-10 |    10 | Identity/gateway items move to Satisfied/Largely Satisfied with the APIM front door            |
 
 ### Detailed Summary Table
 
@@ -249,10 +249,14 @@ Values used in the "With APIM target design" column:
 | ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-37            | Log agent-to-agent interactions                    | Not Relevant for Current Installation - no agent-to-agent interactions in current installation scope                                                                                                              | No change               | Customer       |
 | ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-01 | Central identity and user-based API authorization  | Partially Satisfied                                                                                                                                                                                               | Satisfied               | Shared         |
 | ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-02 | Per-user tokens and no fixed backend credential    | Partially Satisfied                                                                                                                                                                                               | Largely Satisfied       | Shared         |
-| ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-03 | Trusted proxy and outbound allowlist               | Partially Satisfied                                                                                                                                                                                               | Satisfied (inbound)     | Shared         |
+| ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-03 | Trusted proxy and outbound allowlist               | Partially Satisfied                                                                                                                                                                                               | Satisfied               | Shared         |
 | ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-04 | Scanning, image governance, and runtime monitoring | Project / Operational Control                                                                                                                                                                                     | No change               | Customer       |
 | ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-05 | Input validation and context sanitization          | Partially Satisfied                                                                                                                                                                                               | Strengthened            | Implementation Partner |
 | ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-06 | Secrets management                                 | Partially Satisfied                                                                                                                                                                                               | Strengthened            | Shared         |
+| ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-07 | Host hardening                                     | Partially Satisfied                                                                                                                                                                                               | Strengthened            | Shared         |
+| ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-08 | Detect and protect sensitive data                 | Partially Satisfied                                                                                                                                                                                               | Strengthened            | Shared         |
+| ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-09 | Monitoring and logging                            | Partially Satisfied                                                                                                                                                                                               | Strengthened            | Customer       |
+| ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-10 | Threat intelligence (Defender for Cloud)          | Project / Operational Control                                                                                                                                                                                     | No change               | Customer       |
 
 ## Response to Foundational Security Requirements
 
@@ -268,12 +272,12 @@ Each control below shows the current (as-is) status. Where the APIM + Entra fron
 - With APIM target design: Satisfied
 - Responsibility: Shared
 
-### SEC-FR-02 - Requires Azure Skills review
+### SEC-FR-02
 
 - Source: BSL-ARC-S-01-05 - Security only.docx
 - Capability: Multi-factor Authentication
 - Requirement: Internet facing application must have SSO and MFA enabled against BSL Steel Domain.
-- Response: In the current pattern the cloud read-only MCP server is accessed by the MCP client directly over HTTPS using an API key header rather than enterprise SSO and MFA. In the recommended target design, APIM is the only internet-facing endpoint and requires a Microsoft Entra token; SSO is provided by Entra and **MFA would be enforced by Conditional Access at sign-in if BlueScope configures that policy**. APIM validates the resulting token with the `validate-azure-ad-token` policy. Visual Studio Code / GitHub Copilot support the Entra OAuth sign-in flow for MCP servers natively, so no custom client is required.
+- Response: In the current pattern the cloud read-only MCP server is accessed by the MCP client directly over HTTPS using an API key header rather than enterprise SSO and MFA. In the recommended target design, APIM is the only internet-facing endpoint and requires a Microsoft Entra token; SSO is provided by Entra and **MFA would be enforced by Conditional Access at sign-in if BlueScope configures that policy**. APIM validates the resulting Entra token before any request reaches the backend. Visual Studio Code / GitHub Copilot support the Entra OAuth sign-in flow for MCP servers natively, so no custom client is required.
 - Where satisfied (as-is): Partially Satisfied
 - With APIM target design: Satisfied
 - Responsibility: Shared
@@ -283,7 +287,7 @@ Each control below shows the current (as-is) status. Where the APIM + Entra fron
 - Source: BSL-ARC-S-01-05 - Security only.docx
 - Capability: Entitlement Provisioning
 - Requirement: Role Based Access Control (RBAC) must be implemented based on least privilege principle.
-- Response: Least privilege is implemented through the read/write separation of the two services rather than a per-user role matrix. The shared Azure service is restricted to read-only metadata access (`MCP_SERVER_MODE=read-only`, enforced in the Bicep template and deploy pipeline with write/execute tools filtered out server-side), so the broadly reachable surface holds the minimum privilege. Write capability exists only on the local service, which runs over stdio on the developer's own machine, is never internet-exposed, executes with no privilege elevation, and confines writes to validated `PackagesLocalDirectory/<Package>/<Model>/Ax<Type>/` paths (no traversal). RBAC itself is applied to management of the tools: Azure RBAC and Microsoft Entra govern administration of the read-only resources, deployment pipeline, configuration, and secrets (administrator/operator/developer separation), and managed-device sign-in governs who can run the local write service. Per-user RBAC within either service is not applicable, because each has a single fixed purpose and a single consumer role — a developer who already holds the underlying access — so there is no in-tool privilege gradation to enforce. Who may use the read-only service is controlled by access gating (a shared API key today; Entra group membership with the APIM front door — see SEC-FR-01, SEC-FR-02, and SEC-FR-04).
+- Response: Least privilege is implemented through the read/write separation of the two services rather than a per-user role matrix. The shared Azure service is restricted to read-only metadata access (the service is set to read-only mode in the infrastructure template and deployment pipeline, with write and execute tools filtered out on the server side), so the broadly reachable surface holds the minimum privilege. Write capability exists only on the local service, which runs locally on the developer's own machine, is never internet-exposed, executes with no privilege elevation, and confines writes to validated locations within the developer's local D365 package and model folders (no path traversal). RBAC itself is applied to management of the tools: Azure RBAC and Microsoft Entra govern administration of the read-only resources, deployment pipeline, configuration, and secrets (administrator/operator/developer separation), and managed-device sign-in governs who can run the local write service. Per-user RBAC within either service is not applicable, because each has a single fixed purpose and a single consumer role — a developer who already holds the underlying access — so there is no in-tool privilege gradation to enforce. Who may use the read-only service is controlled by access gating (a shared API key today; Entra group membership with the APIM front door — see SEC-FR-01, SEC-FR-02, and SEC-FR-04).
 - Where satisfied (as-is): Met by Design
 - With APIM target design: Strengthened
 - Responsibility: Shared
@@ -303,7 +307,7 @@ Each control below shows the current (as-is) status. Where the APIM + Entra fron
 - Source: BSL-ARC-S-01-05 - Security only.docx
 - Capability: Secrets Management
 - Requirement: Local Privileged Account, Service Account, Shared Account, API Keys, secrets (cryptographic keys, passphrases, etc.) must be stored and managed via BSL approved password vault.
-- Response: The tool holds two secrets that fall under this requirement: the MCP endpoint API key (`API_KEY`) and the Azure Storage connection string (`AZURE_STORAGE_CONNECTION_STRING`), which contains the storage account key. It uses no other privileged-account, service-account, certificate, or cryptographic secrets. As deployed today both are held as App Service application settings (and the API key is additionally held client-side in each developer's `.mcp.json`), not in a BlueScope-approved vault, so the requirement is not yet met. To satisfy it: store the API key in the approved vault and reference it rather than embedding it, and store the storage connection string in the approved vault (e.g. a Key Vault reference) or, preferably, eliminate it by switching Blob access to the system-assigned Managed Identity already enabled on the App Service. In the APIM target design the backend API key is held only as a Key Vault-backed APIM named value, which meets the vault requirement for that secret.
+- Response: The tool holds two secrets that fall under this requirement: the MCP endpoint API key and the Azure Storage connection string, which contains the storage account key. It uses no other privileged-account, service-account, certificate, or cryptographic secrets. As deployed today both are held as App Service application settings (and the API key is additionally held in each developer's local client configuration file), not in a BlueScope-approved vault, so the requirement is not yet met. To satisfy it: store the API key in the approved vault and reference it rather than embedding it, and store the storage connection string in the approved vault (e.g. a Key Vault reference) or, preferably, eliminate it by switching Blob access to the system-assigned Managed Identity already enabled on the App Service. In the APIM target design the backend API key is held only as a Key Vault-backed APIM named value, which meets the vault requirement for that secret.
 - Where satisfied (as-is): Partially Satisfied
 - With APIM target design: Strengthened
 - Responsibility: Customer
@@ -313,7 +317,7 @@ Each control below shows the current (as-is) status. Where the APIM + Entra fron
 - Source: BSL-ARC-S-01-05 - Security only.docx
 - Capability: Secure Network Communication
 - Requirement: All data in transit must be encrypted.
-- Response: In the current deployment, HTTPS/TLS 1.2+ is enforced on the client-to-server and App-Service-to-Blob-Storage paths by the App Service configuration (`httpsOnly: true`, `minTlsVersion: '1.2'`) and the Storage account (`supportsHttpsTrafficOnly: true`, `minimumTlsVersion: 'TLS1_2'`) defined in the Bicep template (`infrastructure/main.bicep`). With the APIM front door, the client-to-APIM and APIM-to-backend paths are likewise served over HTTPS/TLS by APIM and App Service configuration. The hosted component provides MCP tools only and does not host or execute an LLM, so LLM transport paths are outside the scope of this control response. Where service-to-service mutual TLS is required, BlueScope or the implementation partner configures it, and BlueScope confirms the transport standard.
+- Response: In the current deployment, HTTPS/TLS 1.2+ is enforced on the client-to-server and App-Service-to-Blob-Storage paths by the App Service configuration (HTTPS-only, TLS 1.2 minimum) and the Storage account (HTTPS-only traffic, TLS 1.2 minimum) defined in the infrastructure template. With the APIM front door, the client-to-APIM and APIM-to-backend paths are likewise served over HTTPS/TLS by APIM and App Service configuration. The hosted component provides MCP tools only and does not host or execute an LLM, so LLM transport paths are outside the scope of this control response. Where service-to-service mutual TLS is required, BlueScope or the implementation partner configures it, and BlueScope confirms the transport standard.
 - Where satisfied: Met by Design
 - Responsibility: Shared
 
@@ -454,7 +458,7 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Test models against adversarial inputs to identify vulnerabilities.
-- Response: The delivered tool is tested for misuse at its exposed interfaces and integrations, including prompt injection, unsafe tool use, and abuse cases within the implemented solution boundary.
+- Response: The delivered tool will be tested for misuse at its exposed interfaces and integrations, including prompt injection, unsafe tool use, and abuse cases within the implemented solution boundary.
 - Where satisfied: Project / Operational Control
 - Responsibility: Customer
 
@@ -478,7 +482,7 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Secure access to AI development environments.
-- Response: Access to the tool development and administration environments is restricted through enterprise identity, MFA, and separated environments.
+- Response: Access to the tool's development and administration environments relies on BlueScope's existing enterprise identity and access controls (SSO/MFA) and environment separation, rather than on any control built into the tool.
 - Where satisfied: Met by Design
 - Responsibility: Customer
 
@@ -519,7 +523,7 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Regularly check for vulnerabilities in open-source packages.
-- Response: Open-source packages used by the tool are checked for vulnerabilities through the delivery pipeline before release.
+- Response: Open-source packages used by the tool will be checked for vulnerabilities through the delivery pipeline before release.
 - Where satisfied: Project / Operational Control
 - Responsibility: Customer
 
@@ -567,7 +571,7 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Apply strict filtering for sensitive information including PII, credentials or access keys before passing it to or from the LLM.
-- Response: Filtering of sensitive information before content is sent to or returned from the LLM belongs to the chat interface and broader AI service governance, not the tool — the tool runs no LLM and applies no such filter. As mitigating context (not as partial satisfaction of this control), the tool returns only X++ metadata and source already available to the developer and handles no PII, credentials, or business data, so it introduces no new sensitive information into the exchange, and pull request review backstops what reaches the codebase.
+- Response: Filtering of sensitive information sent to or from the LLM belongs to the chat interface and AI governance, not the tool, which runs no LLM. As context, the tool returns only X++ metadata and source already available to the developer and handles no PII, credentials, or business data.
 - Where satisfied: Not Relevant for Current Installation
 - Responsibility: Customer
 
@@ -596,11 +600,11 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 - With APIM target design: Satisfied
 - Responsibility: Shared
 
-### AI-23 
+### AI-23
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Integrate redaction mechanisms to automatically identify and remove sensitive information from model outputs.
-- Response: The tool contains no LLM and produces no model output of its own, so automated redaction of model output is a function of the chat interface (Claude Code / GitHub Copilot) and broader AI service governance, not of this tool — the tool performs no redaction mechanism. As mitigating context, what the tool returns is X++ object metadata and source code already available to the developer in their D365 development environment, so it introduces no new sensitive data into the output, and developer and pull request review act as the backstop before any generated artifact is used, shared, or merged.
+- Response: The tool runs no LLM and produces no model output, so redaction of model output is a chat-interface and AI-governance function, not the tool's. As context, the tool returns only X++ metadata and source already available to the developer, and developer and pull request review backstop any generated artifact.
 - Where satisfied: Not Relevant for Current Installation
 - Responsibility: Customer
 
@@ -608,7 +612,7 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Use AI content moderation tools to detect and block harmful or confidential data in outputs.
-- Response: Content moderation of model output belongs to the chat interface (Claude Code / GitHub Copilot) and broader AI service governance; the tool itself runs no LLM and applies no moderation model, so it performs none of this control. As mitigating context, the tool returns only X++ metadata and source already available to the developer, and the bounded read-only metadata scope plus developer and pull request review govern what is accepted into the codebase.
+- Response: Content moderation of model output belongs to the chat interface and AI governance; the tool runs no LLM. As context, it returns only X++ metadata and source already available to the developer, with the read-only scope and pull request review governing what enters the codebase.
 - Where satisfied: Not Relevant for Current Installation
 - Responsibility: Customer
 
@@ -624,7 +628,7 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Regularly review and update context sources to avoid stale or inaccurate information.
-- Response: The metadata context source is the D365 X++ source code held in a git development branch, so changes to it already pass through standard source-code change control (commit and pull request review on that branch) before they can affect the tool's context. In the cloud deployment model an automated build then regenerates the metadata databases from changes on the X++ development branch and republishes them for all developers to consume, so the shared context stays current without each developer rebuilding it independently. This refresh is a function of the cloud deployment model and is independent of the APIM front door. In the local-only option, all artifacts are held locally and the developer refreshes their own metadata from the same source branch. Because the source is version-controlled, the "review and update" of the context source is the git branch review process; the rebuild cadence, branch-trigger configuration, and review ownership remain to be confirmed as an operational control.
+- Response: The metadata context source is the D365 X++ source code held in a git development branch, so changes to it pass through normal source-code change control (commit and pull request review) before they can affect the tool. In the cloud model an automated build regenerates the metadata databases from that branch and republishes them so all developers share the latest; in the local-only option each developer refreshes from the same branch. The rebuild cadence and review ownership remain to be confirmed operationally.
 - Where satisfied: Project / Operational Control
 - Responsibility: Customer
 
@@ -734,7 +738,7 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 
 - Source: ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf
 - Requirement: Per-user API tokens and must not use fixed credential for MCP server to invoke backend APIs. Must not use passthrough authentication.
-- Response: With the APIM front door, inbound access uses per-user Entra tokens (no passthrough). The APIM-to-backend hop injects a static `x-api-key` held only in Key Vault / APIM and never exposed to clients; the backend is private and reachable only from APIM. The MCP server itself makes no downstream backend API calls (it reads local metadata databases), so the "fixed credential to invoke backend APIs" concern is limited to this internal gateway-to-server hop. **Residual:** this hop uses a static key rather than managed identity. The stricter-compliant option is to enable App Service authentication and have APIM authenticate to the backend with its managed identity, removing the shared key entirely.
+- Response: With the APIM front door, inbound access uses per-user Entra tokens (no passthrough), and the backend is private and reachable only from APIM. At request time the MCP server makes no further downstream backend API calls — it reads the local SQLite metadata databases. There are, however, two fixed-credential paths on the as-is server side, both addressable: (1) at startup the server downloads those metadata databases from Azure Blob Storage using a fixed storage account-key connection string — exactly the fixed-credential backend access this control targets — which can be moved onto the App Service system-assigned managed identity (see SEC-FR-05 / SEC-AI-DTCTLG-06); and (2) the APIM-to-backend hop, where a static API key is injected (held only in Key Vault / APIM, never client-exposed), which can be replaced by having APIM authenticate to the backend with its managed identity. **Residual:** until those changes are made, both paths use static keys rather than managed identity.
 - Where satisfied (as-is): Partially Satisfied
 - With APIM target design: Largely Satisfied
 - Responsibility: Shared
@@ -743,9 +747,9 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 
 - Source: ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf
 - Requirement: Route traffic through trusted proxy, restrict outbound flow to whitelisted domains and endpoints.
-- Response: With the APIM front door, APIM is the trusted proxy through which all client traffic is routed, and the backend is private and reachable only from APIM. Outbound allowlists and firewall restrictions must still be applied for any downstream calls and at the App Service boundary.
+- Response: This control has two parts. Inbound: in the target design APIM is the trusted proxy through which all client traffic is routed, and the backend is private and reachable only from APIM. Outbound: the server makes no third-party or internet calls — at request time it reads its local metadata database, and its only external dependency is the startup download of that database from same-tenant Azure Blob Storage (already restricted, with public access disabled). There is therefore essentially no outbound flow needing a whitelist; any residual storage egress can be tightened with Azure-native network controls. In the as-is state the client connects directly, without a trusted proxy.
 - Where satisfied (as-is): Partially Satisfied
-- With APIM target design: Largely Satisfied
+- With APIM target design: Satisfied
 - Responsibility: Shared
 
 ### SEC-AI-DTCTLG-04
@@ -769,34 +773,62 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 
 - Source: ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf
 - Requirement: All application secrets (if any) must be stored in and retrieved from an authorized secret-management store such as Azure Key Vault; containers must not store secrets locally.
-- Response: The application uses two secrets today: the Azure Storage connection string (which embeds the storage account key) and an optional MCP API key. As deployed, both are held as Azure App Service application settings — the connection string is generated at deploy time from the storage account key (`listKeys()` in `infrastructure/main.bicep`) and the API key is supplied as a `@secure()` deployment parameter — so neither is committed to source and App Service encrypts settings at rest. However, neither is held in an authorized secret-management store (no Key Vault is provisioned), and the API key is additionally distributed to each client's `.mcp.json`, so the requirement is only partially met as-is. A system-assigned managed identity is enabled on the App Service but is not used — Blob access goes through the connection string (`BlobServiceClient.fromConnectionString` in `src/database/download.ts`) — so the storage secret can be eliminated entirely by switching Blob access to that managed identity. To satisfy the requirement: hold the API key in the approved vault (or, in the APIM design, as a Key Vault-backed APIM named value injected at runtime and never client-held) and either vault the storage connection string or, preferably, remove it via the managed identity. The "must not store secrets locally" principle still applies even though this is not a container deployment: as-is the secrets are injected as App Service environment variables — effectively held in the running compute — so this aspect is not satisfied yet. Fetching the API key dynamically from Key Vault and removing the storage secret via the managed identity, rather than holding either in app settings, is what closes it. See SEC-FR-05, which covers the same two secrets.
+- Response: The application uses two secrets: the Azure Storage connection string (which embeds the account key) and an optional MCP API key. Both are held as App Service application settings — the connection string generated at deploy time from the storage account key (in the infrastructure template) and the API key supplied as a protected (secret) deployment parameter — so neither is in source, but neither is in an authorized vault (none is provisioned) and the API key is also held in each developer's local client configuration file. Injecting them as environment variables also leaves secrets in the running compute, which the "must not store secrets locally" note targets. A system-assigned managed identity is enabled but unused — Blob access uses the connection string rather than the identity. To satisfy the requirement: hold the API key in the approved vault (or a Key Vault-backed APIM named value in the target design) and eliminate the storage secret by switching Blob access to the managed identity. See SEC-FR-05, which covers the same two secrets.
 - Where satisfied (as-is): Partially Satisfied
 - With APIM target design: Strengthened
 - Responsibility: Shared
 
-## Logging and Monitoring Position for the Hybrid Model
+### SEC-AI-DTCTLG-07
 
-### Authentication and admin audit logs
+- Source: ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf
+- Requirement: Security hardening at host — OS hardening, encrypted/restricted remote connectivity with public access disabled, restricted management ports, controlled privileged admin access, supported patch level free of critical/high vulnerabilities, non-root execution, and resource limits (CPU, memory, concurrent users, tool-call rate).
+- Response: These items target a self-managed host or container. On Azure Linux App Service (PaaS), Microsoft manages and hardens the host OS, patching, and isolation, and the app runs as a non-privileged sandboxed worker — there is no customer host or root account to harden. Customer-side items are met in the infrastructure template (HTTPS-only access, TLS 1.2 minimum, FTP disabled), Azure RBAC for privileged management, App Service Plan sizing for CPU/memory, and application-level rate limiting. The open item is ingress restriction — public access is not yet disabled — which the APIM design closes (private backend, restricted SCM). The host-agent items in SEC-AI-DTCTLG-09 (Crowdstrike/Qualys) do not apply to PaaS.
+- Where satisfied (as-is): Partially Satisfied
+- With APIM target design: Strengthened
+- Responsibility: Shared
 
-- Position: Satisfied with the APIM target design
-- Response: Authentication events, privileged access, administrative changes, deployment changes, and configuration changes can be logged using standard Azure platform capabilities. In the APIM target design, Entra sign-in and Conditional Access events are available through Microsoft Entra logging, while APIM, App Service, and Azure Monitor / Application Insights provide request, configuration, and operational telemetry. Forwarding these logs to the BlueScope SIEM remains an implementation and operational integration responsibility.
+### SEC-AI-DTCTLG-08
 
-### Tool-call and access telemetry (LLM prompt/response logging is out of tool scope)
+- Source: ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf
+- Requirement: Detect and protect sensitive data — human approval / policy gates in front of sensitive operations, and detection/protection against prompt injection and tool injection.
+- Response: The cloud component is read-only metadata and performs no sensitive or state-changing operations, so there are no runtime operations needing approval gates; for generated artifacts the human-in-the-loop is developer plus pull request review (see AI-27). Prompt-injection detection is an LLM-layer / chat-interface responsibility (see AI-20); the tool's contribution is MCP boundary validation (see AI-36) and a fixed, version-controlled set of read-only tools that limits tool-injection exposure, with gateway request inspection added in the APIM design. Sensitive-data exposure is bounded — metadata only, no business data, PII, or credentials.
+- Where satisfied (as-is): Partially Satisfied
+- With APIM target design: Strengthened
+- Responsibility: Shared
 
-- Position: Largely satisfied with the APIM target design for tool-call and access telemetry; LLM prompt/response logging is a chat-interface responsibility
-- Response: Tool invocation traces, request diagnostics, and gateway policy decisions can be captured through APIM diagnostics together with App Service and Azure Monitor / Application Insights telemetry. For this use case, that telemetry focuses on metadata access, tool behaviour, and administrative actions rather than business data content. Logging of the LLM interaction itself — prompts, model responses, and token usage — is not performed by the tool or the gateway, because neither sees it; that logging is the responsibility of the chat interface (Claude Code / GitHub Copilot) and the LLM service governance. The remaining design decision for the tool is the exact depth of application-level tool-call logging retained by the MCP service itself.
+### SEC-AI-DTCTLG-09
 
-### Safety and policy enforcement events
+- Source: ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf
+- Requirement: Monitoring and logging — monitor MCP server operations for risky actions and exfiltration patterns using BSL-approved security tools (the source names Crowdstrike for endpoint security and Qualys for host vulnerability management).
+- Response: Crowdstrike and Qualys are host agents requiring OS access and cannot run on PaaS App Service. The platform equivalent is Microsoft Defender for App Service / Defender for Cloud plus Azure Monitor / Application Insights and (target design) APIM diagnostics, which can capture authentication, admin, deployment, tool-invocation, and rejected/throttled-request events and forward them to the BlueScope SIEM with correlation IDs (see SEC-FR-15). Risk is bounded — read-only metadata, so "exfiltration" means metadata-access patterns, not business data. LLM prompt/response/token logging is a chat-interface responsibility. Telemetry is available as-is; SIEM forwarding and alerting remain an operational integration.
+- Where satisfied (as-is): Partially Satisfied
+- With APIM target design: Strengthened
+- Responsibility: Customer
 
-- Position: Largely satisfied with the APIM target design
-- Response: APIM can log token-validation failures, rejected requests, throttling events, and other gateway policy outcomes. Where additional application-level safety controls are implemented in the MCP service, those events can also be logged through the application telemetry pipeline. Because the current scope is read-only metadata access, this control is relevant primarily to request validation, policy enforcement, and anomaly detection rather than content moderation of sensitive business data.
+### SEC-AI-DTCTLG-10
 
-### End-to-end transaction logging across the local server, APIM, cloud MCP, and backend
+- Source: ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf
+- Requirement: Monitoring and threat intelligence — enable Defender for Cloud for threat-intelligence signals and event correlation (a "should", for continuous posture improvement, workload protection, compliance, and threat management).
+- Response: Microsoft Defender for Cloud can be enabled across the in-scope Azure resources (App Service, Storage, and APIM in the target design) for posture management, workload protection, threat-intelligence signals, and event correlation into the BlueScope SIEM. This is a BlueScope Cloud Operations / Cyber enablement, not part of the tool deployment.
+- Where satisfied: Project / Operational Control
+- Responsibility: Customer
 
-- Position: Partially satisfied and can be completed by design
-- Response: APIM, App Service, and Azure Monitor / Application Insights provide the platform capability needed for cross-component request tracing, and correlation IDs can be propagated across the local server, gateway, and hosted MCP service. Full end-to-end transaction logging depends on the project adopting a consistent correlation approach across all participating components and forwarding the resulting telemetry into BlueScope monitoring operations.
+## Requested Exceptions
 
-### Security event forwarding to central SIEM
+The areas below cannot be met exactly as written for this tool and deployment and are put forward as exception requests for BlueScope to accept with the stated mitigations — mirroring the exception approach in the source MCP / AI Data Gateway document (requirement, response, mitigation factor). Controls that are resolved simply by adopting the APIM + Entra front door (for example internet-facing SSO/MFA, central authentication, and the API gateway) or by configuring Azure monitoring (for example Defender for App Service / Defender for Cloud in place of host agents) are **not** raised as exceptions — they are planned configuration covered in the relevant control responses. Each remaining exception is typed as **Interim** (removed by a planned uplift) or **Architectural residual** (a service-level limitation to be accepted).
 
-- Position: Satisfied by platform capability, subject to BlueScope operational integration
-- Response: Azure platform services used in this design can emit the relevant diagnostics and security telemetry needed for central monitoring, including APIM, App Service, Azure Monitor / Application Insights, and Microsoft Entra logs where applicable. The remaining requirement is operational: BlueScope must connect these sources to its approved central SIEM and define the retention, alerting, and response processes.
+### EXC-01 — No fixed service credential / per-user token to backend
+
+- Criteria: SEC-AI-DTCTLG-02
+- Requirement: Per-user API tokens; the MCP server must not use a fixed credential to invoke backend APIs; no passthrough authentication.
+- Deviation: The server's service-to-service access uses fixed credentials — the Azure Storage account-key connection string (startup database download) and, in the target design, a static APIM-to-backend key. Per-user tokens do not apply to these service hops, and the request-time "backend" is a local SQLite database, not a per-user API.
+- Mitigation factor: In the target design the backend App Service is private (public network access disabled, reachable only from APIM), so any service-to-service credential is never internet-exposed and the backend cannot be reached directly even if a key were known. In addition: per-user Entra identity enforced inbound at APIM (no passthrough); access limited to an authorised group; the storage secret eliminated by switching Blob access to the App Service managed identity, and the APIM-to-backend hop moved to managed identity (or a vaulted, rotated key); read-only metadata bounds impact.
+- Type / closure: **Architectural residual** — service identities are minimised via managed identity and isolated behind a private backend; accept the residual where a service credential is unavoidable.
+
+### EXC-02 — Secrets in an approved vault
+
+- Criteria: SEC-FR-05, SEC-AI-DTCTLG-06
+- Requirement: All secrets must be stored in and retrieved from an approved vault (e.g. Azure Key Vault) and not stored locally.
+- Deviation: As-is the two secrets (storage connection string, optional API key) are held as App Service application settings, injected as environment variables, rather than in Key Vault.
+- Mitigation factor: In the target design the App Service holding these settings is private (behind APIM, public network access disabled), so the server-held secrets are not internet-exposed and reading them requires Azure management-plane (RBAC) access, not public access. In addition: secrets are generated at deploy and not committed to source; the API key is supplied as a protected (secret) deployment parameter; App Service settings are encrypted at rest; and rotation is scheduled.
+- Type / closure: **Interim** — removed by holding the API key in the vault (or a Key Vault-backed APIM named value) and eliminating the storage secret via the managed identity.
