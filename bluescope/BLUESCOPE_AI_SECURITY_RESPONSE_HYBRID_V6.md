@@ -143,7 +143,7 @@ Read-only D365 X++ object metadata  (no business or transaction data)
 | SEC-FR-11 — Penetration testing                                  | Project / Operational         | Project / Operational (unchanged)  | Still required; attack surface reduced to APIM.                                                                                                                                                                              |
 | SEC-FR-15 — Security logging                                     | Partially Satisfied           | Partially Satisfied (strengthened) | APIM diagnostics to Azure Monitor / SIEM with correlation IDs.                                                                                                                                                               |
 | AI-31 — OAuth-based authentication                               | Partially Satisfied           | **Satisfied**                | Per-user Entra OAuth validated at the gateway.                                                                                                                                                                               |
-| AI-34 — RBAC for actions                                         | Partially Satisfied           | Largely Satisfied                  | Entra app roles / scopes plus APIM policy enforcement.                                                                                                                                                                       |
+| AI-34 — RBAC for actions                                         | Partially Satisfied           | Strengthened                       | APIM/Entra adds enforced access gating (group/app-role membership); per-operation RBAC is not applicable (single consumer role), so RBAC applies to administration. See SEC-FR-03.                                            |
 | SEC-AI-DTCTLG-01 — Central identity                              | Partially Satisfied           | **Satisfied**                | Entra token validated at the gateway before the backend is reached.                                                                                                                                                          |
 | SEC-AI-DTCTLG-02 — Per-user tokens / no fixed backend credential | Partially Satisfied           | Largely Satisfied                  | Per-user JWT inbound.**Residual:** APIM→backend uses a static key rather than managed identity (mitigated by private networking, Key Vault storage, and rotation). Managed identity available as the stricter option. |
 | SEC-AI-DTCTLG-03 — Trusted proxy / egress                        | Partially Satisfied           | Satisfied (inbound)                | APIM is the trusted proxy; add the outbound allowlist for any downstream calls.                                                                                                                                              |
@@ -210,48 +210,48 @@ Values used in the "With APIM target design" column:
 | BSL-ARC-S-01-05 - Security only.docx                                             | SEC-FR-14        | Patch management                                   | Partially Satisfied                                                                                                                                                                                               | No change               | Customer       |
 | BSL-ARC-S-01-05 - Security only.docx                                             | SEC-FR-15        | Security logging to central SIEM                   | Partially Satisfied                                                                                                                                                                                               | Strengthened            | Customer       |
 | BSL-ARC-S-01-05 - Security only.docx                                             | SEC-FR-16        | Third-party assessment                             | Project / Operational Control                                                                                                                                                                                     | No change               | Customer       |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-01            | No PII or IP used to train LLM                     | Not Relevant for Current Installation                                                                                                                                                                             | No change               | Shared         |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-01            | No PII or IP used to train LLM                     | Not Relevant for Current Installation                                                                                                                                                                             | No change               | Customer       |
 | ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-02            | Clean and unbiased datasets                        | Project / Operational Control                                                                                                                                                                                     | No change               | Customer       |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-03            | Least privilege for training and context data      | Met by Design                                                                                                                                                                                                     | No change               | Shared         |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-03            | Least privilege for training and context data      | Met by Design                                                                                                                                                                                                     | No change               | Implementation Partner |
 | ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-04            | Security reviews and threat modeling               | Project / Operational Control                                                                                                                                                                                     | No change               | Customer       |
 | ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-05            | Adversarial testing                                | Project / Operational Control                                                                                                                                                                                     | No change               | Customer       |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-06            | Secure repositories                                | Project / Operational Control                                                                                                                                                                                     | No change               | Shared         |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-07            | Restrict model change authority                    | Project / Operational Control                                                                                                                                                                                     | No change               | Shared         |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-08            | Secure AI development access                       | Met by Design                                                                                                                                                                                                     | No change               | Shared         |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-09            | Log training and deployment activity               | Not Relevant for Current Installation - no model training in scope; deployment logging still applies operationally                                                                                                | No change               | Shared         |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-10            | Restore secure model versions                      | Partially Satisfied                                                                                                                                                                                               | No change               | Customer       |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-06            | Secure repositories                                | Project / Operational Control                                                                                                                                                                                     | No change               | Customer       |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-07            | Restrict model change authority                    | Project / Operational Control                                                                                                                                                                                     | No change               | Customer       |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-08            | Secure AI development access                       | Met by Design                                                                                                                                                                                                     | No change               | Customer       |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-09            | Log training and deployment activity               | Not Relevant for Current Installation - no model training in scope; deployment logging still applies operationally                                                                                                | No change               | Customer       |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-10            | Restore secure model versions                      | Satisfied                                                                                                                                                                                                         | No change               | Customer       |
 | ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-11            | Monitor unusual behavior                           | Partially Satisfied                                                                                                                                                                                               | Strengthened            | Customer       |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-12            | Verify integrity of models and libraries           | Partially Satisfied                                                                                                                                                                                               | No change               | Shared         |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-12            | Verify integrity of models and libraries           | Partially Satisfied                                                                                                                                                                                               | No change               | Implementation Partner |
 | ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-13            | Open-source vulnerability checks                   | Project / Operational Control                                                                                                                                                                                     | No change               | Customer       |
 | ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-14            | Ethics, privacy, and policy compliance             | Project / Operational Control                                                                                                                                                                                     | No change               | Customer       |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-15            | Document model decisions                           | Project / Operational Control                                                                                                                                                                                     | No change               | Shared         |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-15            | Document model decisions                           | Project / Operational Control                                                                                                                                                                                     | No change               | Implementation Partner |
 | ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-16            | SAST, DAST, and IAST                               | Project / Operational Control                                                                                                                                                                                     | No change               | Customer       |
 | ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-17            | Validate and sanitize input context                | Partially Satisfied                                                                                                                                                                                               | No change               | Shared         |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-18            | Approved prompt templates                          | Project / Operational Control                                                                                                                                                                                     | No change               | Shared         |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-19            | Filter sensitive information                       | Partially Satisfied                                                                                                                                                                                               | No change               | Shared         |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-18            | Approved prompt templates                          | Not Relevant for Current Installation                                                                                                                                                                             | No change               | Customer       |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-19            | Filter sensitive information                       | Not Relevant for Current Installation                                                                                                                                                                             | No change               | Customer       |
 | ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-20            | Block prompt injection and data extraction         | Partially Satisfied                                                                                                                                                                                               | No change               | Shared         |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-21            | Encrypt contextual data                            | Satisfied                                                                                                                                                                                                         | No change               | Shared         |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-22            | Secure API calls to context sources and LLM        | Met by Design                                                                                                                                                                                                     | Strengthened            | Shared         |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-23            | Redact sensitive output                            | Partially Satisfied                                                                                                                                                                                               | No change               | Shared         |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-24            | Content moderation tools                           | Partially Satisfied                                                                                                                                                                                               | No change               | Shared         |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-21            | Encrypt contextual data                            | Satisfied                                                                                                                                                                                                         | No change               | Implementation Partner |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-22            | Secure API calls to context sources and LLM        | Partially Satisfied                                                                                                                                                                                              | Satisfied               | Shared         |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-23            | Redact sensitive output                            | Not Relevant for Current Installation                                                                                                                                                                             | No change               | Customer       |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-24            | Content moderation tools                           | Not Relevant for Current Installation                                                                                                                                                                             | No change               | Customer       |
 | ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-25            | Retention and deletion policies                    | Project / Operational Control                                                                                                                                                                                     | No change               | Customer       |
 | ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-26            | Review and update context sources                  | Project / Operational Control                                                                                                                                                                                     | No change               | Customer       |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-27            | Human review for safety-impacting actions          | Not Relevant for Current Installation - current MCP scope is read-only metadata access with no safety-impacting actions                                                                                           | No change               | Shared         |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-27            | Human review for safety-impacting actions          | Not Relevant for Current Installation - current MCP scope is read-only metadata access with no safety-impacting actions                                                                                           | No change               | Customer       |
 | ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-28            | Block unapproved connectors and sources            | Met by Design                                                                                                                                                                                                     | No change               | Shared         |
 | ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-29            | Trusted source allowlist                           | Partially Satisfied                                                                                                                                                                                               | No change               | Shared         |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-30            | Minimum necessary data access                      | Partially Satisfied                                                                                                                                                                                               | No change               | Shared         |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-30            | Minimum necessary data access                      | Partially Satisfied                                                                                                                                                                                               | No change               | Implementation Partner |
 | ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-31            | OAuth-based agent authentication                   | Partially Satisfied                                                                                                                                                                                               | Satisfied               | Shared         |
 | ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-32            | Unique identities per agent                        | Partially Satisfied                                                                                                                                                                                               | No change               | Shared         |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-33            | Mutual authentication between agents               | Not Relevant for Current Installation - no agent-to-agent topology in current installation scope                                                                                                                  | No change               | Shared         |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-34            | RBAC for agent actions                             | Partially Satisfied                                                                                                                                                                                               | Largely Satisfied       | Shared         |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-35            | TLS for inter-agent traffic                        | Not Relevant for Current Installation - no inter-agent traffic in current installation scope                                                                                                                      | No change               | Shared         |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-36            | Protocol integrity and message validation          | Partially Satisfied                                                                                                                                                                                               | Strengthened            | Shared         |
-| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-37            | Log agent-to-agent interactions                    | Not Relevant for Current Installation - no agent-to-agent interactions in current installation scope                                                                                                              | No change               | Shared         |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-33            | Mutual authentication between agents               | Not Relevant for Current Installation - no agent-to-agent topology in current installation scope                                                                                                                  | No change               | Customer       |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-34            | RBAC for agent actions                             | Partially Satisfied                                                                                                                                                                                               | Strengthened            | Shared         |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-35            | TLS for inter-agent traffic                        | Not Relevant for Current Installation - no inter-agent traffic in current installation scope                                                                                                                      | No change               | Customer       |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-36            | Protocol integrity and message validation          | Partially Satisfied                                                                                                                                                                                               | Strengthened            | Implementation Partner |
+| ESA-Artificial Intelligence (AI)-180526-235423.pdf                               | AI-37            | Log agent-to-agent interactions                    | Not Relevant for Current Installation - no agent-to-agent interactions in current installation scope                                                                                                              | No change               | Customer       |
 | ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-01 | Central identity and user-based API authorization  | Partially Satisfied                                                                                                                                                                                               | Satisfied               | Shared         |
 | ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-02 | Per-user tokens and no fixed backend credential    | Partially Satisfied                                                                                                                                                                                               | Largely Satisfied       | Shared         |
 | ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-03 | Trusted proxy and outbound allowlist               | Partially Satisfied                                                                                                                                                                                               | Satisfied (inbound)     | Shared         |
 | ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-04 | Scanning, image governance, and runtime monitoring | Project / Operational Control                                                                                                                                                                                     | No change               | Customer       |
-| ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-05 | Input validation and context sanitization          | Partially Satisfied                                                                                                                                                                                               | No change               | Shared         |
+| ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-05 | Input validation and context sanitization          | Partially Satisfied                                                                                                                                                                                               | Strengthened            | Implementation Partner |
 | ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf | SEC-AI-DTCTLG-06 | Secrets management                                 | Project / Operational Control                                                                                                                                                                                     | Strengthened            | Shared         |
 
 ## Response to Foundational Security Requirements
@@ -424,7 +424,7 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 - Criteria: BSL User PII, Customer PII or IP must not be used to train an LLM.
 - Response: The tool in scope does not access business data or customer content. It accesses object metadata only. Business data, customer content, and operational records are not intended inputs to the tool.
 - Where satisfied: Not Relevant for Current Installation
-- Responsibility: Shared
+- Responsibility: Customer
 
 ### AI-02
 
@@ -440,7 +440,7 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 - Criteria: Restrict access to training data and enforce least privilege principles.
 - Response: No training data is exposed to this tool. The tool is limited to the approved D365 X++ code and object-metadata sources required for its use case, and it does not access business data, customer content, or unrelated data stores. That fixed metadata-only scope is the least-privilege boundary for this design.
 - Where satisfied: Met by Design
-- Responsibility: Shared
+- Responsibility: Implementation Partner
 
 ### AI-04
 
@@ -462,9 +462,9 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Maintain secure repositories for model code and configurations.
-- Response: The tool code, configuration, prompts, and deployment artifacts are maintained in approved repositories with controlled change and review.
+- Response: The tool code, configuration, and deployment artifacts are maintained in approved repositories with controlled change and review.
 - Where satisfied: Project / Operational Control
-- Responsibility: Shared
+- Responsibility: Customer
 
 ### AI-07
 
@@ -472,7 +472,7 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 - Criteria: Limit who can train, deploy, and modify models.
 - Response: Only approved developers and deployment operators can modify or deploy the tool through the controlled repository, pull request, and pipeline process.
 - Where satisfied: Project / Operational Control
-- Responsibility: Shared
+- Responsibility: Customer
 
 ### AI-08
 
@@ -480,7 +480,7 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 - Criteria: Secure access to AI development environments.
 - Response: Access to the tool development and administration environments is restricted through enterprise identity, MFA, and separated environments.
 - Where satisfied: Met by Design
-- Responsibility: Shared
+- Responsibility: Customer
 
 ### AI-09
 
@@ -488,13 +488,13 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 - Criteria: Log all model training and deployment activities for accountability.
 - Response: There is no model training in scope. For accountability, deployment and configuration changes are captured through Azure DevOps pipeline executions and related delivery records, and operational activity can be reviewed through Application Insights if enabled and captured APIM logs.
 - Where satisfied: Not Relevant for Current Installation
-- Responsibility: Shared
+- Responsibility: Customer
 
 ### AI-10
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Enable quick restoration to secure versions of models.
-- Response: The tool code, configuration, prompts, and deployment artifacts are maintained in GitHub, so they are always versioned and approved versions can be restored quickly.
+- Response: The tool code, configuration, and deployment artifacts are maintained in GitHub, so they are always versioned and approved versions can be restored quickly.
 - Where satisfied: Satisfied
 - Responsibility: Customer
 
@@ -502,8 +502,9 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Monitor for unusual behavior in model outputs or resource usage.
-- Response: Monitoring of model outputs is a broader AI governance concern and is not a control provided by this tool itself.
+- Response: Monitoring of model outputs is a broader AI governance concern and is not a control provided by this tool itself. Resource-usage and request-rate anomalies, by contrast, can be monitored through Azure platform telemetry — App Service and Azure Monitor today, and APIM diagnostics in the target design.
 - Where satisfied (as-is): Partially Satisfied
+- With APIM target design: Strengthened
 - Responsibility: Customer
 
 ### AI-12
@@ -512,7 +513,7 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 - Criteria: Verify integrity of pre-trained models, libraries, and frameworks.
 - Response: There are no pre-trained models in scope. The tool's libraries, frameworks, and source artifacts come from the controlled Git repository and approved build inputs, and their integrity is checked through the repository and pipeline process.
 - Where satisfied: Partially Satisfied
-- Responsibility: Shared
+- Responsibility: Implementation Partner
 
 ### AI-13
 
@@ -534,9 +535,9 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Document model decisions and maintain interpretability.
-- Response: AI-related design decisions, usage constraints, and review outcomes are documented so the tool's behavior remains understandable and reviewable.
+- Response: The tool is deterministic and performs no model inference, so there are no model decisions to interpret. AI-related design decisions, usage constraints, and review outcomes are documented so the tool's behavior remains understandable and reviewable.
 - Where satisfied: Project / Operational Control
-- Responsibility: Developer
+- Responsibility: Implementation Partner
 
 ### AI-16
 
@@ -550,32 +551,32 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Validate and sanitize input context to prevent injection of malicious or misleading data.
-- Response: This is a customization workflow for assisted development rather than a standard prompt-input product. Inputs will vary by approved specification and development task, and resulting artifacts are subject to developer review, pull request review, and pipeline verification.
-- Where satisfied: Not Relevant for Current Installation
+- Response: Two layers apply. Sanitization of the natural-language context fed to the LLM is a chat-interface and AI-governance concern, not the tool's. At the tool boundary, however, the MCP server does validate its own inputs — JSON-RPC message structure and typed tool parameters (see AI-36) — and the read-only metadata scope bounds what can be requested. Resulting artifacts are subject to developer review, pull request review, and pipeline verification.
+- Where satisfied: Partially Satisfied
 - Responsibility: Shared
 
 ### AI-18
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Only use prompts created or vetted by standard prompt templates.
-- Response: Standard prompt templates are not applicable to this customization workflow for assisted development. Inputs are task-specific, and outputs are controlled through developer review, pull request review, and pipeline verification.
+- Response: The tool issues no prompts to an LLM, so prompt templating is a chat-interface concern rather than a tool control. Inputs are task-specific, and outputs are controlled through developer review, pull request review, and pipeline verification.
 - Where satisfied: Not Relevant for Current Installation
-- Responsibility: Shared
+- Responsibility: Customer
 
 ### AI-19
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Apply strict filtering for sensitive information including PII, credentials or access keys before passing it to or from the LLM.
-- Response: This is not a control provided by the tool itself. Filtering of sensitive information before content is sent to or returned from the LLM belongs to the generic chat interface and broader AI service governance.
+- Response: Filtering of sensitive information before content is sent to or returned from the LLM belongs to the chat interface and broader AI service governance, not the tool — the tool runs no LLM and applies no such filter. As mitigating context (not as partial satisfaction of this control), the tool returns only X++ metadata and source already available to the developer and handles no PII, credentials, or business data, so it introduces no new sensitive information into the exchange, and pull request review backstops what reaches the codebase.
 - Where satisfied: Not Relevant for Current Installation
-- Responsibility: Shared
+- Responsibility: Customer
 
 ### AI-20
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Block injection attempts that override system instructions or extract sensitive data.
-- Response: This is not a control provided by the tool component itself. Protections against prompt injection or extraction of sensitive data belong to the generic chat interface and broader AI service governance.
-- Where satisfied: Not Relevant for Current Installation
+- Response: Protection against prompt injection that overrides system instructions belongs to the chat interface and broader AI service governance, not the tool. The tool's partial contribution is at its own boundary — it validates MCP message structure and typed parameters (see AI-36), operates read-only on metadata, and exposes no system-instruction surface to override — which limits what an injection reaching the tool could achieve.
+- Where satisfied: Partially Satisfied
 - Responsibility: Shared
 
 ### AI-21
@@ -584,7 +585,7 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 - Criteria: Encrypt contextual data both in transit and at rest.
 - Response: Contextual data used by the tool is encrypted in transit and at rest.
 - Where satisfied: Satisfied
-- Responsibility: Shared
+- Responsibility: Implementation Partner
 
 ### AI-22
 
@@ -599,17 +600,17 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Integrate redaction mechanisms to automatically identify and remove sensitive information from model outputs.
-- Response: The tool contains no LLM and produces no model output of its own, so automated redaction of model output is a function of the chat interface (Claude Code / GitHub Copilot) and broader AI service governance, not of this tool. What the tool returns is X++ object metadata and source code that is already available to the developer in their D365 development environment, so it does not introduce new sensitive data into the output. Where redaction of sensitive information is required it is applied at the chat-interface layer, and developer review and pull request review act as the backstop before any generated artifact is used, shared, or merged.
-- Where satisfied: Partially Satisfied
-- Responsibility: Shared
+- Response: The tool contains no LLM and produces no model output of its own, so automated redaction of model output is a function of the chat interface (Claude Code / GitHub Copilot) and broader AI service governance, not of this tool — the tool performs no redaction mechanism. As mitigating context, what the tool returns is X++ object metadata and source code already available to the developer in their D365 development environment, so it introduces no new sensitive data into the output, and developer and pull request review act as the backstop before any generated artifact is used, shared, or merged.
+- Where satisfied: Not Relevant for Current Installation
+- Responsibility: Customer
 
 ### AI-24
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Use AI content moderation tools to detect and block harmful or confidential data in outputs.
-- Response: Content moderation of model output belongs to the chat interface (Claude Code / GitHub Copilot) and broader AI service governance; the tool itself runs no LLM and applies no moderation model. The tool returns only X++ metadata and source already available to the developer, so the primary safeguards for what is accepted into the codebase are the bounded read-only metadata scope and the developer and pull request review that every generated artifact passes through before it is accepted or shared.
-- Where satisfied: Partially Satisfied
-- Responsibility: Shared
+- Response: Content moderation of model output belongs to the chat interface (Claude Code / GitHub Copilot) and broader AI service governance; the tool itself runs no LLM and applies no moderation model, so it performs none of this control. As mitigating context, the tool returns only X++ metadata and source already available to the developer, and the bounded read-only metadata scope plus developer and pull request review govern what is accepted into the codebase.
+- Where satisfied: Not Relevant for Current Installation
+- Responsibility: Customer
 
 ### AI-25
 
@@ -633,7 +634,7 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 - Criteria: For actions impacting safety, require human review before publishing or acting on LLM-generated content.
 - Response: Any artifacts created with AI assistance are reviewed by the developer, through pull request review, and by pipeline tooling before they are accepted or acted on.
 - Where satisfied: Not Relevant for Current Installation
-- Responsibility: Shared
+- Responsibility: Customer
 
 ### AI-28
 
@@ -657,7 +658,7 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 - Criteria: Agentic AI must only be granted access to the data it requires.
 - Response: The tool is granted access only to the code and metadata required for its approved use case.
 - Where satisfied: Partially Satisfied
-- Responsibility: Shared
+- Responsibility: Implementation Partner
 
 ### AI-31
 
@@ -672,7 +673,7 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Assign unique identities to each agent.
-- Response: The tool operates as a separately identified capability so its actions remain attributable and bounded.
+- Response: The tool is not an agent; it is a distinct MCP resource. The acting agent is the chat client, identified by the authenticated caller — a shared API key today, per-user Entra identity with the APIM front door. The tool itself has its own service identity (Entra app registration / managed identity), so the tool and its caller are separately identifiable and actions remain attributable.
 - Where satisfied: Partially Satisfied
 - Responsibility: Shared
 
@@ -680,43 +681,43 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Use mutual authentication for agent-to-agent communication.
-- Response: There is no agent-to-agent communication in the current tool scope.
+- Response: The tool is a single MCP resource, not part of an agent-to-agent topology, so there is no agent-to-agent communication in the current tool scope.
 - Where satisfied: Not Relevant for Current Installation
-- Responsibility: Shared
+- Responsibility: Customer
 
 ### AI-34
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Apply RBAC to restrict what each agent can request or execute.
-- Response: The tool is restricted to its approved operations and approved metadata scope. The read/write split is the primary bound: the cloud service is read-only metadata and the write-capable tools exist only on the local stdio server. With the APIM + Entra front door, who may invoke the cloud service is governed by Entra app roles / group membership, and APIM policy enforces that authorization at the gateway before the request reaches the backend.
+- Response: "What the tool can request or execute" is bounded primarily by deployment, not by a per-user role matrix. The cloud service is read-only metadata and the write-capable tools exist only on the local stdio server, so the executable surface is fixed by deployment mode. Access to the cloud service is gated by membership — a shared API key today, Entra group/app-role membership enforced at the APIM gateway in the target design — which controls whether a caller may use the tool at all. Consistent with SEC-FR-03, per-user RBAC within the tool is not applicable: it exposes a single consumer role with no in-tool privilege gradation, so RBAC in the conventional sense applies to administration of the tool (Azure RBAC / Entra admin/operator/developer separation) rather than to individual tool calls.
 - Where satisfied (as-is): Partially Satisfied
-- With APIM target design: Largely Satisfied
+- With APIM target design: Strengthened
 - Responsibility: Shared
 
 ### AI-35
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Encrypt all inter-agent traffic using TLS.
-- Response: There is no inter-agent traffic in the current tool scope.
+- Response: The tool is a single MCP resource with no inter-agent traffic in the current tool scope.
 - Where satisfied: Not Relevant for Current Installation
-- Responsibility: Shared
+- Responsibility: Customer
 
 ### AI-36
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Enforce protocol integrity and validate exchanged messages for malicious content.
-- Response: Messages exchanged with the tool are validated for protocol integrity, expected structure, and malicious content before processing. The MCP transport enforces JSON-RPC message structure and typed tool parameters at the server boundary. With the APIM front door, additional request validation, schema checks, and size/rate limits can be applied at the gateway before traffic reaches the backend.
+- Response: The MCP transport enforces JSON-RPC protocol integrity and typed tool parameters at the server boundary, so exchanged messages are validated for structure and type before processing. Validation specifically targeting malicious content — beyond structure and type — is not separately evidenced today and would need to be designed; this is the same control as SEC-AI-DTCTLG-05, viewed from the message-validation angle. With the APIM front door, additional request validation, schema checks, and size/rate limits can be applied at the gateway before traffic reaches the backend.
 - Where satisfied (as-is): Partially Satisfied
 - With APIM target design: Strengthened
-- Responsibility: Shared
+- Responsibility: Implementation Partner
 
 ### AI-37
 
 - Source: ESA-Artificial Intelligence (AI)-180526-235423.pdf
 - Criteria: Log all agent-to-agent interactions for audit and anomaly detection.
-- Response: There is no agent-to-agent interaction in the current tool scope, so this criterion is not applicable to the tool.
+- Response: The tool is a single MCP resource with no agent-to-agent interaction in the current tool scope, so this criterion is not applicable to the tool.
 - Where satisfied: Not Relevant for Current Installation
-- Responsibility: Shared
+- Responsibility: Customer
 
 ## Response to MCP Security Controls
 
@@ -751,7 +752,7 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 
 - Source: ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf
 - Requirement: SAST, SCA, DAST, no critical or high vulnerabilities in production, image governance, internal ACR, Defender for Containers.
-- Response: The BlueScope-approved delivery pipeline is the control point: application code, dependencies, and deployment artifacts are scanned (SAST/SCA/DAST) before deployment and monitored in production, gated so no critical or high vulnerabilities reach production. This deployment ships a Node.js app to Linux App Service rather than containers, so the container-specific items (internal ACR, Defender for Containers) apply only if a container image is introduced.
+- Response: The requirement assumes a containerised, vendor-supplied MCP; two scope differences apply here. (1) The tool is open source and built through the BlueScope-controlled fork and delivery pipeline, so the SAST/SCA, DAST, and the no-critical/high-vulnerability gate are enforced directly in that pipeline rather than relying on a vendor quality-assurance report per release. (2) The cloud component ships as a Node.js application to Linux App Service, not a customer-built container image, so the container-governance items (internal ACR storage, registry whitelisting, Defender for Containers) describe tooling for a containerised deployment and do not apply here — they are not a requirement to adopt containers. Defender for Containers names the runtime-protection tooling that would be used if containers were present; for an App Service deployment the equivalent option, if BlueScope wants runtime threat monitoring at that layer, is Microsoft Defender for App Service / Defender for Cloud. If the component is ever deployed as a container image, the container items become applicable and the image must be stored in a BlueScope ACR.
 - Where satisfied: Project / Operational Control
 - Responsibility: Customer
 
@@ -759,9 +760,10 @@ Note on tool role: The tool in scope is a non-autonomous MCP server (a tool/reso
 
 - Source: ESA-Securing Agentic AI Solution using MCP and AI Data Gateway-180526-235349.pdf
 - Requirement: Input validation and context sanitization. Remove unsafe content before passing context to backend tools or APIs. Sanitize template parameters.
-- Response: The repo does not currently evidence a complete input-validation and context-sanitization layer that removes unsafe content before passing context to backend tools or APIs. Some bounded behavior exists through the limited tool surface and read-only hosted mode, and additional request validation could be added at the APIM gateway, but explicit sanitization rules, enforcement points, and template-parameter controls would need to be designed and evidenced.
-- Where satisfied: Partially Satisfied
-- Responsibility: Shared
+- Response: The MCP transport enforces JSON-RPC protocol integrity and typed tool parameters at the server boundary (the same boundary validation described under AI-36), and the read-only hosted mode and limited tool surface bound what can be requested. An explicit context-sanitization layer — removing unsafe content before passing context to backend tools/APIs, and sanitizing template parameters to prevent injection — is not currently evidenced and would need to be designed with enforcement points defined. With the APIM front door, request validation and schema checks can be added at the gateway.
+- Where satisfied (as-is): Partially Satisfied
+- With APIM target design: Strengthened
+- Responsibility: Implementation Partner
 
 ### SEC-AI-DTCTLG-06
 
