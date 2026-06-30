@@ -15,7 +15,7 @@
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { XppServerContext } from '../types/context.js';
-import { READER_DISPATCH, OBJECT_INFO_TYPES } from './objectInfoRegistry.js';
+import { READER_DISPATCH, OBJECT_INFO_TYPES, withNotFoundGuidance } from './objectInfoRegistry.js';
 import { completionTool } from './completion.js';
 
 const GetObjectInfoArgsSchema = z.object({
@@ -29,12 +29,14 @@ const GetObjectInfoArgsSchema = z.object({
     'both are accepted; the base object name is extracted automatically.',
   ),
   name: z.string().min(1).describe('Exact object name (use search/search(queries=[...]) first if unsure).'),
+  // Top-level class shortcuts — accepted directly so callers don't need to nest them in options.
+  methodOffset: z.number().optional().describe('[class] Pagination offset for methods. Classes with >15 methods are paged; pass multiples of 15 to get the next page.'),
+  compact: z.boolean().optional().describe('[class] true = signatures only (default), false = include full method source bodies.'),
   options: z.record(z.string(), z.any()).optional().describe(
-    'Optional type-specific flags forwarded to the reader, e.g. ' +
-    '{ "compact": false } for class, { "includeRdl": true } for report, ' +
-    '{ "searchControl": "AccountNum" } for form, { "filter": "Path" } for macro. ' +
-    'For classes: { "members": "names" } returns a fast IntelliSense-style member ' +
-    'name list (optional "prefix" to filter) instead of full metadata.',
+    'Optional type-specific flags forwarded to the reader. ' +
+    'Class: { "compact": false } for full source, { "methodOffset": 15 } for next method page, ' +
+    '{ "members": "names" } for fast member-name list (add "prefix" to filter). ' +
+    'Report: { "includeRdl": true }. Form: { "searchControl": "AccountNum" }. Macro: { "filter": "Path" }.',
   ),
 });
 
@@ -47,7 +49,11 @@ export async function getObjectInfoTool(request: CallToolRequest, context: XppSe
     };
   }
 
-  const { objectType, name, options } = parsed.data;
+  const { objectType, name, methodOffset, compact, options: rawOptions } = parsed.data;
+  // Merge top-level class shortcuts into options so dispatch.buildArgs sees them.
+  const options: Record<string, any> = { ...rawOptions };
+  if (methodOffset !== undefined) options.methodOffset = methodOffset;
+  if (compact !== undefined) options.compact = compact;
 
   // Folded code_completion: a fast member-name list for classes.
   // get_object_info(objectType="class", name, options:{ members:"names", prefix? })
@@ -85,7 +91,8 @@ export async function getObjectInfoTool(request: CallToolRequest, context: XppSe
     method: 'tools/call',
     params: { name: dispatch.toolName, arguments: dispatch.buildArgs(name, options) },
   };
-  return dispatch.tool(subRequest, context);
+  const result = await dispatch.tool(subRequest, context);
+  return withNotFoundGuidance(result, name, objectType);
 }
 
 // Tool registration (name, description, inputSchema) lives inline in

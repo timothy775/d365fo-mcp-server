@@ -42,6 +42,28 @@ describe('get_xpp_knowledge', () => {
     expect(text).toContain('Set-Based Operations');
   });
 
+  it('warns against COM Excel for "read excel" topic (file-readers)', async () => {
+    const result = await xppKnowledgeTool(req({ topic: 'read excel csv' }));
+    const text = getText(result);
+    expect(text).toContain('OpenXML');
+    expect(text).toContain('SysExcelApplication'); // documents the anti-pattern
+    expect(text).not.toContain('❌ No matching');
+  });
+
+  it('returns the BatchHeader fan-out for "parallel batch" topic', async () => {
+    const result = await xppKnowledgeTool(req({ topic: 'parallel batch' }));
+    const text = getText(result);
+    expect(text).toContain('addRuntimeTask');
+    expect(text).not.toContain('❌ No matching');
+  });
+
+  it('requires a permission assert for "direct sql" topic', async () => {
+    const result = await xppKnowledgeTool(req({ topic: 'direct sql' }));
+    const text = getText(result);
+    expect(text).toContain('SqlStatementExecutePermission');
+    expect(text).not.toContain('❌ No matching');
+  });
+
   it('returns detailed format with code examples', async () => {
     const result = await xppKnowledgeTool(req({ topic: 'transactions', format: 'detailed' }));
     const text = getText(result);
@@ -111,6 +133,17 @@ describe('get_xpp_knowledge', () => {
     const result = await xppKnowledgeTool(req({ topic: 'number sequence' }));
     const text = getText(result);
     expect(text).toContain('NumberSeq');
+  });
+
+  it('resolves a hyphenated multi-word topic to the right entry', async () => {
+    // Regression: "number-sequence" used to score 0 on the number-sequences
+    // entry (keyword/title store the words space-separated) and silently
+    // returned Electronic Reporting docs as the nearest substring hit.
+    const result = await xppKnowledgeTool(req({ topic: 'number-sequence' }));
+    const text = getText(result);
+    expect(text).toContain('Number Sequences');
+    expect(text).toContain('NumberSeq');
+    expect(text).not.toContain('⚠️ No strong match');
   });
 
   it('returns error for missing topic parameter', async () => {

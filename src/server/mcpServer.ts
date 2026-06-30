@@ -11,13 +11,14 @@ import {
   ListRootsResultSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { registerToolHandler } from '../tools/toolHandler.js';
-import { registerClassResource } from '../resources/classResource.js';
-import { registerWorkspaceResources } from '../resources/workspaceResource.js';
+import { registerResources } from '../resources/index.js';
 import { registerCodeReviewPrompt } from '../prompts/codeReview.js';
 import type { XppServerContext } from '../types/context.js';
 import { SERVER_MODE, LOCAL_TOOLS, ALWAYS_TOOLS } from './serverMode.js';
 import { TOOL_ANNOTATIONS } from './toolAnnotations.js';
 import { getConfigManager } from '../utils/configManager.js';
+
+const DEBUG_LOGGING = process.env.DEBUG_LOGGING === 'true';
 import { setLastRoots, recordRootsListChanged } from '../utils/stdioSessionInfo.js';
 import { OBJECT_INFO_TYPES, BATCH_INFO_TYPES } from '../tools/objectInfoRegistry.js';
 
@@ -59,16 +60,19 @@ function fileUriToPath(uri: string): string | null {
 function applyRootsToConfig(roots: Array<{ uri: string }>): void {
   if (!roots?.length) {
     // VS 2022 sends empty roots/list when closing a solution (transition state).
-    // Log this so it's visible in diagnostics, but keep the current detection
-    // result — the next roots/list_changed will bring the new solution path.
-    process.stderr.write('[mcpServer] roots/list received (0 root(s)) — solution closing or no workspace open\n');
+    // Keep the current detection result — the next roots/list_changed will update it.
+    if (DEBUG_LOGGING) {
+      process.stderr.write('[mcpServer] roots/list received (0 root(s)) — solution closing or no workspace open\n');
+    }
     setLastRoots([]);
     return;
   }
 
   // Log all received roots for diagnostics
-  process.stderr.write(`[mcpServer] roots/list received (${roots.length} root(s)):\n`);
-  roots.forEach((r, i) => process.stderr.write(`  [${i}] ${r.uri}\n`));
+  if (DEBUG_LOGGING) {
+    process.stderr.write(`[mcpServer] roots/list received (${roots.length} root(s)):\n`);
+    roots.forEach((r, i) => process.stderr.write(`  [${i}] ${r.uri}\n`));
+  }
 
   // Persist URIs in the stdio session singleton so get_workspace_info can display them.
   setLastRoots(roots.map(r => r.uri));
@@ -84,17 +88,19 @@ function applyRootsToConfig(roots: Array<{ uri: string }>): void {
   // After detection completes, log what solution/project was resolved so it's
   // easy to verify in the log that the correct project was picked.
   getConfigManager().setRuntimeContextFromRoots(paths).then(() => {
-    const { modelName, source, projectPath, solutionPath, workspacePath } =
-      getConfigManager().getDetectionSummary();
-    process.stderr.write(
-      `[mcpServer] ✅ Project detection result:\n` +
-      `   Model name  : ${modelName ?? '(unknown)'} (source: ${source})\n` +
-      `   Project path: ${projectPath  ?? '(not set)'}\n` +
-      `   Solution    : ${solutionPath ?? '(not set)'}\n` +
-      `   Workspace   : ${workspacePath ?? '(not set)'}\n`
-    );
+    if (DEBUG_LOGGING) {
+      const { modelName, source, projectPath, solutionPath, workspacePath } =
+        getConfigManager().getDetectionSummary();
+      process.stderr.write(
+        `[mcpServer] ✅ Project detection result:\n` +
+        `   Model name  : ${modelName ?? '(unknown)'} (source: ${source})\n` +
+        `   Project path: ${projectPath  ?? '(not set)'}\n` +
+        `   Solution    : ${solutionPath ?? '(not set)'}\n` +
+        `   Workspace   : ${workspacePath ?? '(not set)'}\n`
+      );
+    }
   }).catch(err => {
-    process.stderr.write(`[mcpServer] setRuntimeContextFromRoots error: ${err}\n`);
+    process.stderr.write(`[mcpServer] ⚠️ setRuntimeContextFromRoots error: ${err}\n`);
   });
 }
 
@@ -121,14 +127,18 @@ export function createXppMcpServer(context: XppServerContext): Server {
   // up-to-date on `notifications/roots/list_changed`.
   // -----------------------------------------------------------------------
   server.setNotificationHandler(InitializedNotificationSchema, async () => {
-    process.stderr.write(
-      `[mcpServer ${new Date().toISOString().slice(11, 23)}] ⚡ 'initialized' notification received — requesting roots/list\n`
-    );
+    if (DEBUG_LOGGING) {
+      process.stderr.write(
+        `[mcpServer ${new Date().toISOString().slice(11, 23)}] ⚡ 'initialized' notification received — requesting roots/list\n`
+      );
+    }
     // Only stdio clients (VS Code, VS 2022) advertise the roots capability.
     // HTTP / Azure clients do not — skipping the call avoids a -32001 timeout
     // that would otherwise be logged as a spurious warning in Azure Monitor.
     if (!server.getClientCapabilities()?.roots) {
-      process.stderr.write(`[mcpServer] ℹ️  Client has no roots capability — skipping roots/list\n`);
+      if (DEBUG_LOGGING) {
+        process.stderr.write(`[mcpServer] ℹ️  Client has no roots capability — skipping roots/list\n`);
+      }
       return;
     }
     // HTTP transports (Azure App Service, MCP_FORCE_HTTP) are request-response only —
@@ -136,15 +146,16 @@ export function createXppMcpServer(context: XppServerContext): Server {
     // declares `roots` capability, calling roots/list would always time out (-32001).
     const isHttpMode = !!process.env.WEBSITES_PORT || process.env.MCP_FORCE_HTTP === 'true';
     if (isHttpMode) {
-      process.stderr.write(`[mcpServer] ℹ️  HTTP mode — skipping roots/list (transport is request-response only)\n`);
+      if (DEBUG_LOGGING) {
+        process.stderr.write(`[mcpServer] ℹ️  HTTP mode — skipping roots/list (transport is request-response only)\n`);
+      }
       return;
     }
-    // Instanced mode: .mcp.json / env vars already provide both model name and
-    // workspace path — the workspace is fully known and immutable per instance.
-    // Skipping the call avoids a -32001 timeout when mcp-remote is the transport
-    // (hard-coded 60 s timeout, server-initiated requests cannot complete over HTTP).
+    // Instanced mode
     if (await getConfigManager().isStaticallyConfigured()) {
-      process.stderr.write(`[mcpServer] ℹ️  Static config complete — skipping roots/list (instanced mode)\n`);
+      if (DEBUG_LOGGING) {
+        process.stderr.write(`[mcpServer] ℹ️  Static config complete — skipping roots/list (instanced mode)\n`);
+      }
       return;
     }
     try {
@@ -162,9 +173,11 @@ export function createXppMcpServer(context: XppServerContext): Server {
 
   server.setNotificationHandler(RootsListChangedNotificationSchema, async () => {
     recordRootsListChanged();
-    process.stderr.write(
-      `[mcpServer ${new Date().toISOString().slice(11, 23)}] 🔄 'roots/list_changed' notification — re-requesting roots/list\n`
-    );
+    if (DEBUG_LOGGING) {
+      process.stderr.write(
+        `[mcpServer ${new Date().toISOString().slice(11, 23)}] 🔄 'roots/list_changed' notification — re-requesting roots/list\n`
+      );
+    }
     const isHttpMode = !!process.env.WEBSITES_PORT || process.env.MCP_FORCE_HTTP === 'true';
     if (!server.getClientCapabilities()?.roots || isHttpMode) {
       return;
@@ -172,7 +185,9 @@ export function createXppMcpServer(context: XppServerContext): Server {
     // Instanced mode: workspace is immutable per server instance — the
     // notification is irrelevant and the request would time out over mcp-remote.
     if (await getConfigManager().isStaticallyConfigured()) {
-      process.stderr.write(`[mcpServer] ℹ️  Static config complete — skipping roots/list on change (instanced mode)\n`);
+      if (DEBUG_LOGGING) {
+        process.stderr.write(`[mcpServer] ℹ️  Static config complete — skipping roots/list on change (instanced mode)\n`);
+      }
       return;
     }
     try {
@@ -187,9 +202,8 @@ export function createXppMcpServer(context: XppServerContext): Server {
   // Register centralized tool handler
   registerToolHandler(server, context);
 
-  // Register resources
-  registerClassResource(server, context);
-  registerWorkspaceResources(server, context);
+  // Register resources (single dispatcher — class + workspace schemes)
+  registerResources(server, context);
 
   // Register prompts (includes system instructions)
   registerCodeReviewPrompt(server, context);
@@ -348,14 +362,18 @@ export function createXppMcpServer(context: XppServerContext): Server {
             'Generate X++/AOT code. Choose a `mode`:\n' +
             '• pattern → a named X++ skeleton from the pattern enum (text only, no write). Call analyze_code(mode="patterns") first, then generate_object(mode="pattern"), then d365fo_file(action="create").\n' +
             '• scaffold → pattern-aware whole-object generation (table/form/report) with intelligent field/index/relation or form-pattern suggestions; set objectType.\n' +
+            '• find-methods → find()/findRecId()/exists() for a table (text), keyed on its primary/unique index.\n' +
+            '• relation-xpp → a table\'s relation(s) → X++ select + QueryBuildRange (text).\n' +
+            '• fields → field names → AxTableField XML with auto-resolved EDTs + optional field group.\n' +
+            '• table-relation → EDT-referencing fields → AxTableRelation XML (inverse of relation-xpp).\n' +
             'For a single existing object definition\'s XML use d365fo_file(action="generate") instead.',
           inputSchema: {
             type: 'object',
             properties: {
               mode: {
                 type: 'string',
-                enum: ['pattern', 'scaffold'],
-                description: 'pattern = named X++ skeleton (text); scaffold = whole table/form/report (set objectType).',
+                enum: ['pattern', 'scaffold', 'find-methods', 'relation-xpp', 'fields', 'table-relation'],
+                description: 'pattern = X++ skeleton; scaffold = whole table/form/report (set objectType); find-methods/relation-xpp/fields/table-relation = X++/XML helpers for an existing table.',
               },
               // ── shared identity / placement ────────────────────────────────
               name: { type: 'string', description: 'REQUIRED. [pattern] name for the generated element (extensions: base element name; form-datasource/control-extension: the FORM name). [scaffold] object name (report: BASE name WITHOUT model prefix).' },
@@ -434,14 +452,17 @@ export function createXppMcpServer(context: XppServerContext): Server {
               generateControls: { type: 'boolean', description: '[scaffold:form] Auto-generate grid controls for datasource.' },
               fields: {
                 type: 'array',
-                description: '[scaffold:report] Structured TmpTable field specs. Takes priority over fieldsHint.',
+                description: '[scaffold:report | fields] Structured field specs. Takes priority over fieldsHint. For mode="fields": name + optional edt/enumType/type/label/mandatory (EDT auto-resolved when omitted).',
                 items: {
                   type: 'object',
                   properties: {
                     name: { type: 'string' },
-                    edt: { type: 'string' },
-                    dataType: { type: 'string', description: '.NET type, e.g. "System.Double"' },
+                    edt: { type: 'string', description: 'Explicit EDT — for mode="fields", omit to auto-resolve from the field name.' },
+                    enumType: { type: 'string', description: '[fields] Enum name for an enum-backed field (AxTableFieldEnum).' },
+                    type: { type: 'string', description: '[fields] Explicit base type (String/Integer/Int64/Real/Date/UtcDateTime/Guid).' },
+                    dataType: { type: 'string', description: '[scaffold:report] .NET type, e.g. "System.Double"' },
                     label: { type: 'string' },
+                    mandatory: { type: 'boolean', description: '[fields] Mark the field Mandatory=Yes.' },
                   },
                   required: ['name'],
                 },
@@ -463,7 +484,20 @@ export function createXppMcpServer(context: XppServerContext): Server {
               generateController: { type: 'boolean', description: '[scaffold:report] Generate Controller class (default: true).' },
               designStyle: { type: 'string', description: '[scaffold:report] RDL design pattern: "SimpleList" (default) or "GroupedWithTotals".' },
               copyFrom: { type: 'string', description: '[scaffold:table|form|report] Copy structure from existing object (table fields/indexes/relations; form datasources — prefer cloneFrom; report field structure).' },
-              fieldsHint: { type: 'string', description: '[scaffold:table|report] Comma-separated field names (e.g. "RecId, Name, Amount"). EDTs auto-suggested.' },
+              fieldsHint: { type: 'string', description: '[scaffold:table|report] Comma-separated field names (e.g. "RecId, Name, Amount"). EDTs auto-suggested from the indexed metadata. ⚠️ Custom EDTs/enums created in the SAME SESSION are not yet indexed — call update_symbol_index first, then scaffold, so the new EDTs are found and used. Without this step those fields will default to String255.' },
+              // ── mode=find-methods ──────────────────────────────────────────
+              keyFields: {
+                type: 'array',
+                items: { type: 'string' },
+                description: '[find-methods] Explicit key field names (order matters); overrides index detection.',
+              },
+              includeExists: { type: 'boolean', description: '[find-methods] Emit exists() (default true).' },
+              includeFindRecId: { type: 'boolean', description: '[find-methods] Emit findRecId() (default true).' },
+              // ── mode=relation-xpp ──────────────────────────────────────────
+              relationName: { type: 'string', description: '[relation-xpp] One relation to convert. Omit = all relations.' },
+              style: { type: 'string', enum: ['select', 'query', 'both'], description: '[relation-xpp] select | query | both (default).' },
+              // ── mode=fields (shares the `fields` array above) ───────────────
+              fieldGroup: { type: 'string', description: '[fields] Field-group name — emits an AxTableFieldGroup listing the new fields.' },
             },
             required: ['mode'],
           },
@@ -561,26 +595,27 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
               },
               packagePath: {
                 type: 'string',
-                description: 'Base package path (default: K:\\AosService\\PackagesLocalDirectory)'
+                description: 'Base package path (default: K:\\AosService\\PackagesLocalDirectory). [modify] also uses it to locate objects outside the default dir (e.g. a repo checkout); if the model is outside the bridge startup roots, set D365FO_CUSTOM_PACKAGES_PATH or pass filePath instead.'
               },
               sourceCode: {
                 type: 'string',
-                description: `X++ source code for the object.\n\nFOR CLASSES — the content is split into <Declaration> and <Methods> automatically:\n  • <Declaration> = class keyword line + ALL member variable declarations inside the outer { }\n  • <Methods>     = each method defined AFTER the closing } of the class header\n\nExample for a class with member variables and a method:\n  public class MyClass\n  {\n      int globalPackageNumber;\n      Qty totalExportedQty;\n  }\n  public void myMethod()\n  {\n      // body\n  }\n\nCRITICAL: member variables MUST be inside the class { } block — NOT after it.`
+                description: 'X++ source for the object. FOR CLASSES the content is auto-split: <Declaration> = the class line + ALL member variables inside the outer { }; <Methods> = each method AFTER the closing }. CRITICAL: member variables MUST sit inside the class { }, methods after it — never the reverse.'
               },
               properties: {
                 type: 'object',
                 description:
                   'Additional properties by objectType:\n' +
                   '• class: extends, implements, isFinal, isAbstract\n' +
-                  '• table: label, tableGroup, tableType, titleField1/2, fields[]\n' +
+                  '• table: label, tableGroup, tableType, titleField1/2, fields[{name,type?|edt?|fieldType?,enumType?,label?,mandatory?}] — enum fields need enumType (+ optionally fieldType:"AxTableFieldEnum")\n' +
                   '• enum: label, useEnumValue, configurationKey, isExtensible, enumValues[{name,value?,label?,helpText?}]\n' +
                   '• enum-extension: enumValues[{name,label?,value?,countryRegionCodes?}]\n' +
                   '• table-extension: fields[{name,edt?,enumType?,label?,mandatory?,fieldType?}] — enum fields need fieldType:"AxTableFieldEnum" + enumType\n' +
                   '• edt: label, extends, edtType, stringSize\n' +
                   '• form: caption, formTemplate, dataSource\n' +
-                  '• security-privilege: label, targetObject, objectType (MenuItemDisplay|Action|Output), accessLevel (view|maintain)\n' +
-                  '• menu-item-*: label, object, objectType\n' +
-                  'Example: properties={"fields":[{"name":"ContosoStatus","enumType":"NoYes","fieldType":"AxTableFieldEnum","label":"@Contoso:Status"}]}'
+                  '• security-privilege: label, targetObject, objectType (MenuItemDisplay|Action|Output), accessLevel (view|maintain), dataEntity (data entity name → emits DataEntityPermissions grant for OData access)\n' +
+                  '• security-duty: label, privileges[] (privilege names — array or comma-separated)\n' +
+                  '• security-role: label, duties[] (duty names), privileges[] (privilege names)\n' +
+                  '• menu-item-*: label, object, objectType'
               },
               addToProject: {
                 type: 'boolean',
@@ -704,6 +739,18 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
                 type: 'string',
                 description: '[modify] Field label (for add-field and modify-field)'
               },
+              fieldHelpText: {
+                type: 'string',
+                description: '[modify:modify-field] Field help text.'
+              },
+              fieldEnumType: {
+                type: 'string',
+                description: '[modify:modify-field] Enum name to set on an enum-typed field.'
+              },
+              fieldStringSize: {
+                type: 'string',
+                description: '[modify:modify-field] String size to set on a string-typed field.'
+              },
               fields: {
                 type: 'array',
                 description:
@@ -768,6 +815,10 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
                   '[modify:add-control] Control type: String (default), Integer, Real, CheckBox (NoYes/boolean), ComboBox (enums), ' +
                   'Date, DateTime, Int64, Group, Button, CommandButton, MenuFunctionButton.'
               },
+              controlLabel: {
+                type: 'string',
+                description: '[modify:add-control] Optional label for the new control.'
+              },
               positionType: {
                 type: 'string',
                 description: '[modify:add-control] Optional: AfterItem | BeforeItem. Omit to append at the end of the parent.'
@@ -776,10 +827,162 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
                 type: 'string',
                 description: '[modify:add-control] Name of the sibling control to position after (used with positionType=AfterItem).'
               },
+              baseFormName: {
+                type: 'string',
+                description: '[modify:add-control] Base form name for auto-resolving parentControl when the extension name does not contain it (e.g. objectName="SalesOrder.MyExt" → "SalesOrder"). Pass only when auto-detection fails.'
+              },
+              // ── action=modify: add-table-method / add-display-method ─────────
+              tableMethodType: {
+                type: 'string',
+                enum: ['find', 'exist', 'findByRecId', 'validateWrite', 'validateDelete', 'initValue'],
+                description:
+                  '[modify:add-table-method] Standard table method to auto-generate (method name is implied). ' +
+                  'find/exist also need tableKeyField. Omit and pass methodName+sourceCode for a custom method instead.'
+              },
+              tableKeyField: {
+                type: 'string',
+                description: '[modify:add-table-method] Primary key field for find/exist generation (e.g. "ItemId", "SalesId").'
+              },
+              displayMethodReturnEdt: {
+                type: 'string',
+                description: '[modify:add-display-method] EDT/type the display method returns (e.g. "Name", "AmountMST"). With methodName, auto-generates a display-method stub. Omit and pass sourceCode for a custom body.'
+              },
+              // ── action=modify: add-index / remove-index ─────────────────────
+              indexName: {
+                type: 'string',
+                description: '[modify:add-index/remove-index] Index name.'
+              },
+              indexFields: {
+                type: 'array',
+                description: '[modify:add-index] Fields that make up the index (required for add-index).',
+                items: {
+                  type: 'object',
+                  properties: {
+                    fieldName: { type: 'string', description: 'Field name.' },
+                    direction: { type: 'string', enum: ['Asc', 'Desc'], description: 'Sort direction (optional).' },
+                  },
+                  required: ['fieldName'],
+                },
+              },
+              indexAllowDuplicates: {
+                type: 'boolean',
+                description: '[modify:add-index] Allow duplicates (default: false = unique).'
+              },
+              indexAlternateKey: {
+                type: 'boolean',
+                description: '[modify:add-index] Mark the index as an alternate key.'
+              },
+              indexEnabled: {
+                type: 'boolean',
+                description: '[modify:add-index] Whether the index is enabled (default: true).'
+              },
+              // ── action=modify: add-relation / remove-relation ───────────────
+              relationName: {
+                type: 'string',
+                description: '[modify:add-relation/remove-relation] Relation name.'
+              },
+              relatedTable: {
+                type: 'string',
+                description: '[modify:add-relation] Related (foreign key) table name.'
+              },
+              relationConstraints: {
+                type: 'array',
+                description: '[modify:add-relation] Field constraints (field = relatedField pairs).',
+                items: {
+                  type: 'object',
+                  properties: {
+                    fieldName: { type: 'string', description: 'Local field name.' },
+                    relatedFieldName: { type: 'string', description: 'Field name in the related table.' },
+                  },
+                  required: ['fieldName', 'relatedFieldName'],
+                },
+              },
+              relationCardinality: {
+                type: 'string',
+                description: '[modify:add-relation] Local-side cardinality: ZeroMore | ZeroOne | ExactlyOne (default: ZeroMore).'
+              },
+              relatedTableCardinality: {
+                type: 'string',
+                description: '[modify:add-relation] Related-side cardinality: ZeroMore | ZeroOne | ExactlyOne (default: ExactlyOne).'
+              },
+              relationshipType: {
+                type: 'string',
+                description: '[modify:add-relation] Association | Composition | Aggregation | Link | Specialization (default: Association).'
+              },
+              // ── action=modify: field groups ─────────────────────────────────
+              fieldGroupName: {
+                type: 'string',
+                description: '[modify:add-field-group/remove-field-group/add-field-to-field-group] Field group name.'
+              },
+              fieldGroupFields: {
+                type: 'array',
+                description: '[modify:add-field-group] Initial field names (may be empty — add later with add-field-to-field-group).',
+                items: { type: 'string' },
+              },
+              fieldGroupLabel: {
+                type: 'string',
+                description: '[modify:add-field-group] Field group label (optional).'
+              },
+              extendBaseFieldGroup: {
+                type: 'boolean',
+                description: '[modify:add-field-to-field-group] table-extension only: true extends an existing base-table field group (<FieldGroupExtensions>); false/omitted adds to a new group defined in the extension.'
+              },
+              // ── action=modify: add-data-source (form-extension) ─────────────
+              dataSourceName: {
+                type: 'string',
+                description: '[modify:add-data-source] Data source reference name (e.g. "MyTable_1").'
+              },
+              dataSourceTable: {
+                type: 'string',
+                description: '[modify:add-data-source] Base table for the data source (e.g. "MyTable").'
+              },
+              joinSource: {
+                type: 'string',
+                description: '[modify:add-data-source] Optional existing data source on the form to join the new one to.'
+              },
+              linkType: {
+                type: 'string',
+                description: '[modify:add-data-source] Optional join/link type when joinSource is set: InnerJoin | OuterJoin | ExistJoin | NotExistJoin | Delayed | Active | Passive.'
+              },
+              // ── action=modify: enum values ──────────────────────────────────
+              enumValueName: {
+                type: 'string',
+                description: '[modify:add-enum-value/modify-enum-value/remove-enum-value] Enum value name (e.g. "Approved").'
+              },
+              enumValueLabel: {
+                type: 'string',
+                description: '[modify:add-enum-value/modify-enum-value] Label reference (e.g. "@MyModel:Approved").'
+              },
+              enumValueHelpText: {
+                type: 'string',
+                description: '[modify:add-enum-value] Help-text reference (optional).'
+              },
+              enumValueInt: {
+                type: 'number',
+                description: '[modify:add-enum-value] Explicit integer value; if omitted the next available value is assigned. With modify-enum-value, changes the integer (rare).'
+              },
+              enumValueCountryRegionCodes: {
+                type: 'string',
+                description: '[modify:add-enum-value] ISO country/region codes, comma-separated (e.g. "CZ,SK").'
+              },
+              // ── action=modify: add-menu-item-to-menu ────────────────────────
+              menuItemToAdd: {
+                type: 'string',
+                description: '[modify:add-menu-item-to-menu] Name of the menu item to add (e.g. "MyCustomForm").'
+              },
+              menuItemToAddType: {
+                type: 'string',
+                enum: ['display', 'action', 'output'],
+                description: '[modify:add-menu-item-to-menu] Menu item kind: display (form), action (class), output (report). Default: display.'
+              },
               createBackup: {
                 type: 'boolean',
                 description: '[modify] Create backup before modification (default: false)',
                 default: false
+              },
+              filePath: {
+                type: 'string',
+                description: '[modify] Absolute path to the XML file — bypasses symbol-DB lookup. Use when the object was just created and the path is known.'
               },
               workspacePath: {
                 type: 'string',
@@ -875,25 +1078,26 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
           description:
             'Unified label operations — read and write. Choose an `action`:\n' +
             '• search → full-text query across indexed label files (read). Always run before action=create.\n' +
-            '• info → all language translations for a labelId, OR list available label files when labelId is omitted (read).\n' +
-            '• create → add a new label to an AxLabelFile, write into every language .label.txt, create XML descriptors if missing (write). Label IDs describe MEANING — never add a model prefix.\n' +
+            '• info → all language translations for a labelId, OR list available label files when labelId is omitted. Pass labelFileId (without labelId) to get that label file plus the physical .label.txt path per language (read).\n' +
+            '• create → add a new label to an AxLabelFile, write into every language .label.txt, create XML descriptors if missing (write). Label IDs describe MEANING — never add a model prefix. Target the model\'s ORIGINAL label file, never a label file extension (…_Extension…). Fails if the label already exists. For many labels at once pass labels:[{labelId, translations}, …] with the shared labelFileId/model at the top level — they are created in one call and reported together.\n' +
+            '• update → overwrite the text of an EXISTING label (e.g. fix a wrong/duplicate translation in cs/de). Same args as create; provide the corrected translations[] (write).\n' +
             '• rename → rename a label ID across .label.txt + X++ + XML metadata + SQLite index. Use dryRun=true first (write).',
           inputSchema: {
             type: 'object',
             properties: {
               action: {
                 type: 'string',
-                enum: ['search', 'info', 'create', 'rename'],
-                description: 'Label operation to perform.',
+                enum: ['search', 'info', 'create', 'update', 'rename', 'list', 'list-files'],
+                description: 'Label operation to perform. "list"/"list-files" are aliases of "info" (lists label files).',
               },
               // ── shared filters ─────────────────────────────────────────────
               model: {
                 type: 'string',
-                description: '[search|info|create|rename] Model that owns the label file (e.g. ContosoExt).',
+                description: '[search|info|create|update|rename] Model that owns the label file (e.g. ContosoExt).',
               },
               labelFileId: {
                 type: 'string',
-                description: '[search|info|create|rename] AxLabelFile ID (e.g. ContosoExt, SYS).',
+                description: '[search|info|create|update|rename] AxLabelFile ID (e.g. ContosoExt, SYS). For action=info with no labelId, returns the physical .label.txt path per language. For create/update/rename use the model\'s ORIGINAL label file, not an extension (…_Extension…).',
               },
               language: {
                 type: 'string',
@@ -914,9 +1118,35 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
                 description: '[info] Exact label ID. Omit for action=info to list available label files for the model.',
               },
               // ── action=create ──────────────────────────────────────────────
+              labels: {
+                type: 'array',
+                description:
+                  '[create] OPTIONAL bulk mode — create several labels in one call. Each entry is { labelId, translations[], description?, defaultComment? }. ' +
+                  'Shared fields (labelFileId, model, languages, paths…) stay at the top level. When present, top-level labelId/translations are ignored. ' +
+                  'Each label is created via the normal single-label path and results are aggregated into one report (a failed entry does not abort the batch).',
+                items: {
+                  type: 'object',
+                  properties: {
+                    labelId: { type: 'string', description: 'Label ID for this entry — alphanumeric, no model prefix.' },
+                    translations: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          language: { type: 'string', description: 'Locale code, e.g. en-US, cs, de, sk' },
+                          text: { type: 'string', description: 'Label text' },
+                          comment: { type: 'string', description: 'Developer comment (optional)' },
+                        },
+                        required: ['language', 'text'],
+                      },
+                    },
+                  },
+                  required: ['labelId', 'translations'],
+                },
+              },
               translations: {
                 type: 'array',
-                description: '[create] REQUIRED. Translations for each language. Provide at least en-US.',
+                description: '[create] REQUIRED for single-label create (omit when using labels[]). Translations for each language. Provide at least en-US.',
                 items: {
                   type: 'object',
                   properties: {
@@ -959,7 +1189,7 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
               },
               createLabelFileIfMissing: {
                 type: 'boolean',
-                description: '[create] Create AxLabelFile structure if missing (default: false).',
+                description: '[create] Create the AxLabelFile structure if missing (default: true). A wrong-path guard still fails loudly when the model directory is not found, so no phantom file is produced. Set false to fail fast instead.',
               },
               sortLabels: {
                 type: 'boolean',
@@ -998,6 +1228,13 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
                 type: 'boolean',
                 description: '[create|rename] Update the MCP label index after writing (default: true).',
               },
+              allowExtensionLabelFile: {
+                type: 'boolean',
+                description:
+                  '[create|rename] Allow operating on a label file EXTENSION (labelFileId carrying the "_Extension" marker). ' +
+                  'Default false: new labels belong in the model\'s ORIGINAL label file, never an extension. ' +
+                  'Leave false unless you genuinely intend to write to an extension.',
+              },
             },
             required: ['action'],
           },
@@ -1017,7 +1254,7 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
               domain: {
                 type: 'string',
                 enum: ['table', 'form'],
-                description: 'table = table field/index/relation patterns; form = form-pattern toolkit (set action).',
+                description: 'table = table field/index/relation patterns; form = form-pattern toolkit (set action). Optional — inferred from the other params (action/pattern/xml/formName → form; tableGroup → table). ⚠️ This is NOT a free-form "pattern type": a concept like "number-sequence"/"SysOperation" belongs to get_knowledge, not here.',
               },
               // ── domain=table ───────────────────────────────────────────────
               tableGroup: {
@@ -1028,8 +1265,8 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
               // ── domain=form ────────────────────────────────────────────────
               action: {
                 type: 'string',
-                enum: ['analyze', 'validate', 'spec'],
-                description: '[form] Which form-pattern operation to run.',
+                enum: ['analyze', 'validate', 'spec', 'repair'],
+                description: '[form] Which form-pattern operation to run. repair = auto-fill missing required controls.',
               },
               // ── domain=form, action=analyze ────────────────────────────────
               formPattern: {
@@ -1097,7 +1334,10 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
                 description: '[form/validate] Explicit path to an AxForm XML file (e.g. a freshly created form not yet indexed).',
               },
             },
-            required: ['domain'],
+            // domain is optional: objectPatternsTool infers it from the other
+            // params (and accepts the `patternType` alias). Marking it required
+            // here made clients pre-reject otherwise-valid calls.
+            required: [],
           },
         },
         {
@@ -1195,11 +1435,11 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
             },
             scenario: {
               type: 'string',
-              enum: ['data-validation', 'field-defaulting', 'business-logic-change',
+              enum: ['data-validation', 'field-defaulting', 'field-change-reaction', 'business-logic-change',
                      'outbound-integration', 'inbound-data', 'ui-modification',
                      'document-output', 'number-sequence', 'security-access',
                      'batch-processing', 'custom'],
-              description: '[strategy] Scenario category (auto-detected from goal if omitted).',
+              description: '[strategy] Scenario category (auto-detected from goal if omitted). field-defaulting = set defaults on NEW records (initValue); field-change-reaction = react when a user/code CHANGES a field (modifiedField).',
             },
             handlerType: {
               type: 'string',
@@ -1272,13 +1512,15 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
       },
       {
         name: 'verify_d365fo_project',
-        description: 'Verify that D365FO objects exist on disk at the correct AOT path and are referenced in the .rnrproj project file. Use instead of PowerShell to check d365fo_file(action="create") results.',
+        description:
+          'Verify that D365FO objects exist on disk at the correct AOT path and are referenced in the .rnrproj project file. Use instead of PowerShell to check d365fo_file(action="create") results. ' +
+          'Omit `objects` to verify the ENTIRE project: every object referenced in the .rnrproj is checked on disk (requires projectPath, or an auto-detected/configured project).',
         inputSchema: {
           type: 'object',
           properties: {
             objects: {
               type: 'array',
-              description: 'List of objects to verify',
+              description: 'List of objects to verify. OPTIONAL — omit to verify every object referenced in the project (.rnrproj).',
               items: {
                 type: 'object',
                 properties: {
@@ -1307,19 +1549,20 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
             packageName: { type: 'string', description: 'Package name. Auto-resolved from model name if omitted.' },
             packagePath: { type: 'string', description: 'Base package path (default: K:\\AosService\\PackagesLocalDirectory)' },
           },
-          required: ['objects'],
         },
       },
       // ── SDLC & Build Tools ────────────────────────────────────────────────────
       {
         name: 'update_symbol_index',
-        description: 'Index a newly generated or modified D365FO XML file immediately so references to it work without restarting the server. Call this after d365fo_file(action="create") to make the new object instantly searchable.',
+        description:
+          'Index a newly generated or modified D365FO XML file immediately so references to it work without restarting the server. ' +
+          'Call this after d365fo_file(action="create") — pass the created file\'s `filePath` — to make the new object instantly searchable AND, for new AxEnum/AxEdt files, resolvable by scaffolding (so enum fields become AxTableFieldEnum and EDT fields get the correct base type). ' +
+          'Call WITHOUT `filePath` for a lightweight refresh: it refreshes the C# bridge provider and drops workspace caches so objects created via the bridge this session become resolvable (does NOT fully index them into the symbol DB).',
         inputSchema: {
           type: 'object',
           properties: {
-            filePath: { type: 'string', description: 'Absolute path to the modified or created XML file (e.g. K:\\\\AosService\\\\PackagesLocalDirectory\\\\MyModel\\\\MyModel\\\\AxClass\\\\MyClass.xml)' },
+            filePath: { type: 'string', description: 'Absolute path to the modified or created XML file (e.g. K:\\\\AosService\\\\PackagesLocalDirectory\\\\MyModel\\\\MyModel\\\\AxClass\\\\MyClass.xml). Omit to run a lightweight bridge/workspace refresh instead of indexing a specific file.' },
           },
-          required: ['filePath'],
         },
       },
       {
@@ -1481,7 +1724,10 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
               description: '[error] Optional error code (e.g. SYS10028, CSUV1, BPUpgradeCodeToday)',
             },
           },
-          required: ['kind'],
+          // kind is optional: getKnowledgeTool infers it from topic (→ knowledge)
+          // or errorText (→ error). Marking it required made clients pre-reject
+          // calls that passed only `topic`.
+          required: [],
         },
       },
       {
