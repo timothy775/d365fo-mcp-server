@@ -47,16 +47,18 @@ vi.mock('../../src/utils/configManager', () => ({
 }));
 
 vi.mock('../../src/utils/packageResolver', () => ({
-  PackageResolver: vi.fn().mockImplementation(() => ({
-    resolve: vi.fn(async (modelName: string) => ({
-      packageName: modelName,
-      modelName,
-      rootPath: 'K:\\PackagesLocalDirectory',
-    })),
-    resolveWithPackage: vi.fn((m: string, p: string) => ({
-      packageName: p, modelName: m, rootPath: 'K:\\PackagesLocalDirectory',
-    })),
-  })),
+  PackageResolver: vi.fn().mockImplementation(function () {
+    return {
+      resolve: vi.fn(async (modelName: string) => ({
+        packageName: modelName,
+        modelName,
+        rootPath: 'K:\\PackagesLocalDirectory',
+      })),
+      resolveWithPackage: vi.fn((m: string, p: string) => ({
+        packageName: p, modelName: m, rootPath: 'K:\\PackagesLocalDirectory',
+      })),
+    };
+  }),
 }));
 
 vi.mock('../../src/utils/modelClassifier', () => ({
@@ -164,6 +166,26 @@ describe('form pattern gate in create_d365fo_file', () => {
     expect(result.content[0].text).toContain('FORM_PATTERN_ENFORCE is disabled');
     expect(result.content[0].text).toContain('FP001');
     expect(vi.mocked(fsMock.writeFile)).toHaveBeenCalled();
+  });
+
+  it('generates a gate-passing form from a SimpleList template (no xmlContent)', async () => {
+    // Regression: requesting formTemplate="SimpleList" with no xmlContent used to
+    // emit an empty-controls skeleton declaring a DetailsTransaction pattern,
+    // which the gate blocked (FP003 missing ActionPane/Tab). The template path
+    // must now produce a pattern-compliant SimpleList that writes cleanly.
+    process.env.FORM_PATTERN_ENFORCE = 'true';
+    const result = await handleCreateD365File(createReq({
+      objectType: 'form',
+      objectName: 'RentEquipment',
+      properties: { formTemplate: 'SimpleList', dataSource: 'ContosoRentEquipment', caption: 'Rent Equipment' },
+      modelName: 'ContosoExt',
+      addToProject: false,
+    }));
+    expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+    expect(vi.mocked(fsMock.writeFile)).toHaveBeenCalled();
+    const written = String(vi.mocked(fsMock.writeFile).mock.calls.at(-1)?.[1] ?? '');
+    expect(written).toContain('<Pattern xmlns="">SimpleList</Pattern>');
+    expect(written).not.toContain('DetailsTransaction');
   });
 
   it('never gates non-form objectTypes', async () => {

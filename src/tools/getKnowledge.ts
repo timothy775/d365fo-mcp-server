@@ -19,8 +19,9 @@ export type KnowledgeKind = (typeof KNOWLEDGE_KINDS)[number];
 
 const GetKnowledgeArgsSchema = z
   .object({
-    kind: z.enum(KNOWLEDGE_KINDS).describe(
-      'knowledge → look up an X++ topic/rule; error → diagnose a compiler/runtime error message.',
+    kind: z.enum(KNOWLEDGE_KINDS).optional().describe(
+      'knowledge → look up an X++ topic/rule; error → diagnose a compiler/runtime error message. ' +
+      'Optional — inferred from errorText (→ error) or topic (→ knowledge) when omitted.',
     ),
   })
   .passthrough();
@@ -38,11 +39,22 @@ export async function getKnowledgeTool(request: CallToolRequest) {
     };
   }
 
-  const { kind, ...rest } = parsed.data;
+  const { kind: explicitKind, ...rest } = parsed.data;
+  const kind: KnowledgeKind =
+    explicitKind ?? ((rest as any).errorText || (rest as any).errorCode ? 'error' : 'knowledge');
   if (kind === 'error') {
     return d365foErrorHelpTool(subRequest('get_d365fo_error_help', rest));
   }
-  return xppKnowledgeTool(subRequest('get_xpp_knowledge', rest));
+
+  // The underlying xppKnowledge handler expects `topic`. Models commonly guess
+  // `query`/`q`/`search` instead — remap those to `topic` so the call doesn't
+  // fail with a misleading "expected string, received undefined" zod error.
+  const knowledgeArgs = { ...rest } as Record<string, unknown>;
+  if (knowledgeArgs.topic == null) {
+    const alias = knowledgeArgs.query ?? knowledgeArgs.q ?? knowledgeArgs.search;
+    if (alias != null) knowledgeArgs.topic = alias;
+  }
+  return xppKnowledgeTool(subRequest('get_xpp_knowledge', knowledgeArgs));
 }
 
 // Tool registration (name, description, inputSchema) lives inline in

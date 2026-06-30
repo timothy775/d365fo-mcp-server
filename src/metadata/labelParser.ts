@@ -28,6 +28,24 @@ export interface ParsedLabel {
 }
 
 /**
+ * True when a label file ID refers to a label file EXTENSION rather than an
+ * original (base) label file owned by the model.
+ *
+ * D365FO names label file extensions with an `_Extension` marker, optionally
+ * followed by a model prefix — e.g. `Base_Extension` or `Base_ExtensionContoso`.
+ * On disk the content file is `${labelFileId}.${locale}.label.txt`, so the
+ * `_Extension` marker is carried in the label file ID itself.
+ *
+ * New labels must always be created in the model's own ORIGINAL label file.
+ * An extension only extends a base label file owned by another model; adding
+ * brand-new labels there is almost always a mistake (and is what leads clients
+ * to wrongly prefix the label IDs).
+ */
+export function isExtensionLabelFile(labelFileId: string): boolean {
+  return /_Extension/i.test(labelFileId);
+}
+
+/**
  * Parse a single .label.txt file into ParsedLabel records.
  */
 export function parseLabelFile(

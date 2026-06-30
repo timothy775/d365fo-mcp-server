@@ -124,7 +124,7 @@ npm start                  # verify: http://localhost:8080/health
 }
 ```
 
-> Prefer **Scenario E** (stdio) — no port, no `npm start`, VS launches the server itself.
+> Prefer **Scenario E** (stdio) when a single client drives the server — no port, no `npm start`, VS launches it for you. Choose local HTTP when **several clients share one code base** (e.g. VS Code + the CLI at the same time): stdio spawns one subprocess per client, each loading its own ~1.5 GB index, whereas a single HTTP instance loads the index once and serves them all.
 
 ## Scenario D — UDE (Unified Developer Experience)
 

@@ -21,6 +21,7 @@ import * as path from 'path';
 import { getConfigManager } from '../utils/configManager.js';
 import { PackageResolver } from '../utils/packageResolver.js';
 import { detectEol } from '../utils/eolUtils.js';
+import { isExtensionLabelFile } from '../metadata/labelParser.js';
 import { ProjectFileManager, ProjectFileFinder } from './createD365File.js';
 
 // UTF-8 BOM (Byte Order Mark)
@@ -106,10 +107,21 @@ const CreateLabelArgsSchema = z.object({
   createLabelFileIfMissing: z
     .boolean()
     .optional()
+    .default(true)
+    .describe(
+      'If true (default) and the AxLabelFile does not exist yet, create it with the provided ' +
+        'translations. A wrong-path guard still fails loudly when the model directory is not found, ' +
+        'so this never produces a phantom label file. Set to false to fail fast instead of creating.',
+    ),
+  allowExtensionLabelFile: z
+    .boolean()
+    .optional()
     .default(false)
     .describe(
-      'If true and the AxLabelFile does not exist yet, create it with the provided translations. ' +
-        'Set to false (default) to fail fast when the label file is missing.',
+      'Escape hatch to allow writing into a label file EXTENSION (a labelFileId ' +
+        'carrying the "_Extension" marker). Off by default: new labels belong in the ' +
+        "model's own ORIGINAL label file, not in an extension. Only set true if you " +
+        'genuinely intend to add labels to an extension label file.',
     ),
   updateIndex: z
     .boolean()
@@ -123,6 +135,15 @@ const CreateLabelArgsSchema = z.object({
       'Sort labels alphabetically when writing .label.txt files. ' +
         'When false, new labels are appended at the end preserving existing file order. ' +
         'Defaults to the LABEL_SORT_ORDER env var ("alphabetical" = true, "append" = false), or true if not set.',
+    ),
+  overwriteExisting: z
+    .boolean()
+    .optional()
+    .default(false)
+    .describe(
+      'Update mode (set automatically by labels(action="update")): overwrite the text of an ' +
+        'existing label instead of skipping it. When the label is absent in a target language it ' +
+        'is created (upsert). Off by default so create never clobbers existing text.',
     ),
 });
 
@@ -258,13 +279,126 @@ function normalizeCreateLabelArgs(raw: unknown): Record<string, unknown> {
   return args;
 }
 
+// ── Bulk fan-out ──────────────────────────────────────────────────────────────
+
+/**
+ * Pull a `labels: [...]` array off the raw args, if present and non-empty.
+ * Bulk callers pass shared fields (labelFileId, model, paths…) at the top level
+ * and one entry per label ({ labelId, translations, … }). Returns null for the
+ * ordinary single-label shape so the normal path runs unchanged.
+ */
+export function extractBulkLabels(raw: unknown): Array<Record<string, unknown>> | null {
+  if (raw === null || typeof raw !== 'object') return null;
+  const arr = (raw as Record<string, unknown>).labels;
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  return arr.filter((e): e is Record<string, unknown> => e !== null && typeof e === 'object');
+}
+
+/** The single-label create signature, injectable so the fan-out is testable. */
+export type SingleLabelRunner = (
+  request: CallToolRequest,
+  context: XppServerContext,
+) => Promise<any>;
+
+/**
+ * Create many labels in one call. Each entry is merged over the shared top-level
+ * fields and routed through the single-label path (which keeps validation, file
+ * creation and indexing identical), then results are aggregated into one report.
+ * Continues past per-label failures so one bad entry doesn't abort the batch.
+ */
+export async function createLabelsBulk(
+  entries: Array<Record<string, unknown>>,
+  raw: Record<string, unknown>,
+  context: XppServerContext,
+  runSingle: SingleLabelRunner = createLabelTool,
+): Promise<{ content: Array<{ type: 'text'; text: string }>; isError: boolean }> {
+  // Shared fields = everything except the per-entry array and any top-level
+  // labelId/translations (each entry owns those).
+  const shared: Record<string, unknown> = { ...raw };
+  delete shared.labels;
+  delete shared.labelId;
+  delete shared.translations;
+
+  const lines: string[] = [];
+  let created = 0;
+  let failed = 0;
+
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    const mergedArgs = { ...shared, ...entry };
+    const labelId = typeof entry.labelId === 'string' ? entry.labelId : `(entry ${i + 1})`;
+    const subRequest: CallToolRequest = {
+      method: 'tools/call',
+      params: { name: 'create_label', arguments: mergedArgs },
+    };
+    // Recurses into the single-label path: mergedArgs carries no `labels` array,
+    // so extractBulkLabels returns null and the normal handler runs.
+    const res = await runSingle(subRequest, context);
+    const text = res?.content?.[0]?.text ?? '(no output)';
+    if (res?.isError) {
+      failed++;
+      lines.push(`🔴 ${labelId}: ${text.split('\n')[0]}`);
+    } else {
+      created++;
+      lines.push(`🟢 ${labelId}: ${text.split('\n')[0]}`);
+    }
+  }
+
+  const header =
+    `${failed === 0 ? '✅' : '⚠️'} labels(action="create", labels=[…]): ` +
+    `${created} created, ${failed} failed (of ${entries.length}).`;
+  return {
+    content: [{ type: 'text', text: [header, '', ...lines].join('\n') }],
+    isError: failed > 0,
+  };
+}
+
 // ── Tool implementation ───────────────────────────────────────────────────────
 
 export async function createLabelTool(request: CallToolRequest, context: XppServerContext) {
+  // Bulk shape: a `labels` array fans out to one single-label create per entry.
+  const bulk = extractBulkLabels(request.params.arguments);
+  if (bulk) {
+    return createLabelsBulk(bulk, request.params.arguments as Record<string, unknown>, context);
+  }
   try {
-    const args = CreateLabelArgsSchema.parse(
+    const parsed = CreateLabelArgsSchema.safeParse(
       normalizeCreateLabelArgs(request.params.arguments),
     );
+    if (!parsed.success) {
+      // Name the offending field(s) instead of leaking a bare zod
+      // "expected string, received undefined" with no field reference.
+      const issues = parsed.error.issues
+        .map(i => `${i.path.join('.') || '(root)'}: ${i.message}`)
+        .join('; ');
+      // Common first-attempt mistake: passing the label *file* shape
+      // (labelFileId + a top-level `language`) instead of the label shape
+      // (labelId + translations[]). Call it out explicitly.
+      const raw = (request.params.arguments ?? {}) as Record<string, unknown>;
+      const wrongShape =
+        (raw.language !== undefined || raw.labelFileId !== undefined) &&
+        raw.labelId === undefined &&
+        raw.translations === undefined &&
+        raw.text === undefined && raw.value === undefined && raw.label === undefined;
+      const shapeHint = wrongShape
+        ? `\n\n⚠️ It looks like you passed \`language\`/\`labelFileId\` but no \`labelId\` or \`translations\`. ` +
+          `\`language\` is NOT a top-level create param — put each language inside \`translations\`. ` +
+          `\`labelFileId\` is the file that HOLDS the label; \`labelId\` is the label itself (both are required).`
+        : '';
+      return {
+        content: [{
+          type: 'text',
+          text:
+            `❌ labels(action="create"/"update"): invalid arguments — ${issues}.\n` +
+            `Required: labelId, labelFileId, model, translations:[{language, text}]. Example:\n` +
+            `  labels(action="create", labelId="EquipmentName", labelFileId="ContosoExt", model="ContosoExt", ` +
+            `translations=[{language:"en-US", text:"Equipment name"}])` +
+            shapeHint,
+        }],
+        isError: true,
+      };
+    }
+    const args = parsed.data;
     const {
       labelId,
       labelFileId,
@@ -276,6 +410,32 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
       createLabelFileIfMissing,
       updateIndex,
     } = args;
+
+    // Guard: never create new labels in a label file EXTENSION (e.g. "Base_Extension").
+    // Extensions only extend a base label file owned by another model — new labels
+    // belong in the model's own ORIGINAL label file. Writing here is what makes clients
+    // wrongly prefix the label IDs. Opt out explicitly with allowExtensionLabelFile=true.
+    if (isExtensionLabelFile(labelFileId) && !args.allowExtensionLabelFile) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text:
+              `❌ "${labelFileId}" is a label file EXTENSION, not an original label file.\n\n` +
+              `New labels must be created in the model's own (original) label file — ` +
+              `extensions (…_Extension…) only extend a base label file owned by another model, ` +
+              `and adding new labels there leads to wrongly prefixed label IDs.\n\n` +
+              `➡️  Use the model's original label file instead. List the candidates with:\n` +
+              `      labels(action="info", model="${model}")\n` +
+              `   then re-run with that original labelFileId, e.g.:\n` +
+              `      labels(action="create", labelId="${labelId}", labelFileId="<OriginalLabelFileId>", model="${model}", ...)\n\n` +
+              `If you really must add labels to this extension, pass allowExtensionLabelFile=true.\n` +
+              `Nothing was written.`,
+          },
+        ],
+        isError: true,
+      };
+    }
 
     // Resolve sortLabels: explicit param → LABEL_SORT_ORDER env → true (alphabetical)
     const envSortOrder = process.env.LABEL_SORT_ORDER?.toLowerCase();
@@ -432,6 +592,40 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
       };
     }
 
+    // Guard against silently scaffolding a brand-new label file at the WRONG path.
+    // When the label file is missing AND we're about to create it, verify the model
+    // directory actually exists at the resolved location. If it doesn't, the package
+    // path/name almost certainly points to the default PackagesLocalDirectory while the
+    // model's metadata lives somewhere else (e.g. a repo checkout) — creating the file
+    // here would "succeed" but write to a location D365FO never reads. Fail loudly with
+    // guidance instead of producing a phantom label file.
+    if (labelFileMissing && createLabelFileIfMissing) {
+      let modelDirExists = false;
+      try {
+        await fs.access(modelDir);
+        modelDirExists = true;
+      } catch { /* missing */ }
+      if (!modelDirExists) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text:
+                `❌ Cannot create label file "${labelFileId}" — the model directory does not exist at the resolved path:\n` +
+                `    ${modelDir}\n\n` +
+                `Resolved package: "${resolvedPackageName}"  |  packages root: "${resolvedPackagePath}"\n\n` +
+                `This usually means the model's metadata lives somewhere other than the default ` +
+                `PackagesLocalDirectory (e.g. a repo checkout). Re-run with the correct location, for example:\n` +
+                `  labels(action="create", labelId="${labelId}", labelFileId="${labelFileId}", model="${model}",\n` +
+                `         packageName="<ActualPackageFolder>", packagePath="<root that contains it>", createLabelFileIfMissing=true)\n\n` +
+                `Nothing was written.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+
     let existingLanguages: string[];
 
     if (requestedLanguages.length > 0) {
@@ -495,8 +689,8 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
       const eol = detectEol(content);
       const labelMap = parseLabelMap(content);
 
-      // Duplicate check
-      if (labelMap.has(labelId)) {
+      // Duplicate check — create skips an existing label, update overwrites it.
+      if (labelMap.has(labelId) && !args.overwriteExisting) {
         skipped.push(`${lang} (already exists: "${labelMap.get(labelId)!.text}")`);
         continue;
       }
@@ -597,6 +791,8 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
       const skipLines = [
         `⚠️ Label "${labelId}" already exists in all languages:\n` +
         skipped.map(s => `  - ${s}`).join('\n') +
+        `\n\nLocation: ${labelResourcesDir}` +
+        `\nPackage : ${resolvedPackageName} @ ${resolvedPackagePath}` +
         '\n\nNo label text changes were made.',
       ];
       if (addedToProject.length > 0) {
@@ -614,10 +810,12 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
     const ref = `@${labelFileId}:${labelId}`;
     const lines: string[] = [
       ...(collisionWarning ? [collisionWarning] : []),
-      `✅ Label "${ref}" created successfully!`,
+      `✅ Label "${ref}" ${args.overwriteExisting ? 'updated' : 'created'} successfully!`,
       '',
       `Label ID   : ${labelId}`,
       `Label File : ${labelFileId}  (model: ${model})`,
+      `Package    : ${resolvedPackageName} @ ${resolvedPackagePath}`,
+      `Location   : ${labelResourcesDir}`,
       '',
       'Written to languages:',
       ...written.map(l => `  ✔ ${l}  → ${translationMap.get(l)?.text ?? enUsText}`),
