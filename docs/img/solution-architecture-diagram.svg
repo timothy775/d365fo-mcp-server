@@ -190,7 +190,7 @@
   <text x="699" y="762" text-anchor="middle" font-size="13" font-weight="700" fill="#ffffff">C# Metadata Bridge</text>
   <text x="699" y="782" text-anchor="middle" font-size="10.5" fill="#ddd6fe">D365MetadataBridge.exe · .NET Framework 4.8</text>
   <text x="699" y="799" text-anchor="middle" font-size="10.5" fill="#ddd6fe">JSON-RPC over stdio · IMetadataProvider</text>
-  <text x="699" y="816" text-anchor="middle" font-size="10.5" fill="#ddd6fe">sole write path · 18 create · 25 modify ops</text>
+  <text x="699" y="816" text-anchor="middle" font-size="10.5" fill="#ddd6fe">sole write path · 13 create · 25 modify ops</text>
   <text x="699" y="840" text-anchor="middle" font-size="9.5" fill="#c4b5fd">Windows VM only — graceful fallback to SQLite elsewhere</text>
 
   <rect x="898" y="736" width="376" height="120" rx="9" fill="#eff6ff" stroke="#3b82f6"/>

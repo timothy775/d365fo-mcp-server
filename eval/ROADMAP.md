@@ -9,8 +9,8 @@ and a corpus scoreboard. Full history of what was built and every fix landed
 lives in `git log` and the commit messages on this branch — this file only
 tracks what's still open.
 
-- Full suite **1404/1404** green; `eval-gate` GitHub Actions workflow **green**.
-- Catalog: **28 cases** across tiers L0–L4. All 9 documented form patterns,
+- Full suite **1428/1428** green; `eval-gate` GitHub Actions workflow **green**.
+- Catalog: **30 cases** across tiers L0–L4. All 9 documented form patterns,
   table/table-extension, query+view, map, number sequence, financial dimension
   framework, CoC extension, event-handler, business event, SysOperation batch,
   a basic and an advanced (contract params + output menu item) SSRS report, a

@@ -93,7 +93,7 @@ One unified tool covers all label operations via `action` (mirrors the `get_obje
 
 | Tool | What it does | Example prompt |
 |------|--------------|----------------|
-| `d365fo_file` | `action=create` — create any of 18 AOT object types in the correct location + register in `.rnrproj` (gated by grounding token and form-pattern validation) · `action=modify` — safe metadata edits via the C# bridge, 25 operations: add-field, add-control, add-method, replace-code, modify-property, … · `action=generate` — XML preview without writing (cloud-friendly) | *"Create the class file in my project"* · *"Add the field to the General tab of the form extension"* · *"Show me the XML for this enum without creating it"* |
+| `d365fo_file` | `action=create` — create any of 32 AOT object types in the correct location + register in `.rnrproj` (gated by grounding token and form-pattern validation) · `action=modify` — safe metadata edits via the C# bridge, 25 operations: add-field, add-control, add-method, replace-code, modify-property, … · `action=generate` — XML preview without writing (cloud-friendly) | *"Create the class file in my project"* · *"Add the field to the General tab of the form extension"* · *"Show me the XML for this enum without creating it"* |
 | `undo_last_modification` | Revert the last write: checkout HEAD or delete untracked file (also re-syncs the symbol index) | *"Undo that last change"* |
 
 ## 🔐 Security & Extensions (5)
@@ -140,4 +140,4 @@ One unified tool covers all label operations via `action` (mirrors the `get_obje
 - **Describe goals, not tools.** The instruction files route requests automatically — *"add a priority field to CustTable and show it on the form"* triggers the whole chain.
 - **Let the gates work.** `GROUNDING_ENFORCE` and `FORM_PATTERN_ENFORCE` (both default on) reject ungrounded or structurally invalid writes — that's the feature, not friction.
 - **Verify after writing.** `verify_d365fo_project` confirms disk + project registration in one call.
-- **Full conversations:** [USAGE_EXAMPLES.md](USAGE_EXAMPLES.md) shows seven real multi-tool scenarios end to end.
+- **Full conversations:** [USAGE_EXAMPLES.md](USAGE_EXAMPLES.md) shows five real multi-tool scenarios end to end.

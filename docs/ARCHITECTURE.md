@@ -43,7 +43,7 @@ Three complementary data sources, one rule: **bridge-first when live metadata ma
 | Method signatures / source | ✅ snapshot | ✅ on demand | ✅ live |
 | Cross-references (callers) | ~ FTS approximation | — | ✅ exact (`DYNAMICSXREFDB`) |
 | Labels (20M+ rows) | ✅ sole source | — | create/rename only |
-| Create / modify objects | — | — | ✅ 18 create types, 25 modify ops |
+| Create / modify objects | — | — | ✅ 13 create types, 25 modify ops |
 
 Full tool-by-tool breakdown: [SQLITE_DEPENDENCY.md](SQLITE_DEPENDENCY.md)
 
@@ -123,7 +123,7 @@ A .NET Framework 4.8 process (`D365MetadataBridge.exe`) spawned by the server, s
 graph LR
     TS[bridgeClient.ts\nspawn + JSON-RPC + restarts] --> EXE[D365MetadataBridge.exe]
     EXE --> READ[MetadataReadService\nclasses, tables, forms, reports]
-    EXE --> WRITE[MetadataWriteService\n18 create types · 25 modify ops]
+    EXE --> WRITE[MetadataWriteService\n13 create types · 25 modify ops]
     EXE --> XREF[CrossReferenceService\nCoC, event handlers, callers]
     READ & WRITE --> PROV[IMetadataProvider / DiskProvider]
     XREF --> SQL[(DYNAMICSXREFDB)]

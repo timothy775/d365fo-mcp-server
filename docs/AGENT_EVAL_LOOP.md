@@ -1,7 +1,7 @@
 # Self-improving agent eval loop — design spec
 
-**Status:** implemented (all phases below are live — see
-[eval/ROADMAP.md](../eval/ROADMAP.md) for current status and open work)
+**Status:** implemented and in production use — see
+[eval/ROADMAP.md](../eval/ROADMAP.md) for current status and open work
 **Related:** [ARCHITECTURE.md](ARCHITECTURE.md) · [TESTING.md](TESTING.md) · [BRIDGE.md](BRIDGE.md) · [BACKLOG.md](BACKLOG.md) · [eval/README.md](../eval/README.md)
 
 ---
@@ -259,17 +259,17 @@ Catalog discipline: maintain a **train/held-out split**. Improvements are accept
 
 ---
 
-## 13. Phased rollout — all done
+## 13. Current state
 
-| Phase | Deliverable | Exit criterion |
-|-------|-------------|----------------|
-| 0 — PoC ✅ | catalog + corpus schema + 1 golden case, run end-to-end by hand | one case scored build/BP/golden and produced a corpus record |
-| 1 — implementer harness ✅ | automated generate→build→golden→score, multi-artifact support | green/red scorecard per case, reproducibly |
-| 2 — improver ✅ | automated clustering + triage confirmation + PR drafting | tool/knowledge fix PRs sourced from corpus evidence (15+ landed) |
-| 3 — guarded scale ✅ | held-out split, regression gating, CI, wider tiers | `eval-gate` CI gate green; catalog spans L0–L4 across breadth (form patterns, extensibility mechanisms, OOP mechanics, SSRS, etc.) |
+The loop described above — catalog, corpus, implementer harness, golden/SysTest
+oracles, improver clustering + triage + PR drafting, held-out regression
+gating, and CI (`eval-gate`) — is built and running end to end. Catalog spans
+L0–L4 across a broad set of use-cases (form patterns, extensibility
+mechanisms, OOP mechanics, SSRS, etc.).
 
 Breadth is intentionally open-ended beyond this — see
-[eval/ROADMAP.md](../eval/ROADMAP.md) for what's still uncovered.
+[eval/ROADMAP.md](../eval/ROADMAP.md) for what's still uncovered and any
+remaining lower-priority work.
 
 ---
 
