@@ -46,56 +46,58 @@ add display menu items + a submenu, and a maintenance + a view security role.
 Label everything in en-US, cs and de.
 ```
 
-The diagram below is the **actual tool chain from a recorded run** of this prompt (object names normalized to the generic `EquipRental` model / `Rent` prefix used above). It is busier than an idealized plan because real metadata pushes back: the number-sequence delegate had to be reverse-engineered from the platform, and a couple of form generations were retried. See the cost box for the measured numbers.
+The diagram below is the **actual tool chain from the latest recorded run** of this prompt (object names normalized to the generic `EquipRental` model / `Rent` prefix used above; the real run used the sandbox's `Asl` customization prefix). This run is kept as the canonical record **because it did not fully succeed** — it hit a severe, unresolved tool defect partway through and the sandbox was rolled back to empty. That outcome is exactly the kind of signal the eval loop exists to surface, so the doc reports it honestly rather than substituting an easier earlier run.
 
 ```mermaid
 flowchart TB
-    A["get_workspace_info<br/>model EquipRental, paths, staleness"] --> B["get_knowledge x4<br/>number sequences / form patterns / security / object patterns"]
-    B --> C["object_patterns domain=form action=analyze x2<br/>master + header/lines transaction"]
-    C --> D["analyze_code mode=patterns + search x2<br/>how this codebase wires NumberSeqModule"]
-    D --> E["generate_object mode=pattern<br/>pattern=number-seq-handler (Rent)"]
-    E --> F["verify_d365fo_project<br/>early scaffold sanity check"]
-    F --> G["list_dir + run_in_terminal<br/>locate label-file shape in metadata"]
-    G --> H["labels action=create<br/>Rent label file, 42 entries (en-US/cs/de)"]
-    H --> I["d365fo_file action=create<br/>2 EDTs + 3 enums + NumberSeqModule enum-extension"]
-    I --> J["d365fo_file action=create x4<br/>tables: Equipment / AgreementHeader / Line / Parameters"]
-    J --> K["d365fo_file action=modify<br/>add-index x4 + add-relation x3"]
-    K --> L["d365fo_file action=modify<br/>table methods: numRef* + numberSeqModule()"]
-    L --> M["d365fo_file action=create<br/>NumberSeqModuleRent class + NumberSeqGlobal class-extension"]
-    M --> N["search + run_in_terminal x~10<br/>find NumberSeqGlobal buildModulesMapDelegate pattern"]
-    N --> O["d365fo_file action=modify class-extension<br/>SubscribesTo buildModulesMapDelegate"]
-    O --> P["update_symbol_index"]
-    P --> Q["generate_object objectType=form cloneFrom (+retries)<br/>Equipment←PaymTerm, Agreement←SalesTable"]
-    Q --> R["d365fo_file action=modify form<br/>add lines data source + number-seq form handler methods"]
-    R --> S["generate_object form Parameters TableOfContents<br/>(retried) + update_symbol_index"]
-    S --> T["d365fo_file action=create<br/>3 display menu items + menu RentModule + add items"]
-    T --> U["d365fo_file action=create<br/>4 privileges + 2 duties + 2 roles"]
-    U --> V["verify_d365fo_project<br/>final, full object list"]
+    A["get_workspace_info + search x8<br/>phantom-leftover sweep — reported ~15 stray objects, all confirmed index-only (nothing on disk)"] --> B["get_knowledge x3 + object_patterns analyze x2<br/>number-seq / form-pattern / security knowledge"]
+    B --> C["prepare + d365fo_file create x5<br/>2 EDTs + 3 enums"]
+    C --> D["labels action=create (bulk)<br/>47 label IDs x en-US/cs/de, one call"]
+    D --> E["prepare + d365fo_file create x4<br/>tables: Equipment / AgreementHeader / Line / Parameters"]
+    E --> F["d365fo_file action=modify x~20<br/>add-index / add-relation / add-method (symlink containment error → retried with explicit filePath)"]
+    F --> G["generate_object pattern=number-seq-handler + validate_code<br/>module class + event handler"]
+    G --> H["d365fo_file action=create<br/>NumberSeqModule enum-extension + 2 classes"]
+    H --> I["update_symbol_index + build_d365fo_project<br/>BUILD #1 FAIL — NumberSeqModule::Rent unresolved"]
+    I --> J["get_object_info + Read<br/>found the enum-extension write silently produced EMPTY EnumValues"]
+    J --> K["d365fo_file create overwrite=true xmlContent<br/>hand-fix: populate the dropped enum value"]
+    K --> L["build_d365fo_project → BUILD #2 SUCCESS, 0 errors"]
+    L --> M["object_patterns analyze x2 + generate_object scaffold x2<br/>Equipment DetailsMaster, Agreement DetailsTransaction"]
+    M --> N["d365fo_file modify add-data-source (lines) + add-control x6<br/>ALL FAIL — add-control non-functional on this form in this session"]
+    N --> O["hand-authored lines grid + detail columns from validated pattern spec<br/>object_patterns validate → conforms"]
+    O --> P["build_d365fo_project → BUILD #3 SUCCESS, 0 errors"]
+    P --> Q["generate_object scaffold Parameters (TableOfContents)<br/>+ 3 display menu items + menu + add-to-menu x3"]
+    Q --> R["d365fo_file create x7<br/>5 security privileges + 2 duties + 2 roles"]
+    R --> S["build_d365fo_project x~10<br/>BUILDS #4-#13 ALL FAIL — identical 58 errors: form datasource refers to table '' which does not exist"]
+    S --> T["Extensive triage: cache wipe, fullBuild, force+fullBuild, targeted re-index,<br/>field-name fixes, full Fields-list rewrite matching a known-good reference form — none resolved it"]
+    T --> U["verify_d365fo_project + delete all 28 objects + labels + cache/bin artifacts<br/>full rollback to a clean sandbox"]
+    U --> V["build_d365fo_project (fullBuild+force) → FINAL SUCCESS, 0 errors<br/>sandbox healthy, module NOT delivered"]
 ```
 
-**What gets created (≈22 objects)**
+**What was built this run, before the blocker (28 objects + 47 labels — all rolled back)**
 
 | Layer | Objects |
 |-------|---------|
-| EDTs | `RentEquipmentId` (Num), `RentRate` (extends `AmountMST`), `RentAgreementId` (Num) |
+| EDTs | `RentEquipmentId`, `RentAgreementId` |
 | Enums | `RentEquipmentCategory` (5 values), `RentEquipmentStatus` (5), `RentAgreementStatus` (4) |
-| Tables | `RentEquipmentTable`, `RentAgreementHeader`, `RentAgreementLine`, `RentParameters` |
-| Number seq | `RentParameters.numberSeqModule()`, `NumberSeqModuleRent` class, 2 references |
-| Forms | `RentEquipmentTable` (Details Master w/ Standard Tabs), `RentAgreement` (Details Master + lines grid) |
-| Navigation | `RentEquipmentTable` + `RentAgreement` display menu items, submenu under **Inventory management** |
-| Security | `RentEquipmentMaintain` / `RentAgreementMaintain` privileges, `RentManagement` duty, `RentClerk` + `RentViewer` roles |
-| Labels | 14 label IDs × 3 languages = 42 entries |
+| Number seq | `NumberSeqModule` enum-extension (+`Rent`), `RentNumberSeqModule` class, `RentNumberSeqModuleEventHandler` (`[SubscribesTo] buildModulesMapDelegate`) |
+| Tables | `RentEquipment`, `RentAgreementTable`, `RentAgreementLine`, `RentParameters` |
+| Forms | `RentEquipment` (DetailsMaster), `RentAgreement` (DetailsTransaction, header+lines), `RentParameters` (TableOfContents) |
+| Navigation | 3 display menu items + `RentModule` menu |
+| Security | 5 privileges, 2 duties, 2 roles |
+| Labels | 47 label IDs × 3 languages = 141 entries |
+
+**Outcome: blocked, not delivered.** Two builds passed clean (0 errors) after the EDT/enum/number-seq and master/transaction-form layers landed. Adding the third form (`RentParameters`) plus the menu/security layer pushed the object graph past some threshold, and **all three already-passing forms simultaneously started failing** with `datasource refers to table '' which does not exist` — `get_object_info` showed the live `Table:` property genuinely blank through the bridge, not a stale cache. ~10 remediation attempts (full re-index, cache wipe, `fullBuild`+`force`, field-name fixes, matching a known-good reference form's `Fields` list) did not fix it, so the run rolled everything back to a clean, empty, build-verified sandbox rather than leave a half-broken module in place.
 
 **Key takeaways / gotchas**
-- **Creation order is enforced by dependencies, not preference.** EDTs and enums must exist before the tables that reference them; tables before forms (the clone re-binds the datasource); menu items before the menu that points at them. The agent sequences this for you — but if you split it across sessions, follow the same order.
-- **Number sequences are codebase-specific.** `analyze_code(mode=patterns)` finds how *your* model wires `NumberSeqModule` (the AX2012-style module class vs. a parameters-only approach) instead of pasting a generic snippet that won't load data.
-- **`RentRate extends AmountMST`** inherits currency formatting and the right `extendedDataType` size — `suggest_edt` proposes it; never type `Real`.
-- Run `build_d365fo_project` at the end: a greenfield slice is where a single missing `tableStr` reference surfaces, and the structured xppc diagnostics point at the exact object.
+- **Creation order is enforced by dependencies, not preference.** EDTs and enums must exist before the tables that reference them; tables before forms (the clone re-binds the datasource); menu items before the menu that points at them.
+- **Number sequences are codebase-specific.** `analyze_code(mode=patterns)` / `generate_object(pattern=number-seq-handler)` finds how *your* model wires `NumberSeqModule` instead of pasting a generic snippet that won't load data.
+- **`d365fo_file(create, objectType="enum-extension")` can silently drop the enum value being added** — the write reports success but `<EnumValues />` comes back empty, and the resulting error surfaces two calls later as an unrelated-looking "qualifier is not valid for field" compile error. Verify with `get_object_info` right after creating an enum-extension.
+- **`add-control` on a form's grid datasource was completely non-functional in this run** — every control type failed against every parent container, including one that already had a working control of the same kind. When this happens, hand-author the grid section from a validated `object_patterns` spec rather than retrying.
+- **Watch for a form losing its datasource `Table` binding as the object count grows.** This run's biggest open finding: three forms that had each built clean individually all failed identically once a fourth form + menu + security objects were added, and no re-index/rebuild/field-fix combination recovered it. Treat a sudden identical failure across previously-working forms as a signal to roll back and retry in smaller increments, not to keep patching forward.
+- Run `build_d365fo_project` after *every* new object during a greenfield slice, not just at the end — this is the run where waiting cost the most, since the failure only became visible after several objects had already landed on top of it.
 
-> **Measured cost & model** *(one recorded end-to-end run — not an estimate)*
-> **Models actually used:** **Claude Sonnet 4.6** as the agent (`panel/editAgent`, 76 turns — all reasoning and every tool call) + **GPT-4o-mini** as a background helper (`backgroundTodoAgent`, 8 calls — todo-list upkeep only, ~$0.006). No Opus, no Haiku.
-> Tool calls **126** (78 MCP + 48 host: terminal / list_dir / todo) · New context **~182K** · Output **~38K** · Total input incl. cached prefix **~5.33M** (cached **~5.15M**) · **Billed ≈ 280 AI credits ≈ $2.80**
-> **Model used: Sonnet 4.6** — it completed the full greenfield slice without an Opus upgrade. The run came in mid-range of the original Opus estimate (200–450 credits) *on the cheaper tier*, the upside being offset by retries: the `NumberSeqGlobal` delegate pattern took ~10 terminal probes to pin down and two form generations were retried. Opus is still the safer pick when the number-sequence/posting reasoning has to land first-try; do the opening `get_workspace_info` / `get_knowledge` / label-discovery turns on Haiku to trim either way.
+> **Measured cost & model** *(latest recorded end-to-end run on the `fm-mcp` sandbox — supersedes the earlier successful run; non-token metrics only)*
+> **Claude Sonnet 5** as the agent. Tool calls **~230** (~195 MCP + ~35 host: Read/Write/Edit/Bash/Glob) · **28 objects + 47 labels created, ultimately 0 delivered** (full rollback) · **~15 builds**: #1 fail → #2 pass → #3 pass → #4–#13 fail (identical defect) → final pass post-rollback · Sub-agent context **~411K tokens** for this one scenario. This is markedly more expensive than the model/tool-count estimate below because the run kept investigating a genuine defect instead of failing fast — a useful lesson in its own right: cap remediation attempts (e.g. 2–3 tries) before rolling back, rather than iterating ~10 times against the same symptom.
 
 ---
 
@@ -114,51 +116,54 @@ Add an audit inquiry form + menu item under Accounts receivable > Inquiries, and
 duty extension so the AR clerk role sees it.
 ```
 
-The diagram below is the **actual tool chain from a recorded run** of this prompt (object names normalized to the generic `AslSalesPostingAuditLog` / `Asl` prefix used above). It hit **real environment friction on almost every layer**: `SalesFormLetter.run` turned out to already be CoC'd by Microsoft itself, a leftover audit table + phantom labels from an interrupted prior attempt had to be identified and ignored, a form-scaffold clone silently bound to the wrong table, a hand-authored form had a subtle XML nesting bug, and the CoC build needed an extra model reference. See the cost box for the measured numbers.
+The diagram below is the **actual tool chain from the latest recorded run** of this prompt (object names normalized to the generic `AslSalesPostingAuditLog` / `Asl` prefix used above — the run's real prefix too). It hit real friction, but **cleaner than the prior recorded run**: `SalesFormLetter.run` was still already CoC'd by Microsoft, but the `security-duty-extension` write path that previously needed hand-crafted XML now works cleanly through the tool, and the one genuine build blocker (a scaffold `Methods` block in the wrong XML location) was root-caused and fixed in a single pass. See the cost box for the measured numbers.
 
 ```mermaid
 flowchart TB
-    A["extension_info mode=coc<br/>SalesFormLetter.run — ALREADY wrapped by Foundation's own extension"] --> B["extension_info mode=coc/points<br/>SalesFormLetter_Confirm.run — clean, unwrapped target"]
-    B --> C["prepare mode=change<br/>SalesFormLetter_Confirm.run — grounding token"]
-    C --> D["suggest_edt x6 + get_object_info edt/enum<br/>resolve SysUserId / TransDateTime / DocumentStatus / NoYes"]
-    D --> E["labels action=create (Sat) x15<br/>en-US / cs / de"]
-    E --> F["d365fo_file create edt + table SalesPostingAuditLog (7 fields)<br/>then modify add-index SalesId+PostedAt"]
-    F --> G["prepare mode=change CustTable → create table-extension<br/>COLLISION: CustTable.AslExtension already exists from a prior scenario"]
-    G --> H["verify_d365fo_project<br/>confirms AslSalesFormLetterAuditLog + @fm-mcp labels are phantom leftovers (0 on disk) — ignored"]
-    H --> I["d365fo_file modify add-field x2 into the EXISTING CustTable.AslExtension"]
-    I --> J["validate_code syntax+references → d365fo_file create class-extension<br/>SalesFormLetter_Confirm_Extension (credit gate + audit insert)"]
-    J --> K["object_patterns analyze/spec SimpleList → generate_object scaffold cloneFrom=CustGroup<br/>FAILS silently: 0 datasources, bound to stale/wrong table even after re-indexing"]
-    K --> L["hand-authored AxForm XML from the pattern spec<br/>object_patterns validate → conforms"]
-    L --> M["d365fo_file create menu-item-display<br/>+ menu-extension AccountsReceivable → InquiriesAndReports (anchor read from real AxMenu XML)"]
-    M --> N["security_info artifact role/duty<br/>SalesOrderProgressInquire (already on AR clerk role) → d365fo_file create security-privilege"]
-    N --> O["hand-crafted AxSecurityDutyExtension XML<br/>(objectType not exposed by the tool) + manual .rnrproj entry"]
-    O --> P["build_d365fo_project x2 FAIL<br/>artifact-name mismatch, then malformed AxFormDataSource nesting found by diffing vs real CustGroup.xml"]
-    P --> Q["build_d365fo_project FAIL — Retail assembly required<br/>add Retail to Descriptor ModuleReferences"]
-    Q --> R["build_d365fo_project PASS — 0 errors<br/>verify_d365fo_project"]
+    A["get_workspace_info — model fm-mcp, prefix Asl"] --> B["extension_info coc/points — SalesFormLetter.run wrapped by Foundation;<br/>SalesFormLetter_Confirm.run clean/unwrapped"]
+    B --> C["search x2 + verify_d365fo_project — leftover sweep,<br/>confirms prior-run objects/labels are phantom index-only (0 on disk)"]
+    C --> D["get_object_info + get_method — SalesFormLetter.run signature"]
+    D --> E["prepare(change) SalesFormLetter_Confirm.run — grounding token"]
+    E --> F["suggest_edt x9 + search batches<br/>resolve SysUserId / TransDateTime / NoYes / Notes EDTs"]
+    F --> G["labels create x15 (en-US/cs/de), existing Sat label file"]
+    G --> H["d365fo_file create enum AslSalesPostingType (4 values)<br/>+ create edt x3 (BUG: edtType=Enum wrote AxEdtString → fixed via overwrite=true xmlContent)"]
+    H --> I["d365fo_file create table AslSalesPostingAuditLog (7 fields) + add-index + add-relation<br/>+ create table-extension CustTable.AslExtension"]
+    I --> J["generate_object pattern class-extension → validate_code<br/>d365fo_file create SalesFormLetter_ConfirmAsl_Extension (credit gate + audit insert)"]
+    J --> K["object_patterns form analyze/spec → generate_object scaffold FAILS loudly (0/13 overlap)<br/>scaffolded from the pattern template instead"]
+    K --> L["d365fo_file create menu-item-display + security-privilege + security-duty-extension<br/>(all clean first try — previously-hand-crafted objectType now works)"]
+    L --> M["d365fo_file create menu-extension → add-menu-item-to-menu unsupported for this objectType<br/>hand-authored MenuElementModifications XML (no pattern spec exists for menus)"]
+    M --> N["build_d365fo_project x2 FAIL — datasource refers to table which does not exist<br/>trigger_db_sync (455s, no effect, red herring)"]
+    N --> O["Root-caused via diff vs Microsoft CustGroup/ACOJournalTable_BR:<br/>scaffold put Methods in an invalid AxFormDataSource location — fixed via overwrite=true xmlContent"]
+    O --> P["build_d365fo_project PASS — 0 errors, 0 warnings<br/>verify_d365fo_project 12/12 + run_bp_check (minor nags only)"]
+    P --> Q["undo_last_modification x12 — ALL FAIL<br/>'Refusing operation outside repository root' (fm-mcp symlinks to a separate git repo)"]
 ```
 
-**What gets created**
+**What gets created (12 objects, build-clean — left in the sandbox, see cleanup note below)**
 
 | Layer | Objects |
 |-------|---------|
-| Extensions | `CustTable.Extension` (+`CreditReviewDate`, `CreditReviewedBy`), `SalesFormLetter` CoC class |
-| EDTs | `SalesAuditFailReason` (extends `Description255`) |
-| Tables | `SalesPostingAuditLog` (7 fields, index on `SalesId`+`PostedAt`) |
-| Forms | `SalesPostingAuditLog` inquiry (SimpleList) |
-| Navigation | display menu item under **Accounts receivable → Inquiries and reports** |
-| Security | `SalesPostingAuditView` privilege + extension of the AR clerk duty |
+| Enum | `AslSalesPostingType` (4 values) |
+| EDTs | `AslPostingType`, `AslAttempted`, `AslFailReason` |
+| Table | `AslSalesPostingAuditLog` (7 fields, 1 index, 1 relation, 1 field group) |
+| Table extension | `CustTable.AslExtension` (+`CreditReviewDate`, `CreditReviewedBy`) |
+| Class extension | `SalesFormLetter_ConfirmAsl_Extension` (credit gate + audit insert CoC) |
+| Form | `AslSalesPostingAuditLog` inquiry (SimpleList, 7 columns) |
+| Navigation | display menu item + `AccountsReceivable.AslExtension` menu-extension, nested under **Inquiries and reports** |
+| Security | `AslSalesPostingAuditLogView` privilege + `SalesOrderProgressInquire.AslExtension` duty-extension |
 
 **Key takeaways / gotchas**
 - **`extension_info(mode=coc)` first, always.** Silently adding a second wrapper around `SalesFormLetter.run` is the #1 CoC defect — two `next` calls, double posting side-effects. The check is < 50 ms and shows you the existing wrappers before you write.
-- **The grounding token from `prepare(mode=change)` is bound to the method.** You can't reuse a token issued for a different object; the write tools reject it. That's the gate that stops the AI from confidently wrapping a method that doesn't exist with that signature.
-- **`get_object_info(table)` *after* generation** verifies the audit table as actually written — the agent may have picked a different EDT than you pictured (e.g. `SalesIdBase` vs `SalesId`); catch it before the form binds to it.
+- **The grounding token from `prepare(mode=change)` is bound to the method.** You can't reuse a token issued for a different object; the write tools reject it.
+- **`d365fo_file(create edt, edtType="Enum")` can write the wrong base XML type** — it produced `AxEdtString` instead of `AxEdtEnum`, silently accepting an enum-backed EDT as a plain string. Verify with `get_object_info(edt)` right after creating one, same class of "silent wrong write" as the number-sequence enum-extension bug in scenario 1.
+- **`add-menu-item-to-menu` doesn't support nesting under a `menu-extension` objectType**, and there's no `object_patterns` spec for menus to scaffold from — this is the one place hand-authoring XML is still the only path; validate by building, not by pattern-check.
 - **A table extension (`action=modify`) is not a new table.** Adding `CreditReviewDate` to `CustTable` goes through the bridge's `IMetadataProvider`, producing a clean `CustTable.YourModelExtension` delta — no risk of corrupting the 200-field standard table.
+- **`security-duty-extension` now works through the normal tool path** — the earlier documented objectType gap is fixed; no hand-crafted XML needed this run.
 
 > **Indicative cost & model**
 > Tool calls **~30–42** · New context **~70–110K** · Output **~18–28K** · Billed total (cached) **~140–230K**
 > **Model: Opus 4.8** (Sonnet 4.6 is viable if the posting logic is simple). Anything touching financial posting order and `next` semantics rewards the stronger reasoner.
 >
-> **Measured run** *(one recorded end-to-end run on the `fm-mcp` sandbox; non-token metrics only)* — **Claude Sonnet 5** as the agent. Tool calls **~110** (~90 MCP + ~20 host: Bash/Read/Write/Edit) · Objects **9, build-clean** (`xppc` 0 errors) · 4 builds (3 fail → pass) · 15 labels (en-US/cs/de). This run landed well above the estimate because the "safely changing Microsoft code" framing was true in the fullest sense: `SalesFormLetter.run` was **already** CoC-wrapped by Microsoft's own `SalesFormLetter_InvoiceAppSuite_Extension`, confirming the doc's #1 gotcha before a line was written — the fix was retargeting to the unwrapped `SalesFormLetter_Confirm.run`. A leftover table (`AslSalesFormLetterAuditLog`) and phantom `@fm-mcp:...` labels from an interrupted prior attempt showed up in `prepare`'s related-context hints; `verify_d365fo_project` confirmed 0 bytes on disk for both, so they were ignored and rebuilt clean under the real `Sat` label file. Three real tooling gaps: (1) `generate_object(scaffold, cloneFrom=CustGroup)` silently produced a 0-datasource form still bound to `CustGroup`'s own fields because the target table wasn't in the symbol index yet — re-indexing and retrying returned the identical cached (broken) result, so the form was hand-authored from the `SimpleList` pattern spec instead; (2) that hand-written XML had a `<Methods>` block nested directly inside `<AxFormDataSource>` (valid-looking, wrong location) which silently reset the datasource's `Table` binding to empty — found only by diffing byte-for-byte against a real Microsoft `CustGroup.xml`; (3) *(fixed since this run — see commit `ebfe8dc`)* at the time, `d365fo_file`'s `objectType` enum had no `security-duty-extension`/`security-role-extension` even though `AxSecurityDutyExtension` is a real, common Microsoft object type — worked around by hand-crafting the XML (adding the new privilege to the existing `SalesOrderProgressInquire` duty already on the AR clerk role) and registering it in the `.rnrproj` by hand. The final build error — a missing `Retail` module reference — was a genuine one-line fix to the model's `Descriptor` once traced to `SalesFormLetter.run()` touching a Retail-namespace type. Token/credit cost not captured on this run.
+> **Measured run** *(latest recorded end-to-end run on the `fm-mcp` sandbox — supersedes the earlier run; non-token metrics only)* — **Claude Sonnet 5** as the agent. Tool calls **~150** (~112 MCP + ~38 host, mostly read-only reference lookups) · Objects **12, build-clean** (`xppc` 0 errors, 0 warnings) · 4 builds (3 fail → pass; one fail was a 455s `trigger_db_sync` red herring with no effect). `SalesFormLetter.run` was again already CoC-wrapped by Microsoft's own extension, confirming the doc's #1 gotcha before a line was written; the fix was retargeting to the unwrapped `SalesFormLetter_Confirm.run`, same as before. The one real build blocker was a `generate_object(scaffold)` form whose `<Methods>` block landed in an invalid `AxFormDataSource` location, silently blanking the datasource's `Table` binding — root-caused by diffing against Microsoft's `CustGroup.xml` and fixed with a targeted XML rewrite. **Cleanup could not complete**: `undo_last_modification` rejects all 12 delete calls with "Refusing operation outside repository root" because `fm-mcp` is a symlink into a separate git repository (`K:\repos\ASL`) and the tool's realpath-containment check treats that as outside its root — the same class of bug as the previously-fixed write-path symlink issue, but the fix was never applied to the undo/delete path, and `d365fo_file` has no delete action to fall back on. The 12 objects remain in the sandbox, build-clean; they don't collide with any other scenario's naming.
 
 ---
 
@@ -177,47 +182,49 @@ VendCertComplianceReport grouped by CertType. Menu items for the form, the batch
 the report under Procurement > Inquiries. A maintenance privilege + role.
 ```
 
-The diagram below is the **actual tool chain from a recorded run** of this prompt (object names normalized to the generic `VendCompliance` model / `VendCert` prefix used above) — the **cleanest of the runs measured so far**: no environment surprises, single first-try build.
+The diagram below is the **actual tool chain from the latest recorded run** of this prompt (object names normalized to the generic `VendCompliance` model / `VendCert` prefix used above). Unlike the earlier "cleanest run" recorded here, this run hit **7 real build failures in a row** before landing clean — a useful reminder that first-try success isn't guaranteed even for a well-trodden shape.
 
 ```mermaid
 flowchart TB
-    A["get_knowledge<br/>compliance / batch / report conventions"] --> B["labels action=create<br/>22 label IDs x 3 langs"]
-    B --> C["d365fo_file action=create<br/>EDT VendCertNumber + enums VendCertType / VendCertStatus"]
-    C --> D["d365fo_file action=create table VendCertificate<br/>then modify x2: VendAccount relation + table methods"]
-    D --> E["generate_object objectType=form cloneFrom<br/>SimpleListDetails + object_patterns validate"]
-    E --> F["validate_code syntax + references"]
-    F --> G["d365fo_file action=create x3<br/>VendCertExpiryCheck Contract / Service / Controller (SysOperation)"]
-    G --> H["generate_object objectType=report scaffold<br/>VendCertComplianceReport full stack"]
-    H --> I["d365fo_file action=modify x2<br/>widen Tmp unique index: VendAccount → VendAccount+CertNumber"]
-    I --> J["d365fo_file action=modify<br/>DP: enum2str(CertType/Status) + processReport() query"]
-    J --> K["d365fo_file action=create x2<br/>display + action menu items"]
-    K --> L["d365fo_file action=create<br/>privilege VendCertMaintain + role VendComplianceOfficer"]
-    L --> M["build_d365fo_project (async, polled twice)<br/>PASS first-try — 0 errors, ~32s"]
+    A["get_workspace_info + get_knowledge x3<br/>sysoperation/security/SSRS conventions"] --> B["search x2 + verify_d365fo_project<br/>phantom-index check: 14 ghost hits from an interrupted prior attempt, 0 on disk"]
+    B --> C["suggest_edt x5 + batch_get_info<br/>reuse VendAccount/TransDate/EndDate/Name EDTs"]
+    C --> D["labels action=create x2<br/>23 label IDs x 3 langs"]
+    D --> E["d365fo_file create x3<br/>EDT AslVendCertNumber + enums AslVendCertType / AslVendCertStatus"]
+    E --> F["d365fo_file create table AslVendCertificate<br/>modify x4: relation, index, initValue, find()"]
+    F --> G["object_patterns recommend+spec + generate_object scaffold form<br/>cloneFrom target unreadable → formPattern fallback"]
+    G --> H["analyze_code patterns + generate_object pattern=sysoperation<br/>d365fo_file create x3: Contract / Service / Controller"]
+    H --> I["generate_object scaffold report (6 objects)<br/>modify: widen Tmp index, processReport() query"]
+    I --> J["search/get_object_info menu x3 FAIL — add-menu-item-to-menu unsupported for menu-extension<br/>hand-authored AxMenuElementModification from a proven-clean sibling extension"]
+    J --> K["d365fo_file create x2 (privilege, role)<br/>hand-extended privilege to 3 entry points (no multi-entry-point op)"]
+    K --> L["build_d365fo_project x13 raw calls, 7 distinct failures:<br/>select-as-expr syntax → enum dup-values (0-default bug) → form Methods misplacement →<br/>phantom field-group error (unresolved) → RDL wrong grouping field → 2 more fixes"]
+    L --> M["build PASS — 0 errors, 0 warnings → verify_d365fo_project 18/18<br/>cleanup: undo blocked (symlink) → file-delete fallback → reindex → rebuild PASS 0/0"]
 ```
 
-**What gets created**
+**What gets created (19 objects, build-clean — fully cleaned up)**
 
 | Layer | Objects |
 |-------|---------|
 | EDT / enums | `VendCertNumber`, `VendCertType` (5), `VendCertStatus` (4) |
-| Table | `VendCertificate` (8 fields, `VendAccount` FK relation) |
+| Table | `VendCertificate` (7 fields, `VendAccount` FK relation, unique `VendAccount+CertNumber` index) |
 | Form | `VendCertificate` (SimpleListDetails) |
-| Logic | `VendCertExpiryContract` / `Controller` / `Service` (SysOperation, recurring) |
-| Report | `VendCertComplianceReport` + TmpTable + DP + Controller |
-| Navigation | display + action + output menu items under **Procurement → Inquiries** |
-| Security | `VendCertMaintain` privilege, `VendComplianceOfficer` role |
+| Logic | `VendCertExpiryCheckContract` (labelled `thresholdDays` param) / `Service` (set-based `update_recordset`) / `Controller` (SysOperation, scheduled-batch) |
+| Report | `VendCertComplianceReport` + TmpTable + Contract + DP + Controller |
+| Navigation | display + action + output menu items under **Procurement → Inquiries and reports** |
+| Security | `VendCertMaintain` privilege (3 entry points), `VendComplianceOfficer` role |
 
 **Key takeaways / gotchas**
-- **Clone the SysOperation shape from your own model.** `analyze_code(mode=patterns, scope=extensions)` finds an existing `My*Controller`/`Service` so the new batch matches your conventions (how the controller registers the menu item, whether `RunOn` is set) — not a textbook skeleton.
-- **Report creation order is load-bearing.** `generate_object(objectType=report)` emits TmpTable → Contract → DP → Controller → AxReport; the TmpTable must land first so the DP's `tableStr` resolves. The single call replaces 15+ manual steps.
-- **`processReport()` is intentionally a TODO.** The agent fills the query body *after* `get_object_info` on the source tables — the alternative is a guessed `select` that compiles but returns the wrong grouping.
-- **One enum value drives two things.** `Status` is set by the batch *and* grouped in the report — keep the enum the single source of truth; don't let the report hardcode "ExpiringSoon".
+- **Clone the SysOperation shape from your own model.** `analyze_code(mode=patterns, scope=extensions)` finds an existing `My*Controller`/`Service` so the new batch matches your conventions — not a textbook skeleton.
+- **Explicit enum values, always.** Creating an enum with no explicit `value` per member silently defaults every member to `0`, producing a duplicate-value compile error that cascades into unrelated-looking "field/table does not exist" errors on any form bound to that table. Set ordinals explicitly; don't rely on the tool to auto-number.
+- **Report creation order is load-bearing.** `generate_object(objectType=report)` emits TmpTable → Contract → DP → Controller → AxReport; the TmpTable must land first so the DP's `tableStr` resolves.
+- **"Grouped by X" isn't automatic.** The report scaffold's `GroupedWithTotals` style groups the Tablix by the *first* hint field, not whichever field the prompt says to group by — check and patch the RDL `GroupExpression` if they differ.
+- **`processReport()` is intentionally a TODO**, filled after `get_object_info` on the source tables — a guessed `select` compiles but returns the wrong grouping.
+- **Menu-extension nesting still has no dedicated tool op** (same gap as scenario 2) — hand-author `AxMenuElementModification` from a real sibling extension file, then validate by building.
 
 > **Indicative cost & model**
 > Tool calls **~35–48** · New context **~80–120K** · Output **~22–32K** · Billed total (cached) **~150–260K**
 > **Model: Sonnet 4.6.** The report scaffold + SysOperation pattern are well-trodden; Sonnet handles them at a fraction of Opus cost. Upgrade only if the batch logic gets genuinely intricate.
 >
-> **Measured run** *(one recorded end-to-end run on the `fm-mcp` sandbox; non-token metrics only)* — **Opus 4.8** as the agent. Tool calls **~35** (~30 MCP + ~5 host) · Objects **18, build-clean** (`xppc` 0 errors) · **1 build, first-try pass** (~26 s compile) · 22 labels (en-US/cs/de). The **cleanest run so far** — no environment surprises, landed at the low end of the estimate. Two scaffold-quality touch-ups were needed and are worth knowing about: `generate_object(objectType=report)` mapped the source **enum fields (`CertType`/`Status`) as `String255`** in the TmpTable (so the DP converts with `enum2str`), and it put a **unique index on only the first field (`VendAccount`)** — widened to `VendAccount`+`CertNumber` so a vendor can hold multiple certificates. The DP's `processReport()` ships as a documented TODO stub, filled after reading the source table — exactly as the gotcha note above says. Token/credit cost not captured on this run.
+> **Measured run** *(latest recorded end-to-end run on the `fm-mcp` sandbox — supersedes the earlier "cleanest run"; non-token metrics only)* — **Claude Sonnet 5** as the agent. Tool calls **~164** (~113 MCP + ~51 host) · Objects **19, build-clean** (`xppc` 0 errors, 0 warnings) · **13 raw build calls covering ~10 logical attempts, 7 failed** before the final pass (~10-19s each). This run replaced the earlier "cleanest of the five" narrative: real friction showed up at almost every layer. A `totalCount = select count(...) from ...;` MODEL_ERROR (select isn't an assignable expression) was an easy first fix. The bigger issues were tool defects: an enum-create call with no explicit member values silently assigned `0` to every member, and a `generate_object(scaffold, form)` call placed the `<Methods>` stub as a direct child of `<AxFormDataSource>` instead of nested under `SourceCode/DataSources/DataSource/Methods`, silently blanking the `Table` binding — both root-caused by diffing against a proven-clean sibling object from an earlier scenario in this same run series. One failure was never resolved: a custom `Overview` field group, byte-identical to a working sibling table's field group, was reported "does not exist" by the form-pattern validator across three rebuilds and a cache refresh; worked around by dropping the form's `DataGroup` binding since the grid already binds fields explicitly (flagged as an open item, not closed). The report's Tablix also grouped by the wrong field (first hint field, not `CertType`) and needed a 2-line RDL patch. Cleanup used the file-deletion fallback (`undo_last_modification` still blocked by the symlink-containment bug) and left the sandbox at a clean, verified 0-error build.
 
 ---
 
@@ -235,49 +242,52 @@ price/discount calc that applies the tier percent. Security: a setup-maintenance
 privilege wired into the AR setup duty. Labels in en-US, cs, de.
 ```
 
-The diagram below is the **actual tool chain from a recorded run** of this prompt (object names normalized to the generic `CustLoyalty` model / `Cust` prefix used above). It is busier than an idealized plan because real metadata pushed back twice: a leftover enum from an interrupted prior attempt pointed at a non-existent label file, and the sales-discount CoC target turned out to be unbuildable in this environment. See the cost box for the measured numbers.
+The diagram below is the **actual tool chain from the latest recorded run** of this prompt (object names normalized to the generic `CustLoyalty` model / `Cust` prefix used above). It re-confirms both of the earlier run's environment findings (pricing-engine CoC block, `CustTableListPage` = `CustTable` grid view) and surfaces new ones: a form-scaffold that silently invented two fields that don't exist on the table, and a table-CoC `next` syntax gotcha undocumented in the knowledge base. See the cost box for the measured numbers.
 
 ```mermaid
 flowchart TB
-    A["Grep + Glob<br/>leftover AslCustPriorityTier enum from an interrupted prior run"] --> B["labels action=info + Bash<br/>dangling @fm-mcp: refs — real label file on disk is Sat"]
-    B --> C["labels action=create (Sat)<br/>d365fo_file action=create enum CustPriorityTier"]
-    C --> D["prepare table=CustTable mode=change<br/>d365fo_file action=create table-extension + field"]
-    D --> E["get_object_info form + Grep<br/>resolve exact TabGeneral control name"]
-    E --> F["prepare form CustTable + CustTableListPage<br/>d365fo_file modify/create form-extension x3"]
-    F --> G["search x3 + Glob + Bash x4<br/>CustTableListPage is CustTable in grid view, not a separate form"]
-    G --> H["suggest_edt + d365fo_file create/modify<br/>table CustTierDiscount + findByTier"]
-    H --> I["object_patterns analyze/validate + generate_object<br/>SimpleList form + menu item"]
-    I --> J["extension_info mode=strategy<br/>get_object_info/get_method x8 on SalesLineType / PriceDisc / TradeModuleType"]
-    J --> K["prepare class=PriceDisc + validate_code<br/>d365fo_file create class-extension PriceDisc_Extension"]
-    K --> L["d365fo_file action=create<br/>privilege + duty + role"]
-    L --> M["build_d365fo_project<br/>FAIL — PriceCur EDT unresolvable (missing PricingEngine assembly)"]
-    M --> N["Grep + Edit + Bash<br/>delete the unbuildable PriceDisc_Extension"]
-    N --> O["prepare table=SalesLine + get_object_info x3<br/>retarget to SalesLine.modifiedField (LinePercent)"]
-    O --> P["d365fo_file action=create<br/>class-extension SalesLine_Extension"]
-    P --> Q["build_d365fo_project x2<br/>fail → PASS — 0 errors"]
+    A["get_workspace_info + Grep/Glob leftover sweep<br/>clean slate; later prepare() collisions confirmed phantom index-only"] --> B["labels(info) x2 + Grep/Read<br/>confirm Sat is the live label file"]
+    B --> C["labels create (bulk, 9 IDs x 3 langs)<br/>d365fo_file create enum AslCustPriorityTier"]
+    C --> D["prepare + d365fo_file modify add-field into EXISTING CustTable.AslExtension<br/>enum field wired wrong (no EnumType) → modify-field + replace-code fix"]
+    D --> E["get_object_info(form) + Grep<br/>resolve Classification group under TabGeneral"]
+    E --> F["d365fo_file create form-extension + add-control ComboBox<br/>search reconfirms CustTableListPage = CustTable grid view, no second extension needed"]
+    F --> G["suggest_edt + prepare + d365fo_file create table AslCustTierDiscount<br/>add-index + add-table-method(find) → fixed param-type bug via replace-code"]
+    G --> H["object_patterns recommend + generate_object scaffold (clone rejected, 0% overlap)<br/>SimpleList template scaffold — invented 2 phantom fields not on the table"]
+    H --> I["object_patterns validate (falsely passed) + hand-fix XML (last resort)<br/>d365fo_file create menu-item-display"]
+    I --> J["Glob/Grep AccountsReceivable.xml for real Setup submenu<br/>add-menu-item-to-menu unsupported for menu-extension → hand-authored XML mirroring an on-disk pattern"]
+    J --> K["~20x search/security_info hunting for the AR setup duty<br/>found via security_info(artifact, privilege) reverse-lookup → CustAutomationSetupMaintain"]
+    K --> L["d365fo_file create security-privilege + security-duty-extension (clean first try)"]
+    L --> M["extension_info strategy/points/coc + get_method x6<br/>re-confirms PriceDisc.parmPrice / SalesLine.calcLineAmount are [Hookable(false)] → retarget SalesLine.modifiedField"]
+    M --> N["validate_code references (false-positive gaps on same-session symbols, confirmed real via get_object_info)<br/>d365fo_file create class-extension"]
+    N --> O["build_d365fo_project FAIL — 2 errors, invalid next(_fieldId) syntax for table CoC<br/>grep a real example → fix to next modifiedField(_fieldId)"]
+    O --> P["build_d365fo_project x2 PASS — 0 errors → verify_d365fo_project 10/10"]
+    P --> Q["undo_last_modification x8 FAIL (symlink containment) → file-delete fallback<br/>+ surgical revert of shared CustTable/menu-extension files, pre-existing content untouched"]
 ```
 
-**What gets created**
+**What gets created (9 objects, build-clean — fully cleaned up)**
 
 | Layer | Objects |
 |-------|---------|
-| Enum | `CustPriorityTier` (4 values) |
-| Extensions | `CustTable.Extension` (+`PriorityTier`), `CustTable` form ext, `CustTableListPage` ext, sales price/disc CoC class |
-| Table | `CustTierDiscount` (`PriorityTier`, `DiscPercent`) + SimpleList form |
-| Navigation | setup display menu item under **Accounts receivable → Setup** |
-| Security | `CustTierDiscountMaintain` privilege + AR setup duty extension |
+| Enum | `CustPriorityTier` (4 values, Standard/Silver/Gold/Platinum) |
+| Extensions | `CustTable.Extension` (+`PriorityTier`, added into the existing extension), `CustTable` form-extension (covers list page too), sales-line CoC class |
+| Table | `CustTierDiscount` (`Tier`, `DiscountPercent`) + SimpleList form |
+| Navigation | setup display menu item + menu-extension entry under **Accounts receivable → Setup** |
+| Security | `CustTierDiscountMaintain` privilege + duty-extension on `CustAutomationSetupMaintain` (the real AR-setup duty) |
 
 **Key takeaways / gotchas**
 - **`get_object_info(form, {searchControl})` resolves the *exact* parent control** before `add-control`. Guessing `TabGeneral` vs `Tab_General` is how form XML gets corrupted; the tool gives you the real name from the live form.
-- **`add-control` is pattern-aware.** Dropping the tier field into a `FieldsAndFieldGroups` sub-pattern is allowed; dropping static text there is rejected — the form stays valid by construction.
-- **This is the scenario to mix models.** The opening label/enum/extension turns are mechanical → **Haiku**. Switch to **Sonnet** for the CoC turn, where price/discount `next` ordering actually matters.
-- **One CoC class, two readers.** The discount logic reads `CustTierDiscount` keyed by `CustTable.PriorityTier` — keep the lookup in the CoC, not duplicated in the form, so the percent lives in one place.
+- **A table extension is additive, not exclusive.** If `CustTable.Extension` already exists (e.g. from another feature touching the same table), add your field into it rather than creating a second one — the bridge won't stop you from creating a conflicting duplicate.
+- **A form scaffold can silently invent fields that don't exist on the table.** The `SimpleList` template added two datasource/grid/quick-filter bindings for fields never defined on `CustTierDiscount`, and `object_patterns(validate)` still reported it pattern-conformant — validate against the *table*, not just the pattern shape, before trusting a scaffold.
+- **Table CoC `next` syntax isn't the same as class CoC.** For `[ExtensionOf(tableStr(...))]` extensions, `next(_fieldId)` is invalid — it must repeat the method name: `next modifiedField(_fieldId)`. Not currently documented in the knowledge base.
+- **Finding the right duty by name often fails; search by privilege instead.** ~20 calls guessing duty names came up empty — `security_info(artifact, privilege=...)`'s reverse "Used in Duties" lookup found the real owning duty in one call.
+- **Pricing engine CoC block re-confirmed.** `PriceDisc.parmPrice` and `SalesLine.calcLineAmount` are `[Hookable(false)]`/`[Wrappable(false)]` in this environment — go straight to `SalesLine.modifiedField` rather than discovering this via a failed build.
+- **`CustTableListPage` is still not a separate form** — it's `CustTable` in grid view, so the two form-extension asks collapse into one.
 
 > **Indicative cost & model**
 > Tool calls **~22–32** · New context **~45–75K** · Output **~12–20K** · Billed total (cached) **~90–160K**
 > **Model: Sonnet 4.6** for the build, **Haiku 4.5** for the discovery/extension turns. The cheapest full-stack scenario here — a good first one to run when you're calibrating your own token numbers.
 >
-> **Measured run** *(one recorded end-to-end run on the `fm-mcp` sandbox; non-token metrics only)* — **Opus 4.8** as the agent. Tool calls **~85** (~60 MCP + ~25 host: read/glob/terminal/grep) · Objects **10, build-clean** (`xppc` 0 errors) · 2 builds (91 s fail → 32 s pass) · 3 env-driven retries. This run landed **~2.5× the estimate**, for two reasons worth calling out because they are exactly the "real metadata pushes back" cases these scenarios exist to surface: (1) a missing `PricingEngine` assembly made the `PriceCur` EDT unresolvable, so the sales-line CoC had to retarget from `PriceDisc.parmPrice` to `SalesLine.modifiedField`; (2) `CustTableListPage` is **not** a separate form in this environment — the list page is the `CustTable` form in grid view — so the two form extensions collapse to one. Token/credit cost was not captured on this run; use the indicative row above for budgeting.
+> **Measured run** *(latest recorded end-to-end run on the `fm-mcp` sandbox — supersedes the earlier run; non-token metrics only)* — **Claude Sonnet 5** as the agent. Tool calls **~150** (~95 MCP + ~55 host) · Objects **9, build-clean** (`xppc` 0 errors, 0 warnings) · 2 builds (1 fail → pass, ~12–18s each). Both of the prior run's environment findings held: the pricing-engine CoC block (retarget to `SalesLine.modifiedField`) and `CustTableListPage` being `CustTable`'s grid view, not a separate form. New this run: a form scaffold silently added two fields that don't exist on `CustTierDiscount` into the grid/quick-filter bindings, passing pattern validation anyway — fixed with a direct XML edit since `replace-code` only reaches X++ method bodies, not form Design/Controls XML. The build's one failure was table-CoC's `next` syntax requiring the method name to be repeated (`next modifiedField(_fieldId)`, not `next(_fieldId)`) — undocumented in the knowledge base, found by grepping a real Microsoft table extension. Cleanup used the file-deletion fallback plus surgical reverts of the two files shared with the earlier scenario (`CustTable.AslExtension`, the AR menu-extension), confirmed via a final clean build that the earlier scenario's own fields/entries were untouched.
 
 ---
 
@@ -295,62 +305,68 @@ management > Inquiries and a view-only security role InventAnalyticsViewer. Walk
 through InventSum/InventTrans structure first so the buckets are correct.
 ```
 
-The diagram below is the **actual tool chain from a recorded run** of this prompt (object names normalized to the generic `InventAnalytics` model / `InventAging` prefix used above). It hit the **most tooling friction of the five scenarios**, including a mid-run session-limit disconnect of the MCP server itself. See the cost box for the measured numbers.
+The diagram below is the **actual tool chain from the latest re-validation run** of this prompt (object names normalized to the generic `InventAnalytics` model / `InventAging` prefix used above). That run found the scenario's objects **already present in the sandbox** from an earlier session — so instead of a from-scratch build, it turned into an inspect-and-repair pass: confirm what's really on disk, re-check the four previously-documented gaps against live XML, and fix what had actually regressed. That's a realistic day-two shape too (an agent picking up someone else's half-finished work), so it's documented as-is rather than re-staged as a clean build. See the cost box for the measured numbers.
 
 ```mermaid
 flowchart TB
-    A["Read eval golden (query+view pattern)<br/>get_object_info class InventTrans x2"] --> B["labels action=create<br/>8 IDs x 3 langs"]
-    B --> C["d365fo_file action=create<br/>query InventAgingQuery + view InventAgingView"]
-    C --> D["d365fo_file action=create data entity InventAgingEntity<br/>+ Edit: staging table doesn't exist → DataManagementEnabled=No"]
-    D --> E["generate_object objectType=report scaffold<br/>InventAgingReport full stack"]
-    E --> F["validate_code references<br/>d365fo_file modify DP: bucket query over InventDim join"]
-    F --> G["session limit hit — MCP server disconnected<br/>~15 ToolSearch retries across several turns until tools re-registered"]
-    G --> H["d365fo_file modify DP<br/>finish processReport() + insertAgingRow helper"]
-    H --> I["generate_object objectType=form x2 — both FAIL<br/>'table not found': can't scaffold a form on a VIEW"]
-    I --> J["object_patterns validate<br/>SimpleList form XML authored by hand, then d365fo_file create via xmlContent"]
-    J --> K["d365fo_file action=create<br/>display menu item + privilege + role"]
-    K --> L["build_d365fo_project<br/>FAIL — scaffold emitted non-existent SysOperationMandatoryAttribute"]
-    L --> M["d365fo_file modify<br/>remove the attribute (generated validate() already enforces mandatory)"]
-    M --> N["build_d365fo_project (async, polled)<br/>PASS — 0 errors, ~15s"]
+    A["get_workspace_info + search InventAging<br/>discover objects already exist from a prior session"] --> B["batch_get_info x10 + search (menu items/privileges/duty)<br/>inspect the full existing chain"]
+    B --> C["get_method Contract.parmInventLocationId<br/>check for SysOperationMandatoryAttribute (finding #3)"]
+    C --> D["search AslInventAgingEntityStaging<br/>check DMF staging table existence (finding #2)"]
+    D --> E["build_d365fo_project (baseline, polled)<br/>PASS — 0 errors, 0 warnings, 52s"]
+    E --> F["get_object_info table InventSum + InventTrans<br/>walk the source structure per the prompt's explicit ask"]
+    F --> G["d365fo_file modify-property data-entity → FAILS (bridge unsupported)<br/>fallback: d365fo_file create overwrite=true, DataManagementEnabled=No"]
+    G --> H["d365fo_file create menu-extension overwrite=true<br/>fix: nest menu items under InquiriesAndReports submenu"]
+    H --> I["generate_object scaffold form dataSource=view<br/>FAIL — 'table not found', reconfirms finding #1 (no form needed by this prompt anyway)"]
+    I --> J["run_bp_check x2 with different targetFilter<br/>byte-identical output — targetFilter is silently ignored"]
+    J --> K["labels create + d365fo_file modify-property Label<br/>fix missing Tmp-table label"]
+    K --> L["build_d365fo_project (final)<br/>PASS — 0 errors, 0 warnings, 26s"]
+    L --> M["security_info coverage + artifact duty<br/>reports 0 privileges/duties/roles for a correctly-wired chain — false negative"]
 ```
 
 **What gets created**
 
 | Layer | Objects |
 |-------|---------|
-| View | `InventAgingView` (4 computed bucket columns over `InventSum`/`InventTrans`) |
-| Data entity | `InventAgingEntity` (public, OData-enabled, staging off) |
-| Report | `InventAgingReport` + TmpTable + Contract + DP + Controller |
-| Navigation | display + output menu items under **Inventory management → Inquiries** |
-| Security | `InventAgingView` privilege (read), `InventAnalyticsViewer` role |
-| Labels | 6 IDs × 3 languages |
+| View | `InventAgingView` (flat passthrough of `InventSum` fields — no computed bucket columns) |
+| Query | `InventAgingQuery` |
+| Data entity | `InventAgingEntity` (public, OData-enabled; DMF staging turned off this run — was pointing at a non-existent staging table) |
+| Report | `InventAgingReport` + Tmp table + Contract + DP + Controller (bucketing logic lives in the DP, off `InventSum.LastUpdDatePhysical`) |
+| Form | `InventAging` (pre-existing from the earlier session; not requested by this prompt, left in place rather than deleted) |
+| Navigation | display + output menu items, re-nested under **Inventory management → Inquiries and reports** this run |
+| Security | 3 privileges, 1 duty (`InventAgingInquire`), 1 role `InventAnalyticsViewer` |
+| Labels | 11 IDs × 3 languages (1 new this run) |
 
 **Key takeaways / gotchas**
-- **Understand the source before bucketing.** `get_object_info(table)` on `InventSum`/`InventTrans` plus `analyze_code(mode=api-usage)` shows how standard code computes financial vs physical dates — get that wrong and every bucket is off by the posting lag.
-- **A data entity over a view, not over tables.** Pointing the entity at `InventAgingView` keeps the bucket logic in one place and exposed identically to OData *and* the report.
-- **Public collection + OData = integration surface.** The agent sets `IsPublic` and the public collection name; verify it with `get_object_info(data-entity)` before consumers bind to it — renaming a public entity later is a breaking change.
-- **Read-only role.** `InventAnalyticsViewer` grants only the view privilege — no maintain entry points — so analytics users can't mutate inventory.
+- **Understand the source before bucketing.** `get_object_info(table)` on `InventSum`/`InventTrans` is the right first move the prompt explicitly asks for — skip it and the bucket dates end up wrong.
+- **A view's computed columns are static SQL — runtime parameters can't reach them.** Confirmed again: `AsOfDate` bucketing has to live in the report's DP class, not the view. In this build the DP buckets off `InventSum.LastUpdDatePhysical` as a proxy, not a live `InventTrans`/`InventDim` join — a reasonable simplification, but note it's not literally "bucket InventTrans by AsOfDate."
+- **`generate_object(objectType=form)` still cannot target a view** (only tables) — "table not found" every time. Not a blocker here since this prompt doesn't ask for a form, but plan around it if a future ask does.
+- **`d365fo_file(modify, operation=modify-property)` doesn't support `objectType=data-entity`.** Falls back to full-XML `create overwrite=true`. Same "some object types can't be property-patched, only whole-file-replaced" pattern seen elsewhere.
+- **Menu-extension submenu targeting has no dedicated operation.** `add-menu-item-to-menu` can't place an item inside a specific submenu (e.g. `InquiriesAndReports`) — same gap documented in scenarios 2–4; fixed here via full-XML overwrite matching a known-good sibling extension.
+- **`run_bp_check`'s `targetFilter`/`targetElementType` are silently ignored.** Two calls with different filters returned byte-identical output including unrelated standard objects — don't rely on it to scope a check to just your objects.
+- **`security_info(coverage)` and the duty/role artifact walker can false-negative on correctly-wired security chains** that weren't created via the bridge in the current session — reported "0 privileges/duties/roles" for a privilege→duty→role chain confirmed correct by direct XML read, and `run_bp_check` independently raised matching false-positive `BPErrorDutyNotCoveredByRole`-class warnings for the same objects. Don't trust either signal without a raw-XML sanity check when the chain predates the session.
 
 > **Indicative cost & model**
 > Tool calls **~28–40** · New context **~60–100K** · Output **~16–26K** · Billed total (cached) **~120–210K**
 > **Model: Sonnet 4.6.** Lots of metadata reading (cheap on Haiku if you split the discovery turns), modest generation. Bump to Opus only if the bucket SQL/computed-column logic gets hairy.
 >
-> **Measured run** *(one recorded end-to-end run on the `fm-mcp` sandbox; non-token metrics only)* — **Opus 4.8** as the agent. Tool calls **~40** (~32 MCP + ~8 host) · Objects **13, build-clean** (`xppc` 0 errors) · 2 builds (88 s fail → 15 s pass) · 8 labels. This scenario hit the **most tooling friction** of the five — four gaps worth flagging: (1) `generate_object(objectType=form)` **cannot target a view** (only tables), so the inquiry form's SimpleList XML was authored directly and validated offline; (2) `generate_object(objectType=data-entity)` enabled DMF staging pointing at a **non-existent staging table** — turned off to match "staging off" (OData/public stays on); (3) the SSRS scaffold emitted a **non-existent `SysOperationMandatoryAttribute`** for the mandatory contract param (the one build error) — removed, since the generated `validate()` already enforces mandatory; (4) the "view with computed buckets" framing isn't realistic — a view's computed columns are static SQL and cannot honor the report's runtime `AsOfDate`, so bucketing correctly lives in the report DP over `InventTrans`+`InventDim`. On the plus side, the data-entity `primaryTable`/`fields` drop bug is gone — the entity came out fully populated (public collection + `ViewMetadata` query). Token/credit cost not captured on this run.
+> **Measured run** *(latest recorded run on the `fm-mcp` sandbox; non-token metrics only)* — agent found the scenario's ~17 objects **already built** from an earlier session and pivoted to inspect+repair rather than fresh creation. Tool calls **~52** (~32 MCP + ~20 host, host-heavy because of raw-XML reads used to cross-check tool output) · 3 `build_d365fo_project` calls, all **0 errors / 0 warnings** (baseline 52 s, final 26 s — no failing build this run, unlike the very first recorded pass) · 1 new label added, 33 label entries total. Of the four previously-documented gaps: **#1 (form can't target a view) reconfirmed**; **#2 (DMF staging pointing at a non-existent table) reconfirmed as a live regression** and fixed again (the doc's earlier claim that this was already resolved did not hold up against the live XML); **#3 (bogus `SysOperationMandatoryAttribute`) confirmed still fixed**, matches the doc; **#4 (view can't hold runtime buckets) confirmed, with a nuance** — the DP buckets off a proxy date field, not a direct `InventTrans`/`InventDim` join as previously described. New findings this run: `modify-property` unsupported for `data-entity`, no submenu-targeting operation for menu extensions, `run_bp_check` target filters are ignored, and `security_info` coverage/artifact lookups can false-negative on pre-existing (non-session) security chains. Net: the underlying objects are healthy and build-clean, but the sandbox's "already done" state going into this run — undisclosed at the start — is itself worth flagging as an eval-harness bookkeeping gap. Token/credit cost not captured on this run.
 
 ---
 
 ## Cost & model summary
 
-| # | Scenario | Shape | Tool calls | Billed total (cached) | Model | Est. cost* |
-|---|----------|-------|-----------:|----------------------:|-------|-----------:|
-| 1 | Equipment Rental | Greenfield module | **126**‡ | **~220K**‡ | **Sonnet 4.6**‡ | **~$2.80**‡ |
-| 2 | Sales credit review + audit | Extend standard posting | 30–42 | 140–230K | **Opus 4.8** | ~$1.3–3.0 |
-| 3 | Vendor certificate compliance | Setup + batch + report | 35–48 | 150–260K | **Sonnet 4.6** | ~$0.9–2.0 |
-| 4 | Customer priority tiers | Lightweight cross-stack | 22–32 | 90–160K | **Sonnet 4.6** / Haiku | ~$0.5–1.1 |
-| 5 | Inventory aging analytics | Data-out / integration | 28–40 | 120–210K | **Sonnet 4.6** | ~$0.7–1.5 |
+All five rows below were re-run in a fresh full-loop validation pass (see the per-scenario "Measured run" boxes above for the detailed findings). Tool-call counts are **measured** from those runs; token/credit figures were **not captured** this pass (the runs tracked object/build outcomes and tool sequences, not per-turn token accounting), so the "Billed total" and "Est. cost" columns remain the original indicative estimates — treat them as directional, not measured, until a run captures actual token usage.
 
-<sub>* End-to-end token cost at the recommended model, prompt caching on (see [What it costs on GitHub Copilot](#what-it-costs-on-github-copilot-pro--business) for the per-model rates and the Copilot AI-Credits breakdown). Ranges are indicative — verify on your own metadata.</sub>
-<sub>‡ Scenario 1 is **measured from one recorded run** (Sonnet 4.6, 126 tool calls, ~182K new + ~38K output context over ~5.15M cached prefix, ≈280 AI credits ≈ $2.80). "~220K" is new context + output for apples-to-apples with the estimate rows. All other rows remain estimates.</sub>
+| # | Scenario | Shape | Tool calls (measured) | Billed total (cached, est.) | Model | Est. cost* |
+|---|----------|-------|-----------:|----------------------:|-------|-----------:|
+| 1 | Equipment Rental | Greenfield module | **~230**‡ (blocked — rolled back, not delivered) | n/a‡ | Sonnet 4.6 | **not delivered**‡ |
+| 2 | Sales credit review + audit | Extend standard posting | **~150** (112 MCP + 38 host) | 140–230K | **Opus 4.8** | ~$1.3–3.0 |
+| 3 | Vendor certificate compliance | Setup + batch + report | **~164** (113 MCP + 51 host) | 150–260K | **Sonnet 4.6** | ~$0.9–2.0 |
+| 4 | Customer priority tiers | Lightweight cross-stack | **~150** (95 MCP + 55 host) | 90–160K | **Sonnet 4.6** / Haiku | ~$0.5–1.1 |
+| 5 | Inventory aging analytics | Data-out / integration (inspect + repair) | **~52** (32 MCP + 20 host) | 120–210K | **Sonnet 4.6** | ~$0.7–1.5 |
+
+<sub>* End-to-end token cost at the recommended model, prompt caching on (see [What it costs on GitHub Copilot](#what-it-costs-on-github-copilot-pro--business) for the per-model rates and the Copilot AI-Credits breakdown). Cost/credit figures are indicative estimates, not measured this pass — verify on your own metadata.</sub>
+<sub>‡ Scenario 1's fresh run **hit a blocking tool defect** (`generate_object`/`d365fo_file` scaffolding a form repeatedly misplaces the `<Methods>` block, silently dropping the datasource's `<Table>` binding) that ~10 remediation attempts could not work around. The agent rolled back all 28 objects + 47 labels rather than leave broken state, so there is no finished deliverable to price — the row is left as a documented failure rather than backfilled with an estimate. Note the measured tool-call counts across all five re-run scenarios (52–230) run noticeably higher than the original pre-measurement estimate ranges (22–48) in this table's earlier version — real agentic runs involve more discovery/fix/verify round-trips than a first-pass guess suggests.</sub>
 
 **How to drive these numbers down**
 - **Turn on prompt caching** (default in Copilot/Claude Code). It is the single biggest lever — the indexed metadata and instruction files get cached across turns.
@@ -391,14 +407,14 @@ Output tokens dominate the bill; cached input (the re-sent conversation prefix e
 
 | # | Scenario | Model | Est. cost | ≈ Credits | Pro $15 budget covers | Business $19 budget covers |
 |---|----------|-------|----------:|----------:|----------------------:|---------------------------:|
-| 1 | Equipment Rental | Sonnet 4.6‡ | **~$2.80**‡ | **~280**‡ | **~5×/mo** | **~7×/mo** |
+| 1 | Equipment Rental | Sonnet 4.6‡ | **not delivered**‡ | n/a‡ | n/a‡ | n/a‡ |
 | 2 | Sales credit review | Opus 4.8† | ~$1.3–3.0 | 130–300 | ~5–11×/mo | ~6–14×/mo |
 | 3 | Vendor certificate compliance | Sonnet 4.6 | ~$0.9–2.0 | 90–200 | ~7–16×/mo | ~9–21×/mo |
 | 4 | Customer priority tiers | Sonnet 4.6 | ~$0.5–1.1 | 50–110 | ~13–30×/mo | ~17–38×/mo |
 | 5 | Inventory aging analytics | Sonnet 4.6 | ~$0.7–1.5 | 70–150 | ~10–21×/mo | ~12–27×/mo |
 
 <sub>† Opus needs **Pro+** ($70 credits/mo) or higher — not base Pro. On Pro/Business run these on Sonnet instead (≈ 0.55× the cost; recompute against the Sonnet rate). "Budget covers" = included monthly credits ÷ midpoint scenario cost, one developer.</sub>
-<sub>‡ Scenario 1 row is **measured from one recorded Sonnet 4.6 run** (≈280 AI credits): "Budget covers" = $15 Pro ÷ 280 ≈ 5×/mo, $19 Business ÷ 280 ≈ 7×/mo. Running it on Opus would land in the original ~200–450-credit band.</sub>
+<sub>‡ Scenario 1's latest re-run hit a blocking tool defect (see the Cost & model summary table above) and rolled back all created objects — there is no finished run to price, so credit/budget figures don't apply. A prior successful pass before this defect was introduced had priced out around ≈280 AI credits (≈$2.80) on Sonnet 4.6; that number is retained in history only and should not be treated as current.</sub>
 
 **What this means in practice**
 - A **base Pro** seat ($10, $15 credits) comfortably handles **~10–25 Sonnet-class full-stack features a month** before any overage — plenty for one developer's steady custom-dev work.
