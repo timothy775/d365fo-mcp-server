@@ -84,45 +84,6 @@ the design.
 
 ---
 
-## Structural schema diet — d365fo_file modify-op params
-
-**Status:** deferred · **Area:** `src/server/mcpServer.ts`, `src/tools/d365foFile.ts` · **Depends on:** eval loop (AGENT_EVAL_LOOP)
-
-**What**
-- `d365fo_file` is ~17 K chars of the ~69 K `tools/list` payload (~25%), mostly
-  because all 25 `[modify]` operations publish their parameters flat in one
-  schema. Move op-specific params into a single `params` object whose exact
-  per-op spec is delivered on demand: a wrong/missing param returns a precise
-  error listing that operation's parameters (error-driven guidance), and/or
-  `get_knowledge` gains a `kind=tool-spec` lookup. Estimated saving: 8–10 K
-  chars (~2–2.5 K tokens) on every session.
-
-**Why deferred**
-- The verbose descriptions exist deliberately — they encode patterns that
-  prevent failed/retried calls (see toolSchemaBudget.test.ts rationale).
-  Removing them from the schema shifts first-call success onto the error
-  messages, which MUST be validated with the usage-example eval scenarios on
-  the dev box before shipping. Description-level trims (2026-07 audit) were
-  taken instead; ratchet is now 70 K.
-
-**Trigger to pick this up**
-- Budget test creeping toward 70 K again (new tools/ops), or eval capacity to
-  run the 5 usage-example scenarios against the restructured schema.
-
-**Sketch**
-- Keep core props (action, operation, objectType, objectName, sourceCode…)
-  flat; add `params: { type: 'object' }` for op-specific values. In the
-  handler, merge `{...args, ...args.params}` before dispatch so existing
-  flat-arg callers keep working (backward compatible). Each modify-op handler
-  already validates required params — upgrade those errors to enumerate the
-  full op parameter spec.
-
-**Risks**
-- Degraded first-call success → more retry round-trips could cost more tokens
-  than the schema saves. Measure with eval before/after; keep a rollback flag.
-
----
-
 ## Tighter IDE integration (VSIX shim)
 
 **Status:** idea · **Area:** new (out-of-repo VS extension) + `src/server` · **Depends on:** —

@@ -24,11 +24,12 @@ import { createXppMcpServer } from '../../src/server/mcpServer';
 const CHARS_PER_TOKEN = 4;
 
 // Ceilings in characters of serialized JSON. Current actuals (2026-07, after
-// the audit description trim): total ≈ 69,158 · d365fo_file ≈ 17,207. Headroom
-// is small on purpose so creep is caught early. The next big cut is structural
-// (modify-op params → error-driven guidance) — see BACKLOG.md.
-const TOTAL_BUDGET = 70_000;
-const LARGEST_TOOL_BUDGET = 17_800; // d365fo_file is the outlier (~25% of total)
+// the structural schema diet moved d365fo_file modify-op params into a single
+// `params` object with error-driven per-op specs — see d365foFileOpSpecs.ts):
+// total ≈ 60,368 · d365fo_file ≈ 8,390 (generate_object ≈ 7,996 is now a close
+// second). Headroom is small on purpose so creep is caught early.
+const TOTAL_BUDGET = 61_200;
+const LARGEST_TOOL_BUDGET = 8_800;
 
 async function getTools(): Promise<Array<{ name: string }>> {
   const ctx: any = { symbolIndex: {}, parser: {} };

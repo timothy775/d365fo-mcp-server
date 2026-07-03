@@ -37,6 +37,7 @@ import {
 } from './validateFormPattern.js';
 import { validateEdtExtensionChange } from '../utils/edtExtensionValidator.js';
 import { lintXppSelect } from '../utils/xppSelectLint.js';
+import { getRequiredParams, renderOpSpec, OP_PARAM_ALIASES } from './d365foFileOpSpecs.js';
 
 /**
  * Decode the standard XML entities (&lt;, &gt;, &apos;, &quot;, &amp;) and normalise
@@ -1575,8 +1576,8 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
             `replace-code requires both 'oldCode' and 'newCode' parameters.\n` +
             `  oldCode: ${args.oldCode ? 'provided' : '⛔ MISSING'}\n` +
             `  newCode: ${args.newCode !== undefined ? 'provided' : '⛔ MISSING'}\n` +
-            `Note: 'sourceCode' is NOT an alias for replace-code — you must use 'oldCode' and 'newCode'.\n` +
-            `For form control override methods, use methodName="ControlName.methodName" (e.g. "PostButton.clicked").`
+            `Note: 'sourceCode' is NOT an alias for replace-code — you must use 'oldCode' and 'newCode'.\n\n` +
+            renderOpSpec('replace-code')
           );
         }
         break;
@@ -1703,40 +1704,13 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
     }
 
     if (!bridgeResult) {
-      const paramHints: Record<string, string[]> = {
-        'add-method': ['methodName', 'sourceCode'],
-        'add-display-method': ['methodName', 'sourceCode'],
-        'add-table-method': ['methodName', 'sourceCode'],
-        'remove-method': ['methodName'],
-        'replace-code': ['oldCode', 'newCode'],
-        'add-field': ['fieldName', 'fieldType'],
-        'modify-field': ['fieldName'],
-        'rename-field': ['fieldName', 'fieldNewName'],
-        'remove-field': ['fieldName'],
-        'replace-all-fields': ['fields'],
-        'add-index': ['indexName', 'indexFields'],
-        'remove-index': ['indexName'],
-        'add-relation': ['relationName', 'relatedTable'],
-        'remove-relation': ['relationName'],
-        'add-field-group': ['fieldGroupName'],
-        'remove-field-group': ['fieldGroupName'],
-        'add-field-to-field-group': ['fieldGroupName', 'fieldName'],
-        'add-control': ['controlName', 'parentControl'],
-        'add-data-source': ['dataSourceName', 'dataSourceTable'],
-        'add-field-modification': ['fieldName'],
-        'add-enum-value': ['enumValueName'],
-        'modify-enum-value': ['enumValueName'],
-        'remove-enum-value': ['enumValueName'],
-        'add-menu-item-to-menu': ['menuItemToAdd'],
-        'modify-property': ['propertyPath', 'propertyValue'],
-      };
-      const required = paramHints[operation] ?? [];
+      // Required params + full per-op specs live in the central registry
+      // (d365foFileOpSpecs.ts) — the published schema only advertises a
+      // free-form `params` object, so this error must carry the whole spec.
+      const required = getRequiredParams(operation);
       // Treat a supplied alias as satisfying the requirement.
-      const aliases: Record<string, string[]> = {
-        sourceCode: ['methodCode'],
-      };
       const isProvided = (p: string) =>
-        (args as any)[p] !== undefined || (aliases[p] ?? []).some(a => (args as any)[a] !== undefined);
+        (args as any)[p] !== undefined || (OP_PARAM_ALIASES[p] ?? []).some(a => (args as any)[a] !== undefined);
       const missing = required.filter(p => !isProvided(p));
 
       // Auto-refresh retry: all required params are present but bridge returned
@@ -1761,7 +1735,8 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
         throw new Error(
           `Bridge operation '${operation}' returned null — required parameters are missing.\n` +
           `Required parameters for '${operation}':\n${[...providedList, ...missingList].join('\n')}\n` +
-          `Provided args: ${Object.keys(args).filter(k => (args as any)[k] !== undefined).join(', ')}`
+          `Provided args: ${Object.keys(args).filter(k => (args as any)[k] !== undefined).join(', ')}\n\n` +
+          renderOpSpec(operation)
         );
       }
 
