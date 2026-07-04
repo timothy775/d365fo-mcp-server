@@ -519,6 +519,42 @@ describe('create_d365fo_file', () => {
     ]);
   });
 
+  it('edt create translates properties.edtType to the bridge\'s BaseType key', async () => {
+    // Regression (eval scenario 1 — Equipment Rental): C# CreateEdt() picks the concrete
+    // AxEdt subclass via `properties.TryGetValue("BaseType", ...)` — a literal, case-sensitive
+    // dictionary lookup. The tool's documented/schema property name is `edtType` (see
+    // suggest_edt / prepare / d365fo_file docs), so it never matched and every bridge-created
+    // EDT silently defaulted to AxEdtString no matter what type was requested. Verified live:
+    // edtType:"Real" + extends:"AmountCur" wrote i:type="AxEdtString" to disk.
+    const createObject = vi.fn(async () => ({
+      success: true,
+      filePath: 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxEdt\\MyDailyRate.xml',
+      api: 'IMetaEdtProvider.Create',
+    }));
+    const ctx = buildContext();
+    (ctx as any).bridge = { isReady: true, metadataAvailable: true, createObject, validateObject: vi.fn(async () => null) };
+
+    const result = await handleCreateD365File(
+      req('create_d365fo_file', {
+        objectType: 'edt',
+        objectName: 'DailyRate',
+        modelName: 'Contoso',
+        packageName: 'Contoso',
+        packagePath: 'K:\\PackagesLocalDirectory',
+        addToProject: false,
+        properties: { label: '@Contoso:DailyRate', extends: 'AmountCur', edtType: 'Real' },
+      }),
+      ctx,
+    );
+
+    expect((result as any).isError).toBeFalsy();
+    expect(createObject).toHaveBeenCalledTimes(1);
+    const sentParams = createObject.mock.calls[0][0];
+    expect(sentParams.properties.BaseType).toBe('Real');
+    expect(sentParams.properties.edtType).toBeUndefined();
+    expect(sentParams.properties.Extends ?? sentParams.properties.extends).toBe('AmountCur');
+  });
+
   it('blocks form-extension create when xmlContent uses the malformed control shape', async () => {
     // Guard: the deserializer-rejecting shape an AI tends to hand-write
     // (AxFormControlExtension / ParentControlName / FormControlExtension-wrapping / AxFormIntControl)

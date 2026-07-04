@@ -4043,6 +4043,18 @@ export async function handleCreateD365File(
           if (props.fields) bridgeParams.fields = props.fields as Record<string, unknown>[];
         }
 
+        // For EDTs: translate the tool's documented `edtType` property to the bridge's
+        // expected `BaseType` key. C# CreateEdt() does `properties.TryGetValue("BaseType", ...)`
+        // — a literal, case-SENSITIVE dictionary lookup — so sending `edtType` (as documented
+        // in the tool schema and as suggest_edt/prepare recommend) never matched, silently
+        // defaulting every bridge-created EDT to AxEdtString regardless of the requested type
+        // (Real, Int, Date, Enum, ...). Confirmed via a live create of an EDT with
+        // edtType:"Real", extends:"AmountCur" — the written XML came back i:type="AxEdtString".
+        if (args.objectType === 'edt' && bridgeParams.properties && 'edtType' in bridgeParams.properties) {
+          const { edtType, ...rest } = bridgeParams.properties;
+          bridgeParams.properties = { ...rest, BaseType: edtType };
+        }
+
         const bridgeResult = await bridgeCreateObject(context.bridge, bridgeParams);
         if (bridgeResult?.success && bridgeResult.filePath) {
           console.error(`[create_d365fo_file] ✅ Created via C# bridge: ${bridgeResult.filePath}`);
