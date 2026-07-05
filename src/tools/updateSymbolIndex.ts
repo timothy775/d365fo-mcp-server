@@ -378,6 +378,136 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
       } else {
         tx();
       }
+    } else if (objectType === 'security-privilege') {
+      // Populate security_privilege_entries so security_info(coverage) and
+      // run_bp_check-adjacent duty/role coverage lookups can see this privilege's
+      // entry points. The single-file indexer previously only inserted a bare
+      // symbols row here (via the generic tx() fallback below), never parsing
+      // <EntryPoints>, so any privilege created/re-indexed via update_symbol_index
+      // in the current session was invisible to security_info(coverage) even
+      // though the underlying XML was correct — a false negative traced to this
+      // gap, not to the XML the create/modify tools produced.
+      const result = await parser.parseSecurityPrivilegeFile(filePath);
+      if (result.success && result.data) {
+        const privData = result.data;
+        symbolIndex.addSymbol({
+          name: privData.name ?? objectName,
+          type: 'security-privilege',
+          filePath,
+          model,
+          description: privData.label,
+        });
+        insertedCount++;
+        symbolIndex.db
+          .prepare(`DELETE FROM security_privilege_entries WHERE privilege_name = ? AND model = ?`)
+          .run(privData.name ?? objectName, model);
+        const insertEntry = symbolIndex.db.prepare(`
+          INSERT OR IGNORE INTO security_privilege_entries
+            (privilege_name, entry_point_name, object_type, access_level, model)
+          VALUES (?, ?, ?, ?, ?)
+        `);
+        for (const ep of privData.entryPoints ?? []) {
+          if (!ep.name) continue;
+          insertEntry.run(privData.name ?? objectName, ep.name, ep.objectType ?? null, ep.accessLevel ?? null, model);
+          insertedCount++;
+        }
+      } else {
+        tx();
+      }
+    } else if (objectType === 'security-duty') {
+      // See security-privilege branch above — same gap, for security_duty_privileges.
+      const result = await parser.parseSecurityDutyFile(filePath);
+      if (result.success && result.data) {
+        const dutyData = result.data;
+        symbolIndex.addSymbol({
+          name: dutyData.name ?? objectName,
+          type: 'security-duty',
+          filePath,
+          model,
+          description: dutyData.label,
+        });
+        insertedCount++;
+        symbolIndex.db
+          .prepare(`DELETE FROM security_duty_privileges WHERE duty_name = ? AND model = ?`)
+          .run(dutyData.name ?? objectName, model);
+        const insertPriv = symbolIndex.db.prepare(`
+          INSERT OR IGNORE INTO security_duty_privileges (duty_name, privilege_name, model)
+          VALUES (?, ?, ?)
+        `);
+        for (const priv of dutyData.privileges ?? []) {
+          insertPriv.run(dutyData.name ?? objectName, priv, model);
+          insertedCount++;
+        }
+      } else {
+        tx();
+      }
+    } else if (objectType === 'security-role') {
+      // See security-privilege branch above — same gap, for security_role_duties.
+      const result = await parser.parseSecurityRoleFile(filePath);
+      if (result.success && result.data) {
+        const roleData = result.data;
+        symbolIndex.addSymbol({
+          name: roleData.name ?? objectName,
+          type: 'security-role',
+          filePath,
+          model,
+          description: roleData.label,
+        });
+        insertedCount++;
+        symbolIndex.db
+          .prepare(`DELETE FROM security_role_duties WHERE role_name = ? AND model = ?`)
+          .run(roleData.name ?? objectName, model);
+        const insertDuty = symbolIndex.db.prepare(`
+          INSERT OR IGNORE INTO security_role_duties (role_name, duty_name, model)
+          VALUES (?, ?, ?)
+        `);
+        for (const duty of roleData.duties ?? []) {
+          insertDuty.run(roleData.name ?? objectName, duty, model);
+          insertedCount++;
+        }
+      } else {
+        tx();
+      }
+    } else if (
+      objectType === 'menu-item-display' ||
+      objectType === 'menu-item-action' ||
+      objectType === 'menu-item-output'
+    ) {
+      // Populate menu_item_targets so security_info(coverage)'s primary lookup
+      // (object -> menu items) works for a menu item indexed in the current
+      // session, not just via its symbols-table fallback path.
+      const itemType = objectType === 'menu-item-display' ? 'display' : objectType === 'menu-item-action' ? 'action' : 'output';
+      const result = await parser.parseMenuItemFile(filePath, itemType);
+      if (result.success && result.data) {
+        const miData = result.data;
+        symbolIndex.addSymbol({
+          name: miData.name ?? objectName,
+          type: objectType,
+          filePath,
+          model,
+          description: miData.label,
+        });
+        insertedCount++;
+        symbolIndex.db
+          .prepare(`DELETE FROM menu_item_targets WHERE menu_item_name = ? AND model = ?`)
+          .run(miData.name ?? objectName, model);
+        symbolIndex.db.prepare(`
+          INSERT INTO menu_item_targets
+            (menu_item_name, menu_item_type, target_object, target_type, security_privilege, label, model)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          miData.name ?? objectName,
+          objectType,
+          miData.targetObject ?? null,
+          miData.targetType ?? null,
+          miData.securityPrivilege ?? null,
+          miData.label ?? null,
+          model,
+        );
+        insertedCount++;
+      } else {
+        tx();
+      }
     } else {
       tx();
     }
