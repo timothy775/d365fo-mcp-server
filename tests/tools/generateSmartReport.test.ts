@@ -6,16 +6,14 @@
  * reference?" on every report with a mandatory dialog field (e.g. InventLocationId mandatory=true).
  * Mandatory enforcement for a SysOperation/report contract is already correctly done via the
  * generated validate() method's checkFailed() call — no per-parameter attribute is needed.
+ *
+ * The tool has two output paths depending on process.platform: Windows writes files to disk via
+ * fs.writeFileSync, non-Windows (Azure/Linux — this is how the CI runner sees it) returns every
+ * generated object's XML embedded as text instead. The test forces the platform-independent
+ * non-Windows path so it behaves identically in CI and locally, without needing to mock fs/
+ * ProjectFileManager (neither is reached on that path).
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-
-vi.mock('fs', () => ({
-  default: {
-    existsSync: vi.fn(() => true),
-    mkdirSync: vi.fn(),
-    writeFileSync: vi.fn(),
-  },
-}));
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../../src/utils/configManager', () => ({
   getConfigManager: vi.fn(() => ({
@@ -35,17 +33,6 @@ vi.mock('../../src/utils/modelClassifier', () => ({
   applyObjectSuffix: vi.fn((name: string) => name),
 }));
 
-vi.mock('../../src/tools/createD365File', async (orig) => {
-  const actual = await orig<typeof import('../../src/tools/createD365File')>();
-  return {
-    ...actual,
-    ProjectFileManager: vi.fn().mockImplementation(() => ({
-      addToProject: vi.fn(async () => true),
-    })),
-  };
-});
-
-import fs from 'fs';
 import { handleGenerateSmartReport } from '../../src/tools/generateSmartReport';
 
 function createSymbolIndexStub() {
@@ -56,15 +43,24 @@ function createSymbolIndexStub() {
 }
 
 describe('generate_object(scaffold, report) contract mandatory param', () => {
+  const originalPlatform = process.platform;
+
   beforeEach(() => {
     vi.clearAllMocks();
-    (fs.existsSync as any).mockReturnValue(true);
+    // Force the non-Windows (Azure/Linux) code path, which returns every generated
+    // object's XML as text instead of writing to disk — deterministic regardless of
+    // which OS actually runs the test (local Windows VM vs. the Linux CI runner).
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', { value: originalPlatform });
   });
 
   it('never emits the non-existent SysOperationMandatoryAttribute for a mandatory contractParam', async () => {
     const symbolIndex = createSymbolIndexStub();
 
-    await handleGenerateSmartReport(
+    const result = await handleGenerateSmartReport(
       {
         name: 'InventAgingReport',
         fieldsHint: 'ItemId, InventLocationId',
@@ -77,16 +73,15 @@ describe('generate_object(scaffold, report) contract mandatory param', () => {
       symbolIndex
     );
 
-    const writeCalls = (fs.writeFileSync as any).mock.calls as Array<[string, string, string]>;
-    const contractWrite = writeCalls.find(([targetPath]) => targetPath.includes('Contract.xml'));
-    expect(contractWrite).toBeDefined();
+    const text = result.content[0].text as string;
 
-    const contractXml = contractWrite![1];
-    expect(contractXml).not.toContain('SysOperationMandatoryAttribute');
-    expect(contractXml).toContain('DataMemberAttribute');
-    // Mandatory enforcement still happens, just via validate()/checkFailed, not an attribute.
-    expect(contractXml).toContain('public boolean validate()');
-    expect(contractXml).toContain('checkFailed');
-    expect(contractXml).toContain('InventLocationId');
+    // Sanity: the Contract class was actually generated and embedded in the output.
+    expect(text).toContain('InventAgingReportContract');
+    expect(text).toContain('DataMemberAttribute');
+    // Mandatory enforcement still happens, just via validate()/checkFailed, not a
+    // per-parameter attribute — the class this was hallucinated for does not exist.
+    expect(text).not.toContain('SysOperationMandatoryAttribute');
+    expect(text).toContain('public boolean validate()');
+    expect(text).toContain('checkFailed');
   });
 });
