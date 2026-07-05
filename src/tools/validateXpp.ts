@@ -230,23 +230,42 @@ function checkFunctionInWhere(code: string): ValidationViolation[] {
   const violations: ValidationViolation[] = [];
   // Scan masked text so function-like tokens inside strings/comments aren't flagged.
   const lines = maskStringsAndComments(code).split('\n');
+  // `inWhere` tracks whether we are still inside an open where-clause carried
+  // over from a previous line (a where clause that wraps onto multiple lines).
+  // It MUST be closed at the clause's actual boundary — the statement
+  // terminator `;` or a block-open `{` — otherwise every function call in the
+  // rest of the file (including unrelated later methods) gets misattributed
+  // to "inside where clause". See regression test for the exact failure mode.
   let inWhere = false;
   lines.forEach((rawLine, i) => {
     const line = rawLine.trimStart();
     if (line.startsWith('//') || line.startsWith('*')) return;
-    // Rough state: entering where means the line contains "where" keyword
-    if (/\bwhere\b/i.test(rawLine)) inWhere = true;
-    if (inWhere && /{/.test(rawLine)) inWhere = false;
-    if (!inWhere) return;
+
+    // Determine where scanning should start on this line: right after the
+    // `where` keyword if one starts a new clause here, or from the top of
+    // the line if we're still inside a clause opened on an earlier line.
+    let scanStart = 0;
+    if (!inWhere) {
+      const whereMatch = /\bwhere\b/i.exec(rawLine);
+      if (!whereMatch) return;
+      inWhere = true;
+      scanStart = whereMatch.index + whereMatch[0].length;
+    }
+
+    // The clause ends at the first statement terminator or block-open at/after
+    // scanStart — only scan up to (not past) that point on this line.
+    const rest = rawLine.slice(scanStart);
+    const endMatch = /[;{]/.exec(rest);
+    const scanSegment = endMatch ? rest.slice(0, endMatch.index) : rest;
 
     // Find function calls (word followed by '(') that are not intrinsics
     const callPattern = /\b([a-zA-Z_]\w*)\s*\(/g;
     let m: RegExpExecArray | null;
-    while ((m = callPattern.exec(rawLine)) !== null) {
+    while ((m = callPattern.exec(scanSegment)) !== null) {
       const fnName = m[1].toLowerCase();
       if (INTRINSIC_FUNCTIONS.has(fnName)) continue;
       // Skip common X++ keywords
-      if (['if', 'while', 'for', 'switch', 'catch', 'str', 'int', 'new'].includes(fnName)) continue;
+      if (['if', 'while', 'for', 'switch', 'catch', 'str', 'int', 'new', 'where'].includes(fnName)) continue;
       violations.push({
         rule: 'SEL005',
         severity: 'warning',
@@ -258,6 +277,8 @@ function checkFunctionInWhere(code: string): ValidationViolation[] {
       });
       break; // one violation per line is enough
     }
+
+    if (endMatch) inWhere = false;
   });
   return violations;
 }
