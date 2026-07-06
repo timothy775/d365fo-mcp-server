@@ -99,7 +99,7 @@ export async function doctorCommand(): Promise<void> {
   // Database (root)
   emit(checkDb(fs.existsSync(paths.rootEnv) ? paths.rootEnv : null, paths.defaultDb, 'Root'));
 
-  // C# bridge — the only write path; Windows-only.
+  // C# bridge: the only write path; Windows-only.
   if (isWindows) {
     emit(fs.existsSync(paths.bridgeExe)
       ? { severity: 'ok', message: 'C# bridge built (D365MetadataBridge.exe)' }

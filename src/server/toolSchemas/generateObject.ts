@@ -23,12 +23,12 @@ export const generateObjectTool = {
           enum: ['pattern', 'scaffold', 'find-methods', 'relation-xpp', 'fields', 'table-relation'],
           description: 'pattern = X++ skeleton; scaffold = whole table/form/report (set objectType); find-methods/relation-xpp/fields/table-relation = X++/XML helpers for an existing table.',
         },
-        // ── shared identity / placement ────────────────────────────────
+        // shared identity / placement
         name: { type: 'string', description: 'REQUIRED. [pattern] element name (extensions: base element; form-datasource/control-extension: the FORM name). [scaffold] object name WITHOUT model prefix.' },
         modelName: { type: 'string', description: 'Model name from .mcp.json (auto-detected if omitted). NEVER use placeholders like "MyModel".' },
         projectPath: { type: 'string', description: '[scaffold] Path to .rnrproj file for model extraction.' },
         solutionPath: { type: 'string', description: '[scaffold] Path to solution directory (alternative to projectPath).' },
-        // ── mode=pattern ───────────────────────────────────────────────
+        // mode=pattern
         pattern: {
           type: 'string',
           enum: [
@@ -58,7 +58,7 @@ export const generateObjectTool = {
           type: 'string',
           description: '[pattern] sysoperation: Service method the Controller calls (default "process").',
         },
-        // ── mode=scaffold ──────────────────────────────────────────────
+        // mode=scaffold
         objectType: {
           type: 'string',
           enum: ['table', 'form', 'report'],
@@ -127,7 +127,7 @@ export const generateObjectTool = {
         designStyle: { type: 'string', description: '[scaffold:report] RDL design pattern: "SimpleList" (default) or "GroupedWithTotals".' },
         copyFrom: { type: 'string', description: '[scaffold] Copy structure from an existing object (forms: prefer cloneFrom).' },
         fieldsHint: { type: 'string', description: '[scaffold:table|report] Comma-separated field names; EDTs auto-suggested from the index. ⚠️ EDTs/enums created this session are not yet indexed — call update_symbol_index first, else those fields default to String255.' },
-        // ── mode=find-methods ──────────────────────────────────────────
+        // mode=find-methods
         keyFields: {
           type: 'array',
           items: { type: 'string' },
@@ -135,10 +135,10 @@ export const generateObjectTool = {
         },
         includeExists: { type: 'boolean', description: '[find-methods] Emit exists() (default true).' },
         includeFindRecId: { type: 'boolean', description: '[find-methods] Emit findRecId() (default true).' },
-        // ── mode=relation-xpp ──────────────────────────────────────────
+        // mode=relation-xpp
         relationName: { type: 'string', description: '[relation-xpp] One relation to convert. Omit = all relations.' },
         style: { type: 'string', enum: ['select', 'query', 'both'], description: '[relation-xpp] select | query | both (default).' },
-        // ── mode=fields (shares the `fields` array above) ───────────────
+        // mode=fields (shares the `fields` array above)
         fieldGroup: { type: 'string', description: '[fields] Field-group name — emits an AxTableFieldGroup listing the new fields.' },
       },
       required: ['mode'],

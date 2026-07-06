@@ -34,7 +34,7 @@
 
 import { z } from 'zod';
 
-// ── Schema ──────────────────────────────────────────────────────────────────
+// Schema
 
 export const validateXppArgsSchema = z.object({
   code: z.string().describe(
@@ -51,7 +51,7 @@ export const validateXppArgsSchema = z.object({
 // Tool registration (name, description, inputSchema) lives inline in
 // src/server/mcpServer.ts - the single source of truth for tool instructions.
 
-// ── Types ────────────────────────────────────────────────────────────────────
+// Types
 
 export interface ValidationViolation {
   rule: string;
@@ -61,7 +61,7 @@ export interface ValidationViolation {
   fix: string;
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// Helpers
 
 function lineNumber(code: string, index: number): number {
   return code.slice(0, index).split('\n').length;
@@ -137,7 +137,7 @@ function matchAll(
   return violations;
 }
 
-// ── Rule implementations ──────────────────────────────────────────────────────
+// Rule implementations
 
 /** SEL001 — today() is deprecated; use DateTimeUtil::getToday(...). */
 function checkTodayDeprecated(code: string): ValidationViolation[] {
@@ -186,7 +186,6 @@ function checkNestedWhileSelect(code: string): ValidationViolation[] {
   const violations: ValidationViolation[] = [];
   const masked = maskStringsAndComments(code);
   const lines = masked.split('\n');
-  // Collect line numbers of all while-select occurrences
   const whileSelectLines: number[] = [];
   lines.forEach((l, i) => {
     if (/\bwhile\s+select\b/i.test(l) && !l.trimStart().startsWith('//')) {
@@ -194,7 +193,7 @@ function checkNestedWhileSelect(code: string): ValidationViolation[] {
     }
   });
   if (whileSelectLines.length >= 2) {
-    // Only flag if there is no "join" keyword nearby (rough heuristic)
+    // Only flag when there's no nearby "join" keyword (rough heuristic)
     const hasJoin = /\bjoin\b/i.test(masked);
     if (!hasJoin) {
       violations.push({
@@ -230,20 +229,15 @@ function checkFunctionInWhere(code: string): ValidationViolation[] {
   const violations: ValidationViolation[] = [];
   // Scan masked text so function-like tokens inside strings/comments aren't flagged.
   const lines = maskStringsAndComments(code).split('\n');
-  // `inWhere` tracks whether we are still inside an open where-clause carried
-  // over from a previous line (a where clause that wraps onto multiple lines).
-  // It MUST be closed at the clause's actual boundary — the statement
-  // terminator `;` or a block-open `{` — otherwise every function call in the
-  // rest of the file (including unrelated later methods) gets misattributed
-  // to "inside where clause". See regression test for the exact failure mode.
+  // `inWhere` tracks an open where-clause spanning multiple lines; it must close at
+  // the clause's actual boundary (`;` or `{`), otherwise later unrelated code gets
+  // misattributed to "inside where clause".
   let inWhere = false;
   lines.forEach((rawLine, i) => {
     const line = rawLine.trimStart();
     if (line.startsWith('//') || line.startsWith('*')) return;
 
-    // Determine where scanning should start on this line: right after the
-    // `where` keyword if one starts a new clause here, or from the top of
-    // the line if we're still inside a clause opened on an earlier line.
+    // Scan starts right after `where` if a new clause starts here, otherwise from line start.
     let scanStart = 0;
     if (!inWhere) {
       const whereMatch = /\bwhere\b/i.exec(rawLine);
@@ -252,8 +246,7 @@ function checkFunctionInWhere(code: string): ValidationViolation[] {
       scanStart = whereMatch.index + whereMatch[0].length;
     }
 
-    // The clause ends at the first statement terminator or block-open at/after
-    // scanStart — only scan up to (not past) that point on this line.
+    // Clause ends at the first `;` or `{` at/after scanStart — don't scan past it.
     const rest = rawLine.slice(scanStart);
     const endMatch = /[;{]/.exec(rest);
     const scanSegment = endMatch ? rest.slice(0, endMatch.index) : rest;
@@ -294,10 +287,9 @@ function checkCocDefaultParam(code: string): ValidationViolation[] {
   if (!/\[ExtensionOf\s*\(/i.test(code)) return violations;
 
   const lines = code.split('\n');
-  // Find method signatures with default param values
   lines.forEach((rawLine, i) => {
     if (rawLine.trimStart().startsWith('//')) return;
-    // Look for method-like lines with a default param: "public Foo method(Type _p = val)"
+    // Method-like line with a default param: "public Foo method(Type _p = val)"
     if (/\b(public|protected|private|internal)\b.*\([^)]*=\s*[^,)]+\)/.test(rawLine)) {
       // Skip constructors (new()) — defaults there are intentional
       if (/\bnew\s*\(/.test(rawLine)) return;
@@ -535,7 +527,7 @@ function checkDevArtifacts(code: string): ValidationViolation[] {
   );
 }
 
-// ── Data-driven property rules (XML002–XML005) ──────────────────────────────
+// Data-driven property rules (XML002-XML005)
 
 /**
  * Provider of mined property statistics — implemented by XppSymbolIndex.
@@ -662,7 +654,7 @@ function checkFieldEdt(code: string, stats?: PropertyStatsProvider): ValidationV
   return violations;
 }
 
-// ── Runner ────────────────────────────────────────────────────────────────────
+// Runner
 
 const XPP_RULES = [
   checkTodayDeprecated,
@@ -717,7 +709,7 @@ function runRules(
   return violations;
 }
 
-// ── Tool handler ──────────────────────────────────────────────────────────────
+// Tool handler
 
 export async function validateXppTool(
   request: any,

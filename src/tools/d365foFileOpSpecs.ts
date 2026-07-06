@@ -2,13 +2,11 @@
  * d365fo_file modify-operation parameter specs — the single source of truth
  * for op-specific parameters (names, types, descriptions).
  *
- * These texts used to live flat in the published d365fo_file inputSchema
- * (~17 K chars of the tools/list payload). They now surface on demand through
- * error-driven guidance: when a modify call misses a required parameter, the
- * error returns the COMPLETE spec for that operation via renderOpSpec().
- * The wire schema only advertises a free-form `params` object
- * (see src/server/toolSchemas/d365foFile.ts); the dispatcher merges
- * `{...args, ...args.params}` so flat calls keep working.
+ * The wire schema only advertises a free-form `params` object (see
+ * src/server/toolSchemas/d365foFile.ts); when a modify call misses a required
+ * parameter, the error returns the COMPLETE spec for that operation via
+ * renderOpSpec(). The dispatcher merges `{...args, ...args.params}` so flat
+ * calls keep working.
  *
  * tests/utils/toolInventory.test.ts guards that every advertised modify param
  * has an entry here; tests/tools/d365foFileOpSpecs.test.ts guards op coverage.
@@ -16,7 +14,7 @@
 
 /** Type + description for a single op parameter, keyed by parameter name. */
 export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description: string }> = {
-  // ── methods ───────────────────────────────────────────────────────────────
+  // methods
   methodName: {
     type: 'string',
     description:
@@ -49,7 +47,7 @@ export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description
     type: 'string',
     description: 'Replacement for the first occurrence of oldCode; pass "" to delete the snippet.',
   },
-  // ── table fields ──────────────────────────────────────────────────────────
+  // table fields
   fieldName: { type: 'string', description: 'Field name.' },
   fieldNewName: {
     type: 'string',
@@ -78,7 +76,7 @@ export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description
       'Always pass type = the base type (String/Real/Integer/Date/DateTime/Int64/GUID/Enum) alongside edt ' +
       'so the correct XML element is used, e.g. { name: "TransQty", edt: "InventQty", type: "Real" }.',
   },
-  // ── properties ────────────────────────────────────────────────────────────
+  // properties
   propertyPath: {
     type: 'string',
     description:
@@ -93,7 +91,7 @@ export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description
       '    Example: propertyPath="TableGroup" propertyValue="Group".',
   },
   propertyValue: { type: 'string', description: 'New property value.' },
-  // ── form controls ─────────────────────────────────────────────────────────
+  // form controls
   controlName: {
     type: 'string',
     description:
@@ -134,7 +132,7 @@ export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description
     description:
       'Base form name for resolving parentControl — pass only when auto-detection from the extension name fails.',
   },
-  // ── table methods / display methods ───────────────────────────────────────
+  // table methods / display methods
   tableMethodType: {
     type: 'string (find | exist | findByRecId | validateWrite | validateDelete | initValue)',
     description:
@@ -150,7 +148,7 @@ export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description
     description:
       'Return EDT (e.g. "Name") — auto-generates a stub with methodName. Omit and pass sourceCode for a custom body.',
   },
-  // ── indexes ───────────────────────────────────────────────────────────────
+  // indexes
   indexName: { type: 'string', description: 'Index name.' },
   indexFields: {
     type: 'array of { fieldName, direction? ("Asc"|"Desc") }',
@@ -159,7 +157,7 @@ export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description
   indexAllowDuplicates: { type: 'boolean', description: 'Allow duplicates (default: false = unique).' },
   indexAlternateKey: { type: 'boolean', description: 'Mark the index as an alternate key.' },
   indexEnabled: { type: 'boolean', description: 'Whether the index is enabled (default: true).' },
-  // ── relations ─────────────────────────────────────────────────────────────
+  // relations
   relationName: { type: 'string', description: 'Relation name.' },
   relatedTable: { type: 'string', description: 'Related (foreign key) table name.' },
   relationConstraints: {
@@ -178,7 +176,7 @@ export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description
     type: 'string',
     description: 'Association | Composition | Aggregation | Link | Specialization (default: Association).',
   },
-  // ── field groups ──────────────────────────────────────────────────────────
+  // field groups
   fieldGroupName: { type: 'string', description: 'Field group name.' },
   fieldGroupFields: {
     type: 'array of string',
@@ -191,7 +189,7 @@ export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description
       'table-extension only: true = extend an existing base-table group (<FieldGroupExtensions>); ' +
       'false = add to a group defined in the extension.',
   },
-  // ── form data sources ─────────────────────────────────────────────────────
+  // form data sources
   dataSourceName: { type: 'string', description: 'Data source reference name (e.g. "MyTable_1").' },
   dataSourceTable: { type: 'string', description: 'Base table for the data source (e.g. "MyTable").' },
   joinSource: {
@@ -204,7 +202,7 @@ export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description
       'Optional join/link type when joinSource is set: InnerJoin | OuterJoin | ExistJoin | NotExistJoin | ' +
       'Delayed | Active | Passive.',
   },
-  // ── enum values ───────────────────────────────────────────────────────────
+  // enum values
   enumValueName: { type: 'string', description: 'Enum value name (e.g. "Approved").' },
   enumValueLabel: { type: 'string', description: 'Label reference (e.g. "@MyModel:Approved").' },
   enumValueHelpText: { type: 'string', description: 'Help-text reference (optional).' },
@@ -213,7 +211,7 @@ export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description
     type: 'string',
     description: 'ISO country/region codes, comma-separated (e.g. "CZ,SK").',
   },
-  // ── menus ─────────────────────────────────────────────────────────────────
+  // menus
   menuItemToAdd: { type: 'string', description: 'Name of the menu item to add (e.g. "MyCustomForm").' },
   menuItemToAddType: {
     type: 'string (display | action | output)',

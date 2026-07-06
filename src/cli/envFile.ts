@@ -59,7 +59,7 @@ export function missingVars(exampleContent: string, envContent: string): { name:
   return missing;
 }
 
-// ── File-backed wrappers ─────────────────────────────────────────────────────
+// File-backed wrappers
 
 export function readEnvValue(envFile: string, key: string): string | null {
   if (!fs.existsSync(envFile)) return null;

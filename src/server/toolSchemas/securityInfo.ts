@@ -18,7 +18,7 @@ export const securityInfoTool = {
           enum: ['artifact', 'coverage'],
           description: 'artifact = look up a named privilege/duty/role; coverage = who can access an object.',
         },
-        // ── mode=artifact ──────────────────────────────────────────────
+        // mode=artifact
         name: { type: 'string', description: '[artifact] REQUIRED. Name of the security privilege, duty, or role' },
         artifactType: {
           type: 'string',
@@ -26,7 +26,7 @@ export const securityInfoTool = {
           description: '[artifact] REQUIRED. Type of security artifact to look up',
         },
         includeChain: { type: 'boolean', description: '[artifact] Walk the full hierarchy (default: true)', default: true },
-        // ── mode=coverage ──────────────────────────────────────────────
+        // mode=coverage
         objectName: { type: 'string', description: '[coverage] REQUIRED. Name of the form, table, class, or menu item' },
         objectType: {
           type: 'string',

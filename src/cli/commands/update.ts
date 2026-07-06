@@ -29,8 +29,7 @@ export async function updateCommand(opts: { yes?: boolean }): Promise<void> {
     }
   }
 
-  // Rebuild the bridge only where it was built before: a missing exe means
-  // this install never needed writes (or is not a D365FO VM at all).
+  // Only rebuild the bridge if it was built before — a missing exe means this install never needed writes.
   if (isWindows && fs.existsSync(paths.bridgeExe)) {
     const rebuild = opts.yes || await askConfirm('Rebuild the C# bridge (recommended after a D365FO version upgrade)?');
     if (rebuild) {

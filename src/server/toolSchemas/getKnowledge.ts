@@ -18,7 +18,7 @@ export const getKnowledgeTool = {
           enum: ['knowledge', 'error'],
           description: 'knowledge = look up an X++ topic/rule; error = diagnose an error message.',
         },
-        // ── kind=knowledge ─────────────────────────────────────────────
+        // kind=knowledge
         topic: {
           type: 'string',
           description:
@@ -32,7 +32,7 @@ export const getKnowledgeTool = {
           default: 'concise',
           description: '[knowledge] concise = quick reference (default), detailed = full explanation with code examples',
         },
-        // ── kind=error ─────────────────────────────────────────────────
+        // kind=error
         errorText: {
           type: 'string',
           description: '[error] REQUIRED. Full error message text as displayed in the X++ compiler or event log',
@@ -42,9 +42,7 @@ export const getKnowledgeTool = {
           description: '[error] Optional error code (e.g. SYS10028, CSUV1, BPUpgradeCodeToday)',
         },
       },
-      // kind is optional: getKnowledgeTool infers it from topic (→ knowledge)
-      // or errorText (→ error). Marking it required made clients pre-reject
-      // calls that passed only `topic`.
+      // kind is optional: inferred from topic (→ knowledge) or errorText (→ error).
       required: [],
     },
   };

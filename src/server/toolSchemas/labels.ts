@@ -21,7 +21,7 @@ export const labelsTool = {
           enum: ['search', 'info', 'create', 'update', 'rename', 'list', 'list-files'],
           description: 'Label operation to perform. "list"/"list-files" are aliases of "info" (lists label files).',
         },
-        // ── shared filters ─────────────────────────────────────────────
+        // shared filters
         model: {
           type: 'string',
           description: '[search|info|create|update|rename] Model that owns the label file (e.g. ContosoExt).',
@@ -38,17 +38,17 @@ export const labelsTool = {
           type: 'number',
           description: '[search] Maximum number of results (default 30).',
         },
-        // ── action=search ──────────────────────────────────────────────
+        // action=search
         query: {
           type: 'string',
           description: '[search] REQUIRED. Search text — matches label ID, text and developer comment.',
         },
-        // ── action=info ────────────────────────────────────────────────
+        // action=info
         labelId: {
           type: 'string',
           description: '[info] Exact label ID. Omit for action=info to list available label files for the model.',
         },
-        // ── action=create ──────────────────────────────────────────────
+        // action=create
         labels: {
           type: 'array',
           description:
@@ -129,7 +129,7 @@ export const labelsTool = {
           items: { type: 'string' },
           description: '[create] Restrict which language .label.txt files are written (e.g. ["en-US"]). Omitted = every language folder present in the model.',
         },
-        // ── action=rename ──────────────────────────────────────────────
+        // action=rename
         oldLabelId: {
           type: 'string',
           description: '[rename] REQUIRED. Current label ID (e.g. MyOldField).',
@@ -147,7 +147,7 @@ export const labelsTool = {
           type: 'boolean',
           description: '[rename] Preview changes without writing anything (default: false). Use this first!',
         },
-        // ── shared write knob ──────────────────────────────────────────
+        // shared write knob
         updateIndex: {
           type: 'boolean',
           description: '[create|rename] Update the MCP label index after writing (default: true).',

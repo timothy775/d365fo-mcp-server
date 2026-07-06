@@ -67,7 +67,7 @@ export async function indexCommand(instanceName: string | undefined, opts: { all
     // Fully non-interactive: no name + --yes targets the root server.
     targets = [rootTarget()];
   } else if (!instanceName && listInstances().length > 0) {
-    // Interactive: offer "all instances" like rebuild-instance.ps1 does.
+    // Interactive: offer "all instances" as a choice alongside a single target.
     const choice = await askSelect('Rebuild which index?', [
       { value: '__pick__', label: 'Choose a single target…' },
       { value: '__all__', label: 'All instances' },

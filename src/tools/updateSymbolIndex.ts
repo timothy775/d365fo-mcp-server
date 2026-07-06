@@ -86,11 +86,8 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
   try {
     const { symbolIndex } = context;
 
-    // ── REFRESH MODE: no filePath ───────────────────────────────────────────
-    // Pick up objects created this session that the caller can't point a file at
-    // (e.g. bridge createObject results) by refreshing the C# bridge provider and
-    // dropping workspace caches. Lighter than a full reindex; per-object SQLite
-    // indexing still needs an explicit filePath.
+    // Refresh mode (no filePath): refreshes the bridge provider and drops workspace
+    // caches, lighter than a full reindex. Per-object SQLite indexing still needs filePath.
     if (!filePath || (typeof filePath === 'string' && filePath.trim().length === 0)) {
       context.workspaceScanner?.invalidate?.();
       let bridgeNote = 'Bridge provider not available (skipped).';
@@ -126,7 +123,7 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
     const aotFolder = parts.find((p: string) => p.toLowerCase() in AOT_FOLDER_TYPE_MAP) ?? '';
     const objectType: XppSymbol['type'] = AOT_FOLDER_TYPE_MAP[aotFolder.toLowerCase()] ?? 'class';
 
-    // ── FILE DELETED: clean up stale index entries ──────────────────────────
+    // File deleted: clean up stale index entries
     if (!fs.existsSync(filePath)) {
       console.error(`[update_symbol_index] File deleted — cleaning up stale entries for "${objectName}"`);
 
@@ -157,7 +154,7 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
       };
     }
 
-    // ── FILE EXISTS: re-index ───────────────────────────────────────────────
+    // File exists: re-index
     const model = extractModelFromPath(filePath) ?? 'Unknown';
 
     // Label files are indexed in labels DB (not symbols DB).
@@ -294,17 +291,9 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
           });
           insertedCount++;
           for (const field of tableData.fields ?? []) {
-            // Store the field's actual EDT/EnumType as its signature, not the bare
-            // i:type-derived base type (String/Real/Enum/...). Consumers such as
-            // modifyD365File.ts's resolveFieldEdt() (used by add-table-method to
-            // generate find()/exist() parameter types) read this column expecting
-            // an X++-usable type name. A base-type keyword is never a valid X++
-            // parameter type, so storing it here silently broke EDT resolution for
-            // every table indexed through this incremental (same-session) path —
-            // the caller's base-type-keyword guard then fell back to the bare field
-            // name, which is only coincidentally correct when the field name and
-            // its EDT are identical (never true once a model prefix is auto-applied
-            // to the EDT but not the field, e.g. field "ItemId" + EDT "Contoso_ItemId").
+            // Store the field's EDT/EnumType as its signature, not the bare base type
+            // (String/Real/Enum/...) — consumers like resolveFieldEdt() in
+            // modifyD365File.ts need an X++-usable type name here.
             symbolIndex.addSymbol({
               name: field.name,
               type: 'field',
@@ -334,9 +323,7 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
         });
         insertedCount++;
         // Also populate edt_metadata so scaffolding (resolveEdtBaseType / resolveBestEdt)
-        // can resolve this EDT's base type and relation. The single-file indexer
-        // previously skipped this table, so a same-session EDT never resolved its base
-        // type and its fields defaulted to AxTableFieldString.
+        // can resolve this EDT's base type and relation.
         try {
           symbolIndex.db
             .prepare(`DELETE FROM edt_metadata WHERE edt_name = ? AND model = ?`)
@@ -379,14 +366,8 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
         tx();
       }
     } else if (objectType === 'security-privilege') {
-      // Populate security_privilege_entries so security_info(coverage) and
-      // run_bp_check-adjacent duty/role coverage lookups can see this privilege's
-      // entry points. The single-file indexer previously only inserted a bare
-      // symbols row here (via the generic tx() fallback below), never parsing
-      // <EntryPoints>, so any privilege created/re-indexed via update_symbol_index
-      // in the current session was invisible to security_info(coverage) even
-      // though the underlying XML was correct — a false negative traced to this
-      // gap, not to the XML the create/modify tools produced.
+      // Populate security_privilege_entries so security_info(coverage) can see
+      // this privilege's entry points.
       const result = await parser.parseSecurityPrivilegeFile(filePath);
       if (result.success && result.data) {
         const privData = result.data;
@@ -415,7 +396,7 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
         tx();
       }
     } else if (objectType === 'security-duty') {
-      // See security-privilege branch above — same gap, for security_duty_privileges.
+      // Populates security_duty_privileges — see security-privilege branch above.
       const result = await parser.parseSecurityDutyFile(filePath);
       if (result.success && result.data) {
         const dutyData = result.data;
@@ -442,7 +423,7 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
         tx();
       }
     } else if (objectType === 'security-role') {
-      // See security-privilege branch above — same gap, for security_role_duties.
+      // Populates security_role_duties — see security-privilege branch above.
       const result = await parser.parseSecurityRoleFile(filePath);
       if (result.success && result.data) {
         const roleData = result.data;
@@ -473,9 +454,8 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
       objectType === 'menu-item-action' ||
       objectType === 'menu-item-output'
     ) {
-      // Populate menu_item_targets so security_info(coverage)'s primary lookup
-      // (object -> menu items) works for a menu item indexed in the current
-      // session, not just via its symbols-table fallback path.
+      // Populate menu_item_targets so security_info(coverage)'s object -> menu
+      // items lookup works for this menu item.
       const itemType = objectType === 'menu-item-display' ? 'display' : objectType === 'menu-item-action' ? 'action' : 'output';
       const result = await parser.parseMenuItemFile(filePath, itemType);
       if (result.success && result.data) {

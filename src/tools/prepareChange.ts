@@ -25,7 +25,7 @@ import { tryBridgeCocExtensions } from '../bridge/bridgeAdapter.js';
 import { getConfigManager } from '../utils/configManager.js';
 import { rankContext, renderRankedContext } from '../workspace/contextRanker.js';
 
-// ── Schema ────────────────────────────────────────────────────────────────────
+// Schema
 
 export const prepareChangeArgsSchema = z.object({
   goal: z.string().describe(
@@ -52,7 +52,7 @@ export const prepareChangeArgsSchema = z.object({
   ),
 });
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// Helpers
 
 /** Resolve object type from the symbol index. */
 async function resolveObjectType(
@@ -250,7 +250,7 @@ async function fetchPatterns(
   return '(no similar patterns found in index)';
 }
 
-// ── Tool handler ──────────────────────────────────────────────────────────────
+// Tool handler
 
 export async function prepareChangeTool(request: any, context: XppServerContext): Promise<any> {
   const raw = request?.params?.arguments ?? request;
@@ -329,7 +329,7 @@ export async function prepareChangeTool(request: any, context: XppServerContext)
   lines.push(patternText);
   lines.push('');
 
-  // Ranked neighborhood: goal-driven, anchored on the target object. Best-effort.
+  // Ranked neighborhood, anchored on the target object; additive, best-effort.
   try {
     const ranked = rankContext(context, {
       intent: `${goal} ${objectName} ${methodName ?? ''}`,
@@ -338,7 +338,7 @@ export async function prepareChangeTool(request: any, context: XppServerContext)
     lines.push(...renderRankedContext(ranked));
     lines.push('');
   } catch {
-    // Ranked context is additive — omit on failure.
+    // omit on failure
   }
 
   if (namingText !== null) {

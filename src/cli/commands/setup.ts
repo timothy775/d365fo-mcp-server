@@ -162,7 +162,7 @@ export async function setupCommand(): Promise<void> {
     { value: 'azure', label: 'A — Azure client', hint: 'read-only connection to a team server; no local install' },
   ]);
 
-  // ── A: nothing to install ─────────────────────────────────────────────────
+  // A: nothing to install
   if (scenario === 'azure') {
     const url = await askText({ message: 'Azure server URL', placeholder: 'https://your-server.azurewebsites.net/mcp/', required: true });
     mcpJsonNote({ 'd365fo-mcp-tools': { url } });
@@ -171,7 +171,7 @@ export async function setupCommand(): Promise<void> {
     return;
   }
 
-  // ── Everything else needs the local clone installed and built ────────────
+  // Everything else needs the local clone installed and built
   if (!await ensureInstalledAndBuilt()) { process.exitCode = 1; return; }
   if (!await maybeBuildBridge(scenario)) { process.exitCode = 1; return; }
 
@@ -198,7 +198,7 @@ export async function setupCommand(): Promise<void> {
     return;
   }
 
-  // ── C / D / E: local index setups ─────────────────────────────────────────
+  // C / D / E: local index setups
   const port = await configureRootEnv(scenario);
   if (!await maybeBuildIndex()) { process.exitCode = 1; return; }
 

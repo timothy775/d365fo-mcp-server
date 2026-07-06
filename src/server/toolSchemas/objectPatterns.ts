@@ -21,19 +21,19 @@ export const objectPatternsTool = {
           enum: ['table', 'form'],
           description: 'table = table field/index/relation patterns; form = form-pattern toolkit (set action). Optional — inferred from the other params (action/pattern/xml/formName → form; tableGroup → table). ⚠️ This is NOT a free-form "pattern type": a concept like "number-sequence"/"SysOperation" belongs to get_knowledge, not here.',
         },
-        // ── domain=table ───────────────────────────────────────────────
+        // domain=table
         tableGroup: {
           type: 'string',
           enum: ['Main', 'Transaction', 'Parameter', 'Group', 'Reference', 'Miscellaneous', 'WorksheetHeader', 'WorksheetLine'],
           description: '[table] Table group type to analyze (choose one).',
         },
-        // ── domain=form ────────────────────────────────────────────────
+        // domain=form
         action: {
           type: 'string',
           enum: ['analyze', 'validate', 'spec', 'repair'],
           description: '[form] Which form-pattern operation to run. repair = auto-fill missing required controls.',
         },
-        // ── domain=form, action=analyze ────────────────────────────────
+        // domain=form, action=analyze
         formPattern: {
           type: 'string',
           enum: ['DetailsTransaction', 'ListPage', 'SimpleList', 'SimpleListDetails', 'Dialog', 'DropDialog', 'FormPart', 'Lookup'],
@@ -80,12 +80,12 @@ export const objectPatternsTool = {
           description: '[analyze] Maximum number of pattern examples (default: 10)',
           default: 10,
         },
-        // ── action=spec ────────────────────────────────────────────────
+        // action=spec
         pattern: {
           type: 'string',
           description: '[spec] REQUIRED. Pattern name (id, xmlName, or alias) — e.g. "SimpleList", "DetailsMaster", or a sub-pattern like "FieldsFieldGroups".',
         },
-        // ── action=validate ────────────────────────────────────────────
+        // action=validate
         xml: {
           type: 'string',
           description: '[validate] Complete AxForm XML to validate. Provide this OR formName/filePath.',
@@ -99,9 +99,7 @@ export const objectPatternsTool = {
           description: '[form/validate] Explicit path to an AxForm XML file (e.g. a freshly created form not yet indexed).',
         },
       },
-      // domain is optional: objectPatternsTool infers it from the other
-      // params (and accepts the `patternType` alias). Marking it required
-      // here made clients pre-reject otherwise-valid calls.
+      // domain is optional: inferred from other params (also accepts `patternType` alias).
       required: [],
     },
   };

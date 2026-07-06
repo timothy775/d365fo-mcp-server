@@ -21,8 +21,6 @@ import { resolveObjectPrefix, applyObjectPrefix } from '../utils/modelClassifier
 import { rankContext, renderRankedContext } from '../workspace/contextRanker.js';
 import { RESERVED_SYSTEM_FIELD_NAMES } from './generateSmartTable.js';
 
-// ── Schema ────────────────────────────────────────────────────────────────────
-
 export const prepareCreateArgsSchema = z.object({
   goal: z.string().describe(
     'One-sentence description of what the new object is for. ' +
@@ -48,7 +46,7 @@ export const prepareCreateArgsSchema = z.object({
   ),
 });
 
-// ── Lookups (all index-only, run in parallel) ────────────────────────────────
+// Lookups below are all index-only, run in parallel.
 
 /** Exact + prefixed collision check. */
 function checkCollisions(
@@ -130,9 +128,7 @@ function suggestEdtsForFields(
 ): string {
   const lines: string[] = [];
 
-  // Warn about reserved system field names so the agent catches the issue before
-  // any generation attempt. Adding e.g. a "CreatedDateTime" custom field causes a
-  // compiler error: "Invalid field name; 'X' is reserved for system fields."
+  // Custom fields using reserved system field names fail compilation
   const reservedHits = fieldsHint.filter(f => RESERVED_SYSTEM_FIELD_NAMES.has(f.toLowerCase()));
   if (reservedHits.length > 0) {
     lines.push(
@@ -213,8 +209,6 @@ function minedPropertyDefaults(objectType: string, context: XppServerContext): s
   return '(no mined statistics — run build-database to mine standard models)';
 }
 
-// ── Tool handler ──────────────────────────────────────────────────────────────
-
 export async function prepareCreateTool(request: any, context: XppServerContext): Promise<any> {
   const raw = request?.params?.arguments ?? request;
   const parsed = prepareCreateArgsSchema.safeParse(raw);
@@ -270,8 +264,7 @@ export async function prepareCreateTool(request: any, context: XppServerContext)
     lines.push('### Property defaults _(mined from standard models)_', propertyDefaults, '');
   }
 
-  // Ranked neighborhood: surface existing code relevant to the goal so the new
-  // object reuses real types/patterns instead of invented ones. Best-effort.
+  // Surface existing code relevant to the goal; best-effort, omit on failure
   try {
     const ranked = rankContext(context, {
       intent: `${goal} ${objectName} ${(fieldsHint ?? []).join(' ')}`,

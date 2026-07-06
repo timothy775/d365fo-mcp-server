@@ -14,7 +14,7 @@ export interface MethodStub {
   source: string;
 }
 
-// ── Form-level stubs ─────────────────────────────────────────────────────────
+// Form-level stubs
 
 const FORM_INIT: MethodStub = {
   name: 'init',
@@ -51,7 +51,7 @@ const FORM_CLOSE_OK: MethodStub = {
     }`,
 };
 
-// ── Datasource-level stubs ───────────────────────────────────────────────────
+// Datasource-level stubs
 
 const DS_INIT_VALUE: MethodStub = {
   name: 'initValue',
@@ -99,7 +99,7 @@ const LINES_INIT_VALUE = (headerDsName: string): MethodStub => ({
         }`,
 });
 
-// ── Per-pattern selection ────────────────────────────────────────────────────
+// Per-pattern selection
 
 export interface PatternMethodStubs {
   formMethods: MethodStub[];
@@ -169,7 +169,7 @@ export function methodStubsForPattern(
   }
 }
 
-// ── String-level injection into AxForm XML ───────────────────────────────────
+// String-level injection into AxForm XML
 
 function methodXml(stub: MethodStub, indent: string): string {
   return (

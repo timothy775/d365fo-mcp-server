@@ -210,7 +210,7 @@ export async function normalizeAotXml(
     for (const child of children) walk(child, rootTag, out, matchers);
   }
 
-  // Return a key-sorted map for stable rendering/diffing.
+  // Key-sorted for stable diffing.
   return new Map([...out.entries()].sort((a, b) => a[0].localeCompare(b[0])));
 }
 

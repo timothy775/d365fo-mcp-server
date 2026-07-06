@@ -78,13 +78,10 @@ function startsUnder(child: string, parent: string): boolean {
  * True when `child` is equal to or nested under `parent`, comparing BOTH the
  * lexical (as-given) and realpath (symlink-resolved) forms of each side.
  *
- * Why both: a D365FO model directory is commonly a symlink — e.g.
- * `…/PackagesLocalDirectory/<Model>` → a repo checkout. A file reached through
- * that symlink is legitimately "under" the configured PackagesLocalDirectory
- * root even though its realpath lands in the repo tree (and vice-versa). A
- * realpath-only comparison wrongly rejects it ("Refusing to write outside
- * configured roots"). `..` traversal is still neutralised by path.resolve in
- * both forms, so this does not weaken traversal protection.
+ * A D365FO model directory is commonly a symlink (e.g.
+ * `…/PackagesLocalDirectory/<Model>` → a repo checkout), so a realpath-only
+ * comparison would wrongly reject a legitimate path reached through it.
+ * `..` traversal is still neutralised by path.resolve in both forms.
  */
 function isUnder(child: string, parent: string): boolean {
   if (!parent) return false;
@@ -102,32 +99,26 @@ async function getAllowedRoots(extraRoots?: (string | null | undefined)[]): Prom
   const cfg = getConfigManager();
   await cfg.ensureLoaded();
   const roots = new Set<string>();
-  // Store the lexical (as-configured) form so containment can compare a file's
-  // as-given path against it; the realpath form is derived per-comparison.
+  // Store roots in lexical (as-configured) form; realpath form is derived per-comparison.
   const add = (r: string | null | undefined) => { if (r && r.trim()) roots.add(lexicalNorm(r)); };
 
   add(cfg.getPackagePath());
   try { add(await cfg.getCustomPackagesPath()); } catch { /* optional */ }
   try { add(await cfg.getMicrosoftPackagesPath()); } catch { /* optional */ }
 
-  // Caller-supplied roots (e.g. the `packagePath` tool param pointing at a repo
-  // checkout outside PackagesLocalDirectory). These are operator/agent-declared
-  // metadata roots and carry the same trust as a configured root; the canonical
-  // AOT-shape and model-hint checks below still apply to anything under them.
+  // Caller-supplied roots (e.g. `packagePath` pointing at a repo checkout outside
+  // PackagesLocalDirectory) carry the same trust as a configured root; the
+  // canonical AOT-shape and model-hint checks below still apply to them.
   for (const r of extraRoots ?? []) add(r);
 
-  // Fallback only if nothing was configured — prevents writing to unrelated drives
-  // when config is silently missing (better to error out than guess).
+  // Fallback only if nothing was configured — prevents writing to unrelated
+  // drives when config is silently missing.
   if (roots.size === 0) add(fallbackPackagePath());
 
-  // Broaden any *package-level* root up to its PackagesLocalDirectory base. An
-  // explicit context.packagePath may point at a single package (e.g.
-  // …/PackagesLocalDirectory/ApplicationSuite), but a custom object commonly
-  // lives in a sibling package under the same PLD. Without this, the file is
-  // found on disk yet rejected by containment because it sits beside — not
-  // under — the configured root. The PLD base IS the legitimate D365FO write
-  // boundary; the canonical-AOT-shape and standard-model guards downstream
-  // still block writes into Microsoft-owned models.
+  // Broaden any package-level root up to its PackagesLocalDirectory base: a
+  // custom object commonly lives in a sibling package under the same PLD as an
+  // explicit single-package root. The canonical-AOT-shape and standard-model
+  // guards downstream still block writes into Microsoft-owned models.
   for (const r of [...roots]) {
     const m = r.match(/^(.*\/PackagesLocalDirectory)(?:\/|$)/i);
     if (m && m[1] !== r) roots.add(m[1]);
@@ -156,11 +147,9 @@ export async function assertWritePathAllowed(
     return { ok: false, reason: `filePath must be absolute: "${filePath}"` };
   }
 
-  // Compute both forms of the file path up-front. The lexical form preserves the
-  // as-given path (e.g. reached through a model-dir symlink under the allowed
-  // root); the realpath form is where it physically lands. Containment accepts
-  // either, but the AOT-shape check below must slice with the SAME form that
-  // matched — so we carry both through instead of pre-collapsing to realpath.
+  // Containment accepts either the lexical (as-given) or realpath form of the
+  // file path; the AOT-shape check below must slice with the SAME form that
+  // matched, so both are carried through instead of pre-collapsing to realpath.
   const fileLex = lexicalNorm(filePath);
   const fileReal = realNorm(filePath);
 
@@ -183,9 +172,8 @@ export async function assertWritePathAllowed(
   }
   if (!matchedRoot) {
     // When the path still has the canonical <…>/<Package>/<Model>/Ax<Type>/<File>
-    // shape, the would-be package root is everything above <Package>. Surfacing
-    // the exact value turns a generic "configure a root" into a copy-paste fix —
-    // this is the common repo-checkout case (metadata outside PackagesLocalDirectory).
+    // shape, the would-be package root is everything above <Package> — surface it
+    // as a copy-paste suggestion (common case: metadata outside PackagesLocalDirectory).
     const segs = canonical.split('/').filter(Boolean);
     const axIdx = segs.findIndex(s => /^Ax[A-Z]/.test(s));
     const derivedRoot =
@@ -200,9 +188,8 @@ export async function assertWritePathAllowed(
       ok: false,
       reason:
         `Refusing to write outside configured D365FO package roots.\n` +
-        // Show the *normalized* path (forward slashes, the form actually compared)
-        // so the mismatch is apples-to-apples — the raw input slashes are irrelevant,
-        // comparison is case-insensitive with separators normalized.
+        // Normalized path shown (forward slashes) — comparison is case-insensitive
+        // with separators normalized, so raw input slashes are irrelevant.
         `  resolved path: ${canonical}\n` +
         `  allowed roots:\n` +
         (roots.length ? roots.map(r => `    - ${r}`).join('\n') : '    (none configured)') + '\n' +
@@ -279,7 +266,7 @@ export async function assertReadRootAllowed(dirPath: string): Promise<PathContai
     return { ok: false, reason: `dirPath must be absolute: "${dirPath}"` };
   }
 
-  // Pass the raw dirPath (not pre-realpath'd) so isUnder can match it lexically
+  // dirPath is passed raw (not pre-realpath'd) so isUnder can match it lexically
   // against an allowed root reached through a model-dir symlink.
   const roots = await getAllowedRoots();
   const matchedRoot = roots.find(r => isUnder(dirPath, r));

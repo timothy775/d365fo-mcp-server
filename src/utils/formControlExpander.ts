@@ -1,26 +1,22 @@
 /**
  * Deterministic form control expander.
  *
- * Ports the idea behind TRUDUtils "Form Template Control Builder": instead of
- * cloning a reference form or hand-writing per-pattern XML, walk the curated
- * form-pattern catalog (the SAME data the validator enforces) and emit the
- * required control skeleton directly. Because generation and validation share
- * one source of truth, the output is structurally pattern-correct by
- * construction — every `required`/`oneOrMore` container the pattern mandates is
- * present, in spec order, with the pattern's expected container properties.
+ * Walks the curated form-pattern catalog (the SAME data the validator enforces)
+ * and emits the required control skeleton directly, instead of cloning a
+ * reference form or hand-writing per-pattern XML. Because generation and
+ * validation share one source of truth, the output is structurally
+ * pattern-correct by construction — every `required`/`oneOrMore` container the
+ * pattern mandates is present, in spec order, with the pattern's expected
+ * container properties.
  *
  * Scope & safety:
- *   - This closes the long-tail gap where `FormPatternTemplates` has no
- *     hand-written template for a pattern and silently degrades it to
- *     SimpleList. For those patterns the expander now emits the correct
- *     structure instead.
+ *   - Covers patterns that have no hand-written `FormPatternTemplates` entry
+ *     (which would otherwise silently degrade to SimpleList).
  *   - `requiresSubPattern` containers are emitted WITHOUT a declared sub-pattern
- *     (the validator treats that as an FP006 *warning*, never an error), keeping
- *     the output guaranteed error-free. Sub-pattern enrichment can be layered on
- *     later without changing callers.
- *   - The caller (generateSmartForm) still self-tests the result against
- *     validateFormPatternXml and falls back to the proven templates on any
- *     error — so the expander can never regress existing behaviour.
+ *     (an FP006 warning, never an error), keeping the output guaranteed
+ *     error-free. Sub-pattern enrichment can be layered on later.
+ *   - The caller (generateSmartForm) self-tests the result against
+ *     validateFormPatternXml and falls back to the proven templates on error.
  *
  * Indentation is intentionally simple: both the pattern validator (xml2js) and
  * the on-write normalizer (normalizeD365Xml) are whitespace-insensitive, so
@@ -135,7 +131,7 @@ function emitNode(
   lines.push(`${indent}\t<Type>${controlType}</Type>`);
   lines.push(`${indent}\t<FormControlExtension i:nil="true" />`);
 
-  // Required child containers (recursive) and, for a Grid, the field columns.
+  // Required child containers (recursive), plus field columns for a Grid.
   const childSpecs = (spec.children ?? []).filter(isRequired).filter(isConcrete);
   const childXml = childSpecs
     .map((c) => emitNode(c, opt, depth + 2))

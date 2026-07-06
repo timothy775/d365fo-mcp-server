@@ -39,7 +39,6 @@ export async function searchTool(request: CallToolRequest, context: XppServerCon
   try {
     const args = SearchArgsSchema.parse(request.params.arguments);
     const { symbolIndex } = context;
-    // Hybrid search if workspace is specified
     if (args.includeWorkspace && args.workspacePath) {
       return await performHybridSearch(args, context);
     }
@@ -72,7 +71,6 @@ async function performHybridSearch(
 ) {
   const { hybridSearch } = context;
 
-  // Validate workspace path
   if (args.workspacePath) {
     const validation = await validateWorkspacePath(args.workspacePath);
     if (!validation.valid) {
@@ -96,22 +94,20 @@ async function performHybridSearch(
   });
 
   if (results.length === 0) {
-    // Generate intelligent suggestions using suggestion engine (if available)
     let output = `No X++ symbols found matching "${args.query}" in external metadata or workspace`;
-    
+
     try {
       const { symbolIndex } = context;
       const allSymbolNames = symbolIndex.getAllSymbolNames(args.query);
       const symbolsByTerm = symbolIndex.getSymbolsByTerm();
-      
+
       const suggestions = generateSearchSuggestions(
         args.query,
         allSymbolNames,
         symbolsByTerm,
         5 // max suggestions
       );
-      
-      // Add intelligent suggestions
+
       if (suggestions.length > 0) {
         output += '\n' + formatSuggestions(suggestions);
       } else {
@@ -126,7 +122,7 @@ async function performHybridSearch(
         }
       }
     } catch (error) {
-      // Gracefully handle suggestion errors (e.g., relationship graph not built yet)
+      // Suggestion generation can fail if the relationship graph isn't built yet
       console.warn('⚠️ Could not generate search suggestions:', error);
       const tips = generateContextualTips(args.query, [], args.type);
       if (tips.length > 0) {
@@ -180,8 +176,7 @@ async function performHybridSearch(
   const externalCount = results.filter((r) => r.source === 'external').length;
 
   let output = `Found ${results.length} matches (${workspaceCount} workspace, ${externalCount} external):\n\n${formatted}`;
-  
-  // Add rich context sections
+
   if (relatedSearches.length > 0) {
     output += '\n\n## 🔍 Related Searches\n';
     relatedSearches.forEach(rel => {
@@ -225,27 +220,22 @@ async function performExternalSearch(
   symbolIndex: any,
 ) {
   try {
-    // Query database with type filter
     const types = args.type === 'all' ? undefined : [args.type];
     const results: any[] = symbolIndex.searchSymbols(args.query, args.limit, types) || [];
 
-    // Ensure results is not null
     if (!results || results.length === 0) {
-      // Generate intelligent suggestions using suggestion engine
       const allSymbolNames = symbolIndex.getAllSymbolNames(args.query);
       const symbolsByTerm = symbolIndex.getSymbolsByTerm();
-      
-      // Note: context is passed as parameter, so we can access it
+
       const suggestions = generateSearchSuggestions(
         args.query,
         allSymbolNames,
         symbolsByTerm,
         5 // max suggestions
       );
-      
+
       let output = `No X++ symbols found matching "${args.query}"`;
-      
-      // Add intelligent suggestions
+
       if (suggestions.length > 0) {
         output += '\n' + formatSuggestions(suggestions);
       } else {
@@ -276,7 +266,6 @@ async function performExternalSearch(
     const commonPatterns = args.verbose ? detectCommonPatterns(results) : [];
     const tips = args.verbose ? generateContextualTips(args.query, results, args.type) : [];
 
-    // Format output with rich context
     let output = `Found ${results.length} matches:\n`;
     
     output += formatRichContext(args.query, results, {

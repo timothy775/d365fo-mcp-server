@@ -18,14 +18,13 @@ export async function menuItemInfoTool(request: CallToolRequest, context: XppSer
   try {
     const args = MenuItemInfoArgsSchema.parse(request.params.arguments);
 
-    // ── Bridge fast-path (C# IMetadataProvider) ──
+    // Bridge fast-path (C# IMetadataProvider)
     const bridgeResult = await tryBridgeMenuItem(context.bridge, args.name, args.itemType);
     if (bridgeResult) return bridgeResult;
 
-    // ── Fallback: SQLite index ──
+    // Fallback: SQLite index
     const db = context.symbolIndex.getReadDb();
 
-    // Build type filter
     const typeMap: Record<string, string> = {
       display: 'menu-item-display',
       action: 'menu-item-action',
@@ -67,8 +66,7 @@ export async function menuItemInfoTool(request: CallToolRequest, context: XppSer
       return { content: [{ type: 'text', text: notFoundText }] };
     }
 
-    // ── Batch-fetch security chain for all symbols at once (3 queries total) ──
-    // Replaces the previous O(N·M·K) nested per-privilege / per-duty query pattern.
+    // Batch-fetch security chain for all symbols at once (3 queries total, avoids per-privilege/per-duty nesting).
     const symNames = symbols.map(s => s.name);
     const symPH = symNames.map(() => '?').join(',');
 
@@ -157,7 +155,7 @@ export async function menuItemInfoTool(request: CallToolRequest, context: XppSer
         output += `Target: ${symbol.signature}\n`;
       }
 
-      // Security chain — use pre-fetched data (no DB queries inside this loop)
+      // Security chain from pre-fetched data (no DB queries inside this loop)
       const privileges = privilegesBySymbol.get(symbol.name) || [];
 
       if (privileges.length > 0) {

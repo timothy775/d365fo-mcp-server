@@ -24,10 +24,9 @@ import { detectEol } from '../utils/eolUtils.js';
 import { isExtensionLabelFile } from '../metadata/labelParser.js';
 import { ProjectFileManager, ProjectFileFinder } from './createD365File.js';
 
-// UTF-8 BOM (Byte Order Mark)
 const UTF8_BOM = '\uFEFF';
 
-// ── Input schema ─────────────────────────────────────────────────────────────
+// Input schema
 
 const TranslationSchema = z.object({
   language: z.string().describe('Locale code (e.g. en-US, cs, de, sk)'),
@@ -152,7 +151,7 @@ const CreateLabelArgsSchema = z.object({
     ),
 });
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// Helpers
 
 /** Parse a .label.txt file into an ordered map: labelId → { text, comment } */
 function parseLabelMap(content: string): Map<string, { text: string; comment?: string }> {
@@ -284,7 +283,7 @@ function normalizeCreateLabelArgs(raw: unknown): Record<string, unknown> {
   return args;
 }
 
-// ── Bulk fan-out ──────────────────────────────────────────────────────────────
+// Bulk fan-out
 
 /**
  * Pull a `labels: [...]` array off the raw args, if present and non-empty.
@@ -358,7 +357,7 @@ export async function createLabelsBulk(
   };
 }
 
-// ── Tool implementation ───────────────────────────────────────────────────────
+// Tool implementation
 
 export async function createLabelTool(request: CallToolRequest, context: XppServerContext) {
   // Bulk shape: a `labels` array fans out to one single-label create per entry.
@@ -371,14 +370,11 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
       normalizeCreateLabelArgs(request.params.arguments),
     );
     if (!parsed.success) {
-      // Name the offending field(s) instead of leaking a bare zod
-      // "expected string, received undefined" with no field reference.
       const issues = parsed.error.issues
         .map(i => `${i.path.join('.') || '(root)'}: ${i.message}`)
         .join('; ');
-      // Common first-attempt mistake: passing the label *file* shape
-      // (labelFileId + a top-level `language`) instead of the label shape
-      // (labelId + translations[]). Call it out explicitly.
+      // Detect the common mistake of passing the label-file shape
+      // (labelFileId + top-level `language`) instead of labelId + translations[].
       const raw = (request.params.arguments ?? {}) as Record<string, unknown>;
       const wrongShape =
         (raw.language !== undefined || raw.labelFileId !== undefined) &&
@@ -416,10 +412,8 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
       updateIndex,
     } = args;
 
-    // Guard: never create new labels in a label file EXTENSION (e.g. "Base_Extension").
-    // Extensions only extend a base label file owned by another model — new labels
-    // belong in the model's own ORIGINAL label file. Writing here is what makes clients
-    // wrongly prefix the label IDs. Opt out explicitly with allowExtensionLabelFile=true.
+    // New labels must go in the model's own original label file, not an extension
+    // (…_Extension). Opt out explicitly with allowExtensionLabelFile=true.
     if (isExtensionLabelFile(labelFileId) && !args.allowExtensionLabelFile) {
       return {
         content: [

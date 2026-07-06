@@ -3,8 +3,7 @@
  * Main entry point
  */
 
-// Load .env — supports ENV_FILE env var for multi-instance setups.
-// See src/utils/loadEnv.ts for details.
+// Load .env — supports ENV_FILE env var for multi-instance setups (see src/utils/loadEnv.ts).
 import { loadEnv } from './utils/loadEnv.js';
 loadEnv(import.meta.url);
 import { fileURLToPath } from 'url';
@@ -30,19 +29,11 @@ import * as fsSync from 'node:fs';
 import { Transform } from 'node:stream';
 
 // Filter verbose debug progress messages unless DEBUG_LOGGING is enabled.
-// Only suppress messages that are KNOWN debug output (tool-handler progress)
-// and do NOT contain any error/warning indicators.
 const originalConsoleError = console.error;
 const DEBUG_LOGGING = process.env.DEBUG_LOGGING === 'true';
 
-// ─── Optional file-based logging ──────────────────────────────────────────────
-// Set LOG_FILE env var to an absolute path to get a copy of all stderr output
-// written to a file. Useful when the IDE doesn't expose MCP subprocess stderr
-// (e.g. VS 2022 Output window only shows Copilot extension logs, not ours).
-//
-// In .mcp.json:  "LOG_FILE": "C:\\Temp\\d365fo-mcp.log"
-// Tail in PS:    Get-Content C:\Temp\d365fo-mcp.log -Wait -Tail 50
-// ─────────────────────────────────────────────────────────────────────────────
+// Optional file-based logging: set LOG_FILE to an absolute path to mirror stderr
+// to a file (useful when the IDE doesn't expose MCP subprocess stderr).
 const LOG_FILE = process.env.LOG_FILE;
 let _logStream: fsSync.WriteStream | undefined;
 if (LOG_FILE) {
@@ -57,7 +48,7 @@ if (LOG_FILE) {
       return origStderrWrite(chunk, ...rest) as boolean;
     };
   } catch (e) {
-    // Don't crash if log file can't be opened — just disable file logging
+    // Don't crash the server if the log file can't be opened
     process.stderr.write(`[d365fo-mcp] ⚠️ Cannot open LOG_FILE=${LOG_FILE}: ${e}\n`);
     _logStream = undefined;
   }

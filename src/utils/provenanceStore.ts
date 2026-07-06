@@ -38,7 +38,6 @@ export interface ProvenanceBundle {
   expiresAt: number;
 }
 
-// Module-level singleton — shared across all requests in the process lifetime.
 const store = new Map<string, ProvenanceBundle>();
 
 function prune(): void {
@@ -48,13 +47,12 @@ function prune(): void {
   }
 }
 
-// ── Signed (portable) tokens ─────────────────────────────────────────────────
-// The in-memory store only works when the SAME process issues and validates a
-// token. In hybrid deployments (Azure read-only issues via prepare, local
-// write-only companion validates on write) and on scaled-out App Service
-// (>1 instance) that assumption breaks. When GROUNDING_SECRET is set on BOTH
-// instances, tokens are HMAC-signed and carry their own object binding +
-// expiry, so any process holding the secret can validate them statelessly.
+// Signed (portable) tokens: the in-memory store only works when the SAME
+// process issues and validates a token, which breaks in hybrid deployments
+// (separate read-only/write-only instances) or scaled-out App Service. When
+// GROUNDING_SECRET is set on all instances, tokens are HMAC-signed and carry
+// their own object binding + expiry, so any process holding the secret can
+// validate them statelessly.
 
 const SIGNED_PREFIX = 'g1.';
 
@@ -101,8 +99,8 @@ export function createProvenanceToken(context: ProvenanceContext): string {
   const secret = getGroundingSecret();
   let token: string;
   if (secret) {
-    // Portable HMAC token: payload carries object binding + expiry so the
-    // write-only companion (a different process) can validate it.
+    // Portable HMAC token: payload carries object binding + expiry so another
+    // process can validate it.
     const payload = Buffer.from(JSON.stringify({
       o: context.objectName,
       ...(context.proposedName ? { p: context.proposedName } : {}),
@@ -146,10 +144,9 @@ export function isValidToken(token: string): boolean {
  * A token issued for `CustTable` is accepted for targets that EMBED that name
  * at the start (`CustTable.ContosoExtension`, `CustTableContoso_Extension`, …)
  * and for the proposedName recorded by prepare_change. D365FO extension naming
- * always leads with the base object name, so a prefix match is sufficient —
- * a bare substring match (old behaviour) let a token for `CustTable` authorize
- * writes to any object merely containing that string. Names shorter than
- * 4 chars are compared exactly to avoid trivial matches.
+ * always leads with the base object name, so a prefix match is used rather
+ * than a bare substring match. Names shorter than 4 chars are compared exactly
+ * to avoid trivial matches.
  */
 export function tokenMatchesTarget(
   bundle: ProvenanceBundle,
@@ -184,15 +181,11 @@ export function enforceGrounding(
   targetObjectName?: string,
 ): { isError: true; content: [{ type: 'text'; text: string }] } | null {
   if (process.env.GROUNDING_ENFORCE !== 'true') return null;
-  // Hybrid-deployment guard: in write-only mode prepare_change is not exposed
-  // by this instance (it runs on the read-only/Azure server). WITHOUT a shared
-  // GROUNDING_SECRET the tokens live in THAT process's memory, so no token can
-  // ever validate here — enforcing would dead-loop the agent between the two
-  // servers: local write rejects → error says "call prepare_change" → Azure
-  // issues a token this process cannot validate → local write rejects again.
-  // WITH a shared secret the Azure instance issues signed tokens this process
-  // can verify statelessly, so enforcement works end-to-end and the bypass is
-  // not needed.
+  // Hybrid-deployment guard: in write-only mode prepare_change runs on a
+  // separate read-only instance. Without a shared GROUNDING_SECRET, no token
+  // issued there can ever validate here, so enforcing would dead-loop the
+  // agent between the two servers. With a shared secret, tokens are verified
+  // statelessly and this bypass is unnecessary.
   if (SERVER_MODE === 'write-only' && !getGroundingSecret()) {
     if (!warnedWriteOnlyBypass) {
       warnedWriteOnlyBypass = true;

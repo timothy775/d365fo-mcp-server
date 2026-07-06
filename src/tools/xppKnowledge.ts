@@ -2431,11 +2431,9 @@ function tokenize(topic: string): string[] {
 }
 
 /**
- * Minimum top score for a query to count as a confident match. A score below
- * this means no title/keyword/ID hit landed — only incidental summary-substring
- * overlap (1–2 pts) — so the results are surfaced as low-confidence suggestions
- * rather than authoritative answers. Without this floor, `number-sequence`
- * silently returned Electronic Reporting docs (the nearest substring hit).
+ * Minimum top score for a query to count as a confident match. Below this,
+ * only incidental summary-substring overlap landed (no title/keyword/ID hit),
+ * so results are surfaced as low-confidence suggestions, not authoritative answers.
  */
 const CONFIDENT_SCORE = 3;
 

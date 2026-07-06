@@ -2,21 +2,16 @@
  * Shared builders for AxQuery and AxView XML.
  *
  * createD365File.ts and generateD365Xml.ts each expose a mirrored
- * XmlTemplateGenerator class; both delegate here so the two cannot drift —
- * mirrors the securityPrivilegeXml.ts / dataEntityXml.ts pattern. Both had
- * already drifted for query/view (different root shapes, one used <Label>
- * where AxQuery actually needs <Title>) AND both silently ignored the one
- * property that makes either object functional: a query's `dataSource`
- * (table) and a view's `query` (the AxQuery it's built on). A query/view
- * created via either path previously came out with an empty <DataSources/>
- * or no <Query> reference at all — structurally valid, functionally useless
- * (TOOL_DEFECT, found building eval case Phase 6 query+view).
+ * XmlTemplateGenerator class; both delegate here so the two cannot drift
+ * (mirrors the securityPrivilegeXml.ts / dataEntityXml.ts pattern).
  *
- * Structure verified against real shipped objects read directly off disk
- * (ApplicationFoundation\AxView\BICompanyView.xml): a view references an
- * external AxQuery by name (<Query>QueryName</Query>) and its own <Fields>
- * are AxViewFieldBound entries pointing at that query's datasource alias —
- * it does NOT normally embed its own ViewMetadata/DataSources.
+ * A query's `dataSource` (table) and a view's `query` (the AxQuery it's
+ * built on) are required for the object to actually function — without them
+ * this emits a structurally valid but inert skeleton.
+ *
+ * A view references an external AxQuery by name (<Query>QueryName</Query>)
+ * and its own <Fields> are AxViewFieldBound entries pointing at that query's
+ * datasource alias; it does not embed its own ViewMetadata/DataSources.
  */
 
 /** properties.dataSource — REQUIRED for a functional query: the root table. */

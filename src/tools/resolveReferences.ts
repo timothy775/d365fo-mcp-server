@@ -28,8 +28,6 @@
 import { z } from 'zod';
 import type { XppServerContext } from '../types/context.js';
 
-// ── Schema ────────────────────────────────────────────────────────────────────
-
 export const resolveReferencesArgsSchema = z.object({
   code: z.string().describe(
     'X++ source code to resolve. Paste the full generated method/class text.'
@@ -41,8 +39,6 @@ export const resolveReferencesArgsSchema = z.object({
 
 // Tool registration (name, description, inputSchema) lives inline in
 // src/server/mcpServer.ts — the single source of truth for tool instructions.
-
-// ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface ReferenceViolation {
   kind:
@@ -79,8 +75,6 @@ export interface ResolverDeps {
   ): Array<{ labelId: string; labelFileId: string }>;
   getLabelFileIds(): Array<{ labelFileId: string }>;
 }
-
-// ── X++ language tables ───────────────────────────────────────────────────────
 
 const XPP_KEYWORDS = new Set([
   'abstract', 'anytype', 'as', 'asc', 'at', 'avg', 'break', 'breakpoint', 'by',
@@ -207,8 +201,6 @@ const INTRINSIC_TARGET_TYPES: Record<string, string[] | null> = {
   resourcestr: null,
 };
 
-// ── Code preprocessing ───────────────────────────────────────────────────────
-
 interface CleanedCode {
   /** Code with comments and string literals blanked (length-preserving). */
   cleaned: string;
@@ -265,8 +257,6 @@ function lineOf(code: string, index: number): number {
   }
   return line;
 }
-
-// ── Index lookups ─────────────────────────────────────────────────────────────
 
 function symbolTypes(deps: ResolverDeps, name: string): string[] {
   try {
@@ -371,8 +361,6 @@ function fieldExists(deps: ResolverDeps, tableName: string, fieldName: string): 
   return false;
 }
 
-// ── Signature arity ───────────────────────────────────────────────────────────
-
 interface Arity { min: number; max: number }
 
 /** Parse "ReturnType name(Type a, Type b = x)" → {min, max}. */
@@ -424,8 +412,6 @@ function countCallArgs(argsText: string): number {
   return splitTopLevel(argsText).length;
 }
 
-// ── Local declaration collection ─────────────────────────────────────────────
-
 interface LocalScope {
   /** Identifiers declared inside the snippet (class names, vars, params). */
   declaredNames: Set<string>;
@@ -473,8 +459,6 @@ function collectLocals(cleaned: string): LocalScope {
   return { declaredNames, bindings };
 }
 
-// ── Main resolver ─────────────────────────────────────────────────────────────
-
 export function resolveXppReferences(code: string, deps: ResolverDeps): ResolveResult {
   const violations: ReferenceViolation[] = [];
   let verifiedCount = 0;
@@ -500,7 +484,7 @@ export function resolveXppReferences(code: string, deps: ResolverDeps): ResolveR
       || lookupTypes(name).length > 0;
   };
 
-  // ── 1. Label references (from original string literals) ────────────────────
+  // 1. Label references (from original string literals)
   for (const s of strings) {
     const modern = s.value.match(/^@([A-Za-z][A-Za-z0-9_]*):([A-Za-z0-9_]+)$/);
     const legacy = s.value.match(/^@([A-Z]{2,4}\d+)$/);
@@ -509,7 +493,7 @@ export function resolveXppReferences(code: string, deps: ResolverDeps): ResolveR
       if (deps.getLabelById(labelId, fileId).length > 0) {
         verifiedCount++;
       } else {
-        // Distinguish: known label file with missing id (error) vs unknown file (warning)
+        // Known label file with missing id is an error; unknown file is a warning.
         const fileKnown = labelFileExists(deps, fileId);
         violations.push({
           kind: 'unknown-label',
@@ -536,7 +520,7 @@ export function resolveXppReferences(code: string, deps: ResolverDeps): ResolveR
     }
   }
 
-  // ── 2. Intrinsic functions ──────────────────────────────────────────────────
+  // 2. Intrinsic functions
   const intrinsicRe = /\b([A-Za-z]+[Ss]tr|tableNum|classNum|enumNum|enumCnt|fieldNum|extendedTypeNum)\s*\(\s*([A-Za-z_]\w*)\s*(?:,\s*([A-Za-z_]\w*)\s*)?\)/g;
   for (const m of cleaned.matchAll(intrinsicRe)) {
     const fn = m[1].toLowerCase();
@@ -599,7 +583,7 @@ export function resolveXppReferences(code: string, deps: ResolverDeps): ResolveR
     }
   }
 
-  // ── 3. Static member access Type::member ────────────────────────────────────
+  // 3. Static member access Type::member
   const staticRe = /\b([A-Za-z_]\w*)\s*::\s*([A-Za-z_]\w*)/g;
   for (const m of cleaned.matchAll(staticRe)) {
     const typeName = m[1];
@@ -667,7 +651,7 @@ export function resolveXppReferences(code: string, deps: ResolverDeps): ResolveR
     }
   }
 
-  // ── 4. Declared types ───────────────────────────────────────────────────────
+  // 4. Declared types
   const reportedTypes = new Set<string>();
   for (const [, typeName] of locals.bindings) {
     const lower = typeName.toLowerCase();
@@ -687,7 +671,7 @@ export function resolveXppReferences(code: string, deps: ResolverDeps): ResolveR
     }
   }
 
-  // ── 5. Bound buffer member access var.Field / var.method() ────────────────
+  // 5. Bound buffer member access var.Field / var.method()
   for (const [varLower, typeName] of locals.bindings) {
     const types = lookupTypes(typeName);
     const isTableLike = types.some(t => TABLE_LIKE_TYPES.has(t));
@@ -748,8 +732,6 @@ function labelFileExists(deps: ResolverDeps, fileId: string): boolean {
   }
 }
 
-// ── Fail-closed gate for write tools ─────────────────────────────────────────
-
 /**
  * When GROUNDING_ENFORCE=true, run the resolver over X++ source about to be
  * written and reject the write if any ERROR-severity violation is found.
@@ -774,7 +756,7 @@ export function gateOnReferenceErrors(
       getLabelFileIds: symbolIndex.getLabelFileIds.bind(symbolIndex),
     });
   } catch {
-    return null; // resolver failure must never block writes
+    return null; // never block writes on resolver failure
   }
   const errors = result.violations.filter(v => v.severity === 'error');
   if (errors.length === 0) return null;
@@ -794,8 +776,6 @@ export function gateOnReferenceErrors(
     }],
   };
 }
-
-// ── MCP tool handler ──────────────────────────────────────────────────────────
 
 export async function resolveReferencesTool(
   request: { params: { arguments?: unknown } },

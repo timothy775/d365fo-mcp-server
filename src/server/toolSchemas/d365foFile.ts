@@ -103,7 +103,7 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
             'Provenance token from prepare(change/create). Required for *-extension objectTypes when ' +
             'GROUNDING_ENFORCE=true; object-bound — only valid for the object it was issued for.',
         },
-        // ── action=modify only ──────────────────────────────────────────
+        // action=modify only
         operation: {
           type: 'string',
           enum: [

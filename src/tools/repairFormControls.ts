@@ -51,7 +51,7 @@ export async function repairFormControlsTool(
   }
   const { xml, formName, filePath } = parsed.data;
 
-  // ── Load the form XML (same precedence as validate) ──────────────────────
+  // Load the form XML (same precedence as validate)
   let formXml = xml;
   let source = 'provided XML';
   try {
@@ -76,7 +76,7 @@ export async function repairFormControlsTool(
     return text('❌ Provide one of: xml, formName, or filePath.', true);
   }
 
-  // ── Resolve the declared pattern ─────────────────────────────────────────
+  // Resolve the declared pattern
   let design;
   try {
     const xmlParser = new Parser({ explicitArray: false, mergeAttrs: true, trim: true });
@@ -104,7 +104,7 @@ export async function repairFormControlsTool(
     );
   }
 
-  // ── Build generation options from the form's own datasource ──────────────
+  // Build generation options from the form's own datasource
   const formNameInXml = formXml.match(/<AxForm[^>]*>[\s\S]*?<Name>([^<]+)<\/Name>/)?.[1]?.trim();
   const ds = firstDataSource(formXml);
   let gridFields: string[] | undefined;
@@ -129,7 +129,7 @@ export async function repairFormControlsTool(
     gridFields,
   };
 
-  // ── Before / after validation around the splice ──────────────────────────
+  // Before / after validation around the splice
   const before = await validateFormPatternXml(formXml);
   const beforeErrors = before.violations.filter((v) => v.severity === 'error').length;
 

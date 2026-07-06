@@ -221,13 +221,12 @@ export async function handleGenerateSmartForm(
   let dataSources: FormDataSourceSpec[] = [];
   let controls: FormControlSpec[] = [];
 
-  // Strategy 1: Copy from existing form
+  // Strategy 1: copy datasources from an existing form
   if (copyFrom) {
     console.log(`[generateSmartForm] Copying structure from: ${copyFrom}`);
     try {
       const db = symbolIndex.getReadDb();
 
-      // Copy datasources directly from form_datasources DB
       const dbDataSources = db.prepare(`
         SELECT datasource_name, table_name, allow_edit, allow_create, allow_delete
         FROM form_datasources
@@ -242,7 +241,6 @@ export async function handleGenerateSmartForm(
       }>;
 
       if (dbDataSources.length === 0) {
-        // Fall back: check if form exists at all
         const formExists = db.prepare(`
           SELECT name FROM symbols WHERE type = 'form' AND name = ? LIMIT 1
         `).get(copyFrom);
@@ -268,10 +266,9 @@ export async function handleGenerateSmartForm(
     }
   }
 
-  // Strategy 2: Create datasource from table and analyze patterns
+  // Strategy 2: create datasource from table and analyze patterns
   if (dataSource && !copyFrom) {
-    // Validate the primary datasource table exists and fuzzy-correct common pluralisation
-    // mistakes (e.g. agent passes "AslRentEquipmentTables" instead of "AslRentEquipmentTable").
+    // Validates the table exists and fuzzy-corrects pluralisation (e.g. "...Tables" -> "...Table").
     let dataSourceResolved = dataSource;
     try {
       const db = symbolIndex.getReadDb();
@@ -284,9 +281,9 @@ export async function handleGenerateSmartForm(
           if (v && !candidates.some((c: string) => c.toLowerCase() === v.toLowerCase())) candidates.push(v);
         };
         const candidates: string[] = [];
-        add(dataSource.replace(/s$/i, ''));            // strip trailing "s"
-        add(dataSource.replace(/Tables?$/i, 'Table')); // "Tables" → "Table"
-        add(dataSource.replace(/Table$/i, ''));        // strip "Table" suffix entirely
+        add(dataSource.replace(/s$/i, ''));
+        add(dataSource.replace(/Tables?$/i, 'Table'));
+        add(dataSource.replace(/Table$/i, ''));
         const matched = candidates
           .map(c => db.prepare(
             `SELECT name FROM symbols WHERE type = 'table' AND name = ? COLLATE NOCASE LIMIT 1`,
@@ -321,7 +318,6 @@ export async function handleGenerateSmartForm(
       allowDelete: true,
     });
 
-    // Analyze similar forms using this table
     if (formPattern) {
       try {
         await handleGetFormPatterns(
@@ -335,16 +331,16 @@ export async function handleGenerateSmartForm(
     }
   }
 
-  // Strategy 3: Generate controls for datasource fields
-  // Also collects gridFields for pattern templates regardless of generateControls flag
+  // Strategy 3: generate controls for datasource fields (also collects gridFields
+  // for pattern templates regardless of the generateControls flag)
   let gridFields: string[] = [];
-  // Field → control-type maps so generated controls get the right type
-  // (enum→ComboBox, date→Date, …) instead of defaulting every field to String.
+  // Field -> control-type map (enum->ComboBox, date->Date, etc.) so generated controls
+  // aren't all typed as String.
   let fieldTypes: FieldControlMap | undefined;
   let linesFields: string[] = [];
   let linesFieldTypes: FieldControlMap | undefined;
 
-  // Resolve the table fields (minus system fields), capped for a sensible grid width.
+  // Table fields minus system fields, capped for a sensible grid width.
   const collectGridFields = (db: any, table: string): string[] => {
     const dbFields = db.prepare(`
       SELECT name FROM symbols
@@ -357,7 +353,7 @@ export async function handleGenerateSmartForm(
       .slice(0, 8);
   };
 
-  // After fuzzy resolution the effective datasource name may differ from the input.
+  // May differ from the input after fuzzy resolution above.
   const dataSourceEffective = dataSources[0]?.table ?? dataSource;
 
   if (dataSource && dataSources.length > 0) {
@@ -368,7 +364,6 @@ export async function handleGenerateSmartForm(
 
       if (gridFields.length > 0) {
         if (generateControls) {
-          // Legacy path: also build explicit controls for backward compat
           const gridControl = builder.buildGridControl(
             `${dataSourceEffective}Grid`,
             dataSourceEffective,
@@ -389,20 +384,16 @@ export async function handleGenerateSmartForm(
   // Lines datasource (header+lines patterns): add a second datasource bound to
   // the lines table, with its own typed field controls and field list.
   let linesTableResolved = linesTable || linesDataSource;
-  // The effective lines datasource name (may differ from the corrected table name when
-  // an explicit, distinct linesDataSource is supplied). Hoisted so the method-stub
-  // injection below references the same name as the datasource we actually emit.
+  // Effective lines datasource name; may differ from the corrected table name when an
+  // explicit, distinct linesDataSource is supplied. Hoisted so method-stub injection
+  // below references the same name as the datasource actually emitted.
   let linesDsNameResolved: string | undefined;
-  // Note about an auto-corrected lines table name — threaded into the output via cloneNotes.
+  // Note about an auto-corrected lines table name, surfaced via cloneNotes.
   let linesTableNote = '';
   if (linesTableResolved) {
-    // Validate the lines table exists in the index. The lines-table name is a
-    // frequent source of error: the model guesses it from the header table by
-    // appending "Lines" (e.g. header "AslRentAgreementTable" → "AslRentAgreementTableLines"),
-    // but the real table is usually "<headerBase>Line" ("AslRentAgreementLine").
-    // Generate structured candidates from both the given name and the header
-    // table, auto-correct to the first that actually exists, and only hard-fail
-    // when none resolves.
+    // Lines table names are commonly guessed wrong (e.g. header "...Table" -> "...TableLines"
+    // instead of the real "...Line"). Try structured candidates from the given name and the
+    // header table, auto-correct to the first that exists, hard-fail only if none resolve.
     try {
       const db = symbolIndex.getReadDb();
       const exists = db.prepare(
@@ -410,17 +401,16 @@ export async function handleGenerateSmartForm(
       );
       const direct = exists.get(linesTableResolved) as { name: string } | undefined;
       if (!direct) {
-        // Build an ordered, de-duplicated candidate list.
         const candidates: string[] = [];
         const add = (n?: string | null) => {
           const v = (n ?? '').trim();
           if (v && !candidates.some(c => c.toLowerCase() === v.toLowerCase())) candidates.push(v);
         };
         const ln = linesTableResolved;
-        add(ln.replace(/s$/i, ''));               // strip trailing plural "s"
-        add(ln.replace(/Lines$/i, 'Line'));       // …Lines → …Line
-        add(ln.replace(/Table(Lines?)$/i, 'Line')); // …Table(Line|Lines) → …Line
-        add(ln.replace(/Table(Lines?)$/i, '$1'));   // …TableLines → …Lines
+        add(ln.replace(/s$/i, ''));
+        add(ln.replace(/Lines$/i, 'Line'));
+        add(ln.replace(/Table(Lines?)$/i, 'Line'));
+        add(ln.replace(/Table(Lines?)$/i, '$1'));
         if (dataSource) {
           const base = dataSource.replace(/Table$/i, ''); // header base, e.g. AslRentAgreement
           add(`${base}Line`);
@@ -436,13 +426,11 @@ export async function handleGenerateSmartForm(
         }
 
         if (matched) {
-          // Auto-correct to the verified table and record a visible note.
           linesTableNote =
             `\n   🔍 linesTable "${linesTableResolved}" not found — auto-corrected to "${matched}" (verified in the index).`;
           console.log(`[generateSmartForm] linesTable "${linesTableResolved}" → "${matched}" (auto-corrected)`);
           linesTableResolved = matched;
         } else {
-          // Nothing matched — fail with the best fuzzy suggestion we can find.
           const stem = linesTableResolved.replace(/s$/i, '');
           const alt = db.prepare(
             `SELECT name FROM symbols WHERE type = 'table' AND name LIKE ? COLLATE NOCASE ORDER BY LENGTH(name) ASC LIMIT 1`,

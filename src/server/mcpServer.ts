@@ -27,10 +27,8 @@ export { SERVER_MODE, LOCAL_TOOLS, WRITE_TOOLS } from './serverMode.js';
 export type { ServerMode } from './serverMode.js';
 
 /**
- * Convert a file:// URI to a local path.
- * Duplicated from transport.ts to keep mcpServer.ts self-contained
- * (no circular dep between transport ↔ mcpServer).
- * Handles both Windows (drive-letter) and POSIX (Linux/macOS, Azure) paths.
+ * Convert a file:// URI to a local path. Duplicated from transport.ts to avoid
+ * a circular dependency between transport and mcpServer.
  */
 function fileUriToPath(uri: string): string | null {
   if (!uri) return null;
@@ -39,28 +37,24 @@ function fileUriToPath(uri: string): string | null {
     if (process.platform === 'win32') {
       return decoded.replace(/\//g, '\\');
     }
-    // POSIX: restore the leading slash stripped by slice('file:///'.length)
     return '/' + decoded;
   }
   if (uri.startsWith('file://')) {
     const decoded = decodeURIComponent(uri.slice('file://'.length));
     return process.platform === 'win32' ? decoded.replace(/\//g, '\\') : decoded;
   }
-  // Already a local path — Windows drive letter, UNC share, or POSIX absolute
   if (uri.length > 2 && (uri[1] === ':' || uri.startsWith('\\\\') || uri.startsWith('/'))) return uri;
   return null;
 }
 
 /**
- * Apply MCP roots list to ConfigManager.
- * Called after InitializedNotification and RootsListChanged notification.
- * All roots are passed so that unambiguous single-project matches work correctly
- * even when VS 2022 sends multiple roots (open project folders).
+ * Apply MCP roots list to ConfigManager. All roots are passed so unambiguous
+ * single-project matches still work when the client sends multiple roots.
  */
 function applyRootsToConfig(roots: Array<{ uri: string }>): void {
   if (!roots?.length) {
-    // VS 2022 sends empty roots/list when closing a solution (transition state).
-    // Keep the current detection result — the next roots/list_changed will update it.
+    // Empty roots/list can mean a solution is closing (transition state); keep
+    // the current detection result and wait for the next roots/list_changed.
     if (DEBUG_LOGGING) {
       process.stderr.write('[mcpServer] roots/list received (0 root(s)) — solution closing or no workspace open\n');
     }
@@ -68,25 +62,21 @@ function applyRootsToConfig(roots: Array<{ uri: string }>): void {
     return;
   }
 
-  // Log all received roots for diagnostics
   if (DEBUG_LOGGING) {
     process.stderr.write(`[mcpServer] roots/list received (${roots.length} root(s)):\n`);
     roots.forEach((r, i) => process.stderr.write(`  [${i}] ${r.uri}\n`));
   }
 
-  // Persist URIs in the stdio session singleton so get_workspace_info can display them.
+  // Persisted so get_workspace_info can display them.
   setLastRoots(roots.map(r => r.uri));
 
-  // Convert all URIs to local paths
   const paths = roots
     .map(r => fileUriToPath(r.uri))
     .filter((p): p is string => p !== null);
 
   if (paths.length === 0) return;
 
-  // Pass all paths; configManager will pick the most specific unambiguous one.
-  // After detection completes, log what solution/project was resolved so it's
-  // easy to verify in the log that the correct project was picked.
+  // configManager picks the most specific unambiguous path among all roots.
   getConfigManager().setRuntimeContextFromRoots(paths).then(() => {
     if (DEBUG_LOGGING) {
       const { modelName, source, projectPath, solutionPath, workspacePath } =
@@ -121,11 +111,8 @@ export function createXppMcpServer(context: XppServerContext): Server {
     }
   );
 
-  // -----------------------------------------------------------------------
-  // Workspace roots: VS Code (stdio mode) sends roots after initialization.
-  // Request them immediately after `initialized` notification, then keep
-  // up-to-date on `notifications/roots/list_changed`.
-  // -----------------------------------------------------------------------
+  // Workspace roots: stdio clients (VS Code, VS 2022) send roots after
+  // initialization; request them here and refresh on roots/list_changed.
   server.setNotificationHandler(InitializedNotificationSchema, async () => {
     if (DEBUG_LOGGING) {
       process.stderr.write(
@@ -151,7 +138,6 @@ export function createXppMcpServer(context: XppServerContext): Server {
       }
       return;
     }
-    // Instanced mode
     if (await getConfigManager().isStaticallyConfigured()) {
       if (DEBUG_LOGGING) {
         process.stderr.write(`[mcpServer] ℹ️  Static config complete — skipping roots/list (instanced mode)\n`);
@@ -165,8 +151,6 @@ export function createXppMcpServer(context: XppServerContext): Server {
       );
       applyRootsToConfig(result.roots ?? []);
     } catch (e) {
-      // Unlikely now that we checked capabilities first, but still guard
-      // against network errors or other unexpected failures.
       process.stderr.write(`[mcpServer] ⚠️  roots/list failed: ${e}\n`);
     }
   });
@@ -199,16 +183,10 @@ export function createXppMcpServer(context: XppServerContext): Server {
     } catch {}
   });
 
-  // Register centralized tool handler
   registerToolHandler(server, context);
-
-  // Register resources (single dispatcher — class + workspace schemes)
   registerResources(server, context);
-
-  // Register prompts (includes system instructions)
   registerCodeReviewPrompt(server, context);
 
-  // List available tools
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const allTools = {
       tools: [...toolSchemas],

@@ -1,22 +1,15 @@
 /**
  * X++ method-source re-indentation.
  *
- * Root cause of the "missing indentation between methods" report: neither the
- * C# bridge nor the TS XmlTemplateGenerator fallback ever reformatted a
- * caller-supplied method body — whatever indentation (or lack of it) the
- * caller happened to type was stored verbatim in the <Source> CDATA. Two
- * different callers producing the same logical method with different
- * whitespace habits (or an LLM caller being inconsistent within one class)
- * produced visibly ragged formatting once opened in Visual Studio.
+ * Re-derives indentation from brace depth alone, discarding whatever leading
+ * whitespace the input had, so output is consistent regardless of how the
+ * caller indented a method body.
  *
- * The real Microsoft convention (verified against shipped platform code, e.g.
+ * Microsoft convention (verified against shipped platform code, e.g.
  * ApplicationFoundation/AxClass/AVActionCompletedEventData.xml): the doc
- * comment + signature line sit at ONE indent level (4 spaces) — the method
- * body conceptually lives one level inside the class body — the matching
- * `{`/`}` sit at that SAME level, and nested content goes one level deeper
- * per brace. This re-derives that layout from brace depth alone, discarding
- * whatever leading whitespace the input had, so output is consistent
- * regardless of how the caller indented (or didn't).
+ * comment + signature line sit at one indent level (4 spaces) — the matching
+ * `{`/`}` sit at that same level, and nested content goes one level deeper
+ * per brace.
  */
 
 const INDENT_UNIT = '    ';

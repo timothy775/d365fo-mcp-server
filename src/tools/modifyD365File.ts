@@ -246,12 +246,9 @@ export function extractMethodNameFromSource(source: string | undefined): string 
 }
 
 /**
- * Direct XML file-level replace-code fallback.
- * Used when the C# bridge fails or returns null for replace-code on forms/form-extensions
- * (e.g. control override methods that the SDK doesn't expose via the Methods API).
- *
- * Reads the XML file, performs a simple string replacement inside <Source> CDATA blocks,
- * and writes the file back. This is a last-resort fallback — the bridge is always preferred.
+ * Direct XML file-level replace-code fallback, used when the C# bridge can't
+ * reach a method (e.g. form/form-extension control overrides not exposed via
+ * the Methods API). Last resort — the bridge is always preferred.
  */
 async function directXmlReplaceCode(
   filePath: string,
@@ -259,10 +256,8 @@ async function directXmlReplaceCode(
   newCode: string,
 ): Promise<{ success: boolean; message: string } | null> {
   try {
-    // D365FO XML files on disk are CRLF, but oldCode passed by the AI is typically
-    // copied from get_method_source / get_object_info output that already strips CRs.
-    // Normalize both sides to LF for matching, then let normalizeD365Xml put the
-    // file back into D365FO's canonical shape (no BOM, CRLF, no trailing newline).
+    // Files on disk are CRLF; oldCode from get_method_source is typically LF-only.
+    // Normalize both to LF for matching, then normalizeD365Xml restores CRLF on write.
     const rawContent = await fs.readFile(filePath, 'utf-8');
     const content = rawContent.replace(/^﻿/, '').replace(/\r\n/g, '\n');
     const normOld = oldCode.replace(/\r\n/g, '\n');
@@ -272,9 +267,8 @@ async function directXmlReplaceCode(
       return null; // oldCode not found in file at all
     }
 
-    // Ensure there is exactly one occurrence so we replace the correct block.
-    // String.prototype.replace() without /g only replaces the FIRST occurrence,
-    // which would silently leave other occurrences and produce ambiguous results.
+    // Without /g, String.replace() only replaces the first occurrence, so require
+    // exactly one match to avoid silently picking the wrong one.
     const occurrences = content.split(normOld).length - 1;
     if (occurrences > 1) {
       return {
@@ -301,19 +295,14 @@ async function directXmlReplaceCode(
 }
 
 /**
- * Direct XML fallback for modify-property. The C# bridge rejects
- * modify-property outright for some object types (confirmed: AxForm — "not
- * supported for objectType 'form' via bridge") even though the property is a
- * plain text element (e.g. <Caption>) trivially editable by string
- * replacement, the same way directXmlReplaceCode already handles methods the
- * bridge can't reach. Only used when the bridge itself reports failure —
- * never overrides a working bridge modify-property call.
+ * Direct XML fallback for modify-property, used when the bridge rejects
+ * modify-property for an object type (e.g. AxForm) even though the property
+ * is a plain text element (e.g. <Caption>) editable by string replacement.
+ * Only used when the bridge itself reports failure.
  *
- * `propertyPath` is treated as a bare element name (no XPath/dotted-path
- * support) — matches how existing propertyPath values are passed (e.g.
- * "Caption", "Pattern"). Refuses to act if the element is missing (returns
- * null so the caller surfaces the original bridge error) or ambiguous
- * (appears more than once — ambiguity would risk editing the wrong node).
+ * `propertyPath` is a bare element name (no XPath/dotted-path support).
+ * Refuses to act if the element is missing (returns null so the caller
+ * surfaces the original bridge error) or ambiguous (appears more than once).
  */
 async function directXmlModifyProperty(
   filePath: string,

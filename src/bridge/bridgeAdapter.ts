@@ -45,9 +45,7 @@ export interface ToolResult {
   isError?: boolean;
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // TABLE
-// ════════════════════════════════════════════════════════════════════════
 
 const TABLE_METHOD_PAGE_SIZE = 25;
 
@@ -139,9 +137,7 @@ function formatTable(t: BridgeTableInfo, methodOffset: number): string {
   return out;
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // CLASS
-// ════════════════════════════════════════════════════════════════════════
 
 const CLASS_METHOD_PAGE_SIZE = 15;
 
@@ -210,9 +206,7 @@ function formatClass(cls: BridgeClassInfo, compact: boolean, methodOffset: numbe
   return out;
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // METHOD SOURCE
-// ════════════════════════════════════════════════════════════════════════
 
 export async function tryBridgeMethodSource(
   bridge: BridgeClient | undefined,
@@ -245,9 +239,7 @@ export async function tryBridgeMethodSource(
   }
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // ENUM
-// ════════════════════════════════════════════════════════════════════════
 
 export async function tryBridgeEnum(
   bridge: BridgeClient | undefined,
@@ -277,9 +269,7 @@ export async function tryBridgeEnum(
   }
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // EDT
-// ════════════════════════════════════════════════════════════════════════
 
 export async function tryBridgeEdt(
   bridge: BridgeClient | undefined,
@@ -322,9 +312,7 @@ function formatEdt(edt: BridgeEdtInfo): string {
   return out;
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // FORM
-// ════════════════════════════════════════════════════════════════════════
 
 export async function tryBridgeForm(
   bridge: BridgeClient | undefined,
@@ -419,9 +407,7 @@ function countControls(controls: BridgeFormControl[]): number {
   return count;
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // FIND REFERENCES
-// ════════════════════════════════════════════════════════════════════════
 
 /**
  * Outcome of a bridge where-used lookup. The caller must distinguish a clean
@@ -530,9 +516,7 @@ export async function tryBridgeReferences(
   }
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // SEARCH
-// ════════════════════════════════════════════════════════════════════════
 
 export async function tryBridgeSearch(
   bridge: BridgeClient | undefined,
@@ -560,9 +544,7 @@ export async function tryBridgeSearch(
   }
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // QUERY
-// ════════════════════════════════════════════════════════════════════════
 
 export async function tryBridgeQuery(
   bridge: BridgeClient | undefined,
@@ -638,9 +620,7 @@ function formatQueryDataSource(ds: BridgeQueryDataSource, depth: number): string
   return out;
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // VIEW
-// ════════════════════════════════════════════════════════════════════════
 
 export async function tryBridgeView(
   bridge: BridgeClient | undefined,
@@ -727,9 +707,7 @@ function formatView(v: BridgeViewInfo): string {
   return out;
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // DATA ENTITY
-// ════════════════════════════════════════════════════════════════════════
 
 export async function tryBridgeDataEntity(
   bridge: BridgeClient | undefined,
@@ -794,9 +772,7 @@ function formatDataEntity(e: BridgeDataEntityInfo): string {
   return out;
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // REPORT (fallback only — used when XML file is not found on disk)
-// ════════════════════════════════════════════════════════════════════════
 
 export async function tryBridgeReport(
   bridge: BridgeClient | undefined,
@@ -851,9 +827,7 @@ function formatReport(r: BridgeReportInfo): string {
   return out;
 }
 
-// ============================================================
-// Write-support adapters (Phase 3)
-// ============================================================
+// Write-support adapters
 
 /**
  * Refreshes the C# DiskProvider so it picks up newly written/modified files.
@@ -930,9 +904,7 @@ export async function bridgeResolveObject(
   }
 }
 
-// ========================================
-// Write operations (Phase 4)
-// ========================================
+// Write operations
 
 /**
  * Supported object types for bridge-based creation.
@@ -940,24 +912,12 @@ export async function bridgeResolveObject(
  * Complex types (report, data-entity, business-event, tile, kpi) continue
  * using TypeScript XML generation — the bridge handles them via xmlContent passthrough.
  *
- * security-privilege/security-duty/security-role are DELIBERATELY excluded
- * (TOOL_DEFECT, found 2026-06-30 via eval/cases/L4-entity-security): the
- * bridge's generic `properties: Dictionary<string,string>` channel has no way
- * to carry the structured collections these types need (EntryPoints,
- * DataEntityPermissions, Privileges, Duties — arrays get filtered out before
- * reaching the bridge, and even scalar fields like targetObject/dataEntity
- * have no special-case mapping the way table fields or enum values do). The
- * bridge create call still "succeeds", but silently produces an empty,
- * functionally-broken privilege/duty/role (builds clean, grants nothing).
- * The local XML generators (securityPrivilegeXml.ts + generateAxSecurityDuty/
- * RoleXml below) build these correctly — let creation fall through to them.
- *
- * query/view are DELIBERATELY excluded too (same bug class, found 2026-07-01
- * via Phase 6 query+view eval case): the bridge accepted `dataSource`/`query`
- * as scalar properties and reported success, but produced an empty
- * <DataSources/> (query) or no <Query> reference at all (view) — a query/view
- * that can select nothing. The local generators (queryViewXml.ts) build a
- * real AxQuerySimpleRootDataSource / <Query> reference from these properties.
+ * security-privilege/security-duty/security-role and query/view are DELIBERATELY
+ * excluded: the bridge's generic `properties: Dictionary<string,string>` channel
+ * can't carry the structured collections these types need (EntryPoints, Privileges,
+ * Duties, query data sources, etc.) — creation would "succeed" but produce an empty,
+ * functionally-broken object. The local XML generators (securityPrivilegeXml.ts,
+ * queryViewXml.ts, generateAxSecurityDuty/RoleXml) build these correctly instead.
  */
 const BRIDGE_CREATE_TYPES = new Set([
   'class', 'class-extension', 'table', 'enum', 'edt',
@@ -1623,9 +1583,7 @@ export async function bridgeAddDataSource(
   }
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // DELETE OBJECT
-// ════════════════════════════════════════════════════════════════════════
 
 /**
  * Deletes a D365FO object via the C# bridge.
@@ -1655,9 +1613,7 @@ export async function bridgeDeleteObject(
   }
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // TABLE-EXTENSION: ADD FIELD MODIFICATION
-// ════════════════════════════════════════════════════════════════════════
 
 /**
  * Adds or updates a FieldModification entry in a table-extension via the C# bridge.
@@ -1686,9 +1642,7 @@ export async function bridgeAddFieldModification(
   }
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // MENU: ADD MENU ITEM TO MENU
-// ════════════════════════════════════════════════════════════════════════
 
 /**
  * Adds a menu item reference to a menu via the C# bridge.
@@ -1715,9 +1669,7 @@ export async function bridgeAddMenuItemToMenu(
   }
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // BATCH MODIFY
-// ════════════════════════════════════════════════════════════════════════
 
 /**
  * Executes multiple write operations on a single object in one bridge call.
@@ -1758,9 +1710,7 @@ export async function bridgeBatchModify(
   }
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // CAPABILITIES
-// ════════════════════════════════════════════════════════════════════════
 
 /**
  * Retrieves the structured capabilities map from the C# bridge.
@@ -1790,9 +1740,7 @@ export async function bridgeGetCapabilities(
   }
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // FORM PATTERN DISCOVERY
-// ════════════════════════════════════════════════════════════════════════
 
 /**
  * Discovers available D365FO form patterns from the Patterns DLL or fallback list.
@@ -1822,9 +1770,7 @@ export async function bridgeDiscoverFormPatterns(
   }
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // SECURITY ARTIFACT (Phase 6)
-// ════════════════════════════════════════════════════════════════════════
 
 export async function tryBridgeSecurityArtifact(
   bridge: BridgeClient | undefined,
@@ -1937,9 +1883,7 @@ function formatSecurityRole(role: BridgeSecurityRoleResult, _includeChain: boole
   return out;
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // MENU ITEM (Phase 6)
-// ════════════════════════════════════════════════════════════════════════
 
 export async function tryBridgeMenuItem(
   bridge: BridgeClient | undefined,
@@ -1983,9 +1927,7 @@ function formatMenuItem(mi: BridgeMenuItemResult): string {
   return out;
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // TABLE EXTENSIONS (Phase 6)
-// ════════════════════════════════════════════════════════════════════════
 
 export async function tryBridgeTableExtensions(
   bridge: BridgeClient | undefined,
@@ -2031,9 +1973,7 @@ function formatTableExtensions(r: BridgeTableExtensionListResult): string {
   return out;
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // CODE COMPLETION (Phase 6)
-// ════════════════════════════════════════════════════════════════════════
 
 export async function tryBridgeCompletion(
   bridge: BridgeClient | undefined,
@@ -2089,9 +2029,7 @@ function formatCompletion(r: BridgeCompletionResult, prefix?: string): string {
   return out;
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // FIND COC EXTENSIONS via XREF (Phase 6)
-// ════════════════════════════════════════════════════════════════════════
 
 export async function tryBridgeCocExtensions(
   bridge: BridgeClient | undefined,
@@ -2143,9 +2081,7 @@ function formatCocExtensions(r: BridgeExtensionClassResult, methodNameFilter?: s
   return out;
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // FIND EVENT HANDLERS via XREF (Phase 6)
-// ════════════════════════════════════════════════════════════════════════
 
 export async function tryBridgeEventHandlers(
   bridge: BridgeClient | undefined,
@@ -2197,9 +2133,7 @@ function formatEventHandlers(r: BridgeEventSubscriberResult): string {
   return out;
 }
 
-// ════════════════════════════════════════════════════════════════════════
 // API USAGE CALLERS via XREF (P5)
-// ════════════════════════════════════════════════════════════════════════
 
 export async function tryBridgeApiUsageCallers(
   bridge: BridgeClient | undefined,

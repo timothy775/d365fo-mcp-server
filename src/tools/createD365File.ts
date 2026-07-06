@@ -46,7 +46,6 @@ async function withProjectFileLock<T>(projectPath: string, fn: () => Promise<T>)
     return await fn();
   } finally {
     resolve();
-    // Clean up the map entry only if it still points to this chain slot
     if (projectFileLocks.get(key) === next) {
       projectFileLocks.delete(key);
     }
@@ -237,17 +236,13 @@ function fieldTypeToAxType(fieldType: string, edtName?: string): string {
 /**
  * Normalize the flexible field specs accepted by the tool / XML generators
  * (`{ name, edt?, type?, fieldType?, extendedDataType?, enumType?, mandatory?, label? }`)
- * into the key shape the C# bridge's WriteFieldParam ACTUALLY deserializes.
+ * into the key shape the C# bridge's WriteFieldParam actually deserializes.
  *
- * CRITICAL: WriteFieldParam uses `[JsonPropertyName("type")]` and
- * `[JsonPropertyName("edt")]` — the bridge reads the JSON keys `type` and `edt`,
- * NOT `fieldType`/`extendedDataType`. Emitting the latter silently loses both:
- * the bridge sees FieldType=null → CreateTableField falls to the default branch and
- * produces a bare AxTableFieldString with no ExtendedDataType. (This bit
- * table-extension AND table create — both share this path.) Accept either input
- * spelling and always emit the bridge's keys. `type` may arrive as a base-type
- * keyword ("Integer") or a full i:type ("AxTableFieldInt"); the latter is stripped
- * back to the keyword the bridge's CreateTableField switch understands.
+ * The bridge only reads JSON keys `type` and `edt` (`[JsonPropertyName]`), not
+ * `fieldType`/`extendedDataType` — accept either input spelling and always emit
+ * the bridge's keys. `type` may arrive as a base-type keyword ("Integer") or a
+ * full i:type ("AxTableFieldInt"); the latter is stripped back to the keyword
+ * the bridge's CreateTableField switch understands.
  */
 export function normalizeFieldSpecsForBridge(
   fields: Record<string, unknown>[],
@@ -272,17 +267,10 @@ export function normalizeFieldSpecsForBridge(
  * C# bridge's WriteIndexParam actually deserializes: `{ name, fields: string[],
  * alternateKey?, allowDuplicates? }`.
  *
- * CRITICAL: the ONLY index shape documented anywhere in the tool's schema is the
- * `modify(operation="add-index")` one — `{ indexName, indexFields: [{ fieldName }] }`
- * — and `modifyD365File.ts` correctly translates those keys before calling the
- * bridge. But `d365fo_file(action="create", objectType="table"|"table-extension",
- * properties.indexes=[...])` forwarded `properties.indexes` to the bridge
- * UNTRANSLATED. WriteIndexParam has no `indexName`/`indexFields` properties, so
- * System.Text.Json silently ignores both unrecognized keys — the create call still
- * reports success, but the written index has an empty Name and an empty Fields
- * list, which xppc rejects at build time ("the name of the '1st' index is not
- * valid"). Accept both the bridge's native `{name, fields}` shape and the
- * documented `{indexName, indexFields}` shape so create behaves the same as modify.
+ * Accepts both the bridge's native `{name, fields}` shape and the documented
+ * `modify(operation="add-index")` shape `{indexName, indexFields: [{fieldName}]}`.
+ * Unrecognized keys are silently ignored by System.Text.Json, so any unmapped
+ * shape produces an index with an empty Name/Fields that xppc rejects at build time.
  */
 export function normalizeIndexSpecsForBridge(
   indexes: Record<string, unknown>[],
@@ -342,9 +330,7 @@ export class XmlTemplateGenerator {
     let declaration = fullSource.substring(0, classEndIdx + 1);
     const rest = fullSource.substring(classEndIdx + 1);
     if (!rest.trim()) {
-      // Nothing after the class closing brace.
-      // Check whether the class body itself contains method definitions
-      // (AI-style: methods INSIDE the class braces).
+      // Nothing after the class closing brace — methods may be nested inside the class braces instead.
       const innerResult = XmlTemplateGenerator.extractInnerClassMethods(declaration);
       if (innerResult) {
         console.error(
@@ -353,9 +339,7 @@ export class XmlTemplateGenerator {
         );
         return innerResult;
       }
-      // Normalise: ensure exactly one blank line before the closing '}'
-      // when the class body has content (e.g. member variable declarations).
-      // Fixes: "    VendGroupId vendGroupId;\n}" → "    VendGroupId vendGroupId;\n\n}"
+      // Ensure exactly one blank line before the closing '}' when the body has content.
       const bodyStart = declaration.indexOf('{');
       const bodyContent = declaration.substring(bodyStart + 1, declaration.lastIndexOf('}'));
       if (bodyContent.trim().length > 0) {
@@ -364,10 +348,8 @@ export class XmlTemplateGenerator {
       return { declaration, methods: [] };
     }
 
-    // ── FIX: Rescue member-variable declarations that appear OUTSIDE the class {}
-    // Some AI generators emit variable declarations after the class closing brace but
-    // before the first method (e.g. "}\nint myVar;\npublic void foo() { }").
-    // D365FO requires them inside the <Declaration> CDATA block. Detect and inject them now.
+    // D365FO requires member-variable declarations inside <Declaration>, so rescue any that
+    // appear outside the class {} but before the first method.
     const nextBraceInRest = rest.indexOf('{');
     if (nextBraceInRest !== -1) {
       const preMethodText = rest.substring(0, nextBraceInRest);
@@ -422,14 +404,8 @@ export class XmlTemplateGenerator {
       pos = bodyEnd + 1;
     }
 
-    // ── Fallback: methods inside class {} ─────────────────────────────────────
-    // AI generators often write methods INSIDE the class body (not D365FO style).
-    // When that happens, `rest` is empty and `methods` is empty — the entire class
-    // (including method bodies) ends up in `<Declaration>`, which means D365FO sees
-    // no separate <Method> elements and the methods have no blank-line separation.
-    //
-    // Fix: detect methods nested at depth-1 inside the class body and extract them
-    // so they become proper <Method> elements separated by blank lines via .join('\n\n').
+    // Fallback: if the source had no methods after the class body, they may be
+    // nested at depth-1 inside the class body instead — extract them there.
     if (methods.length === 0) {
       const innerResult = XmlTemplateGenerator.extractInnerClassMethods(declaration);
       if (innerResult) {

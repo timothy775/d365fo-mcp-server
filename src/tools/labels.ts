@@ -33,8 +33,7 @@ export const LABEL_DISPATCH: Record<LabelAction, LabelDispatch> = {
   search: { tool: searchLabelsTool, toolName: 'search_labels' },
   info:   { tool: getLabelInfoTool, toolName: 'get_label_info' },
   create: { tool: createLabelTool,  toolName: 'create_label' },
-  // update reuses the create handler, which overwrites existing label text when
-  // overwriteExisting is set (injected below). Same args as create.
+  // update reuses create with overwriteExisting forced true (see below); same args as create.
   update: { tool: createLabelTool,  toolName: 'create_label' },
   rename: { tool: renameLabelTool,  toolName: 'rename_label' },
 };
@@ -50,11 +49,7 @@ const LabelsArgsSchema = z
   })
   .passthrough();
 
-/**
- * Common near-misses agents reach for, mapped to the canonical action. Keeps the
- * advertised enum tight while still accepting obvious synonyms at runtime (for
- * clients that don't enforce the JSON-schema enum before dispatch).
- */
+/** Synonym-to-canonical-action map, for clients that don't enforce the JSON-schema enum before dispatch. */
 const ACTION_ALIASES: Record<string, LabelAction> = {
   list: 'info', 'list-files': 'info', 'list-label-files': 'info', get: 'info', 'get-info': 'info',
   find: 'search', query: 'search', lookup: 'search',
@@ -63,8 +58,7 @@ const ACTION_ALIASES: Record<string, LabelAction> = {
   'rename-label': 'rename',
 };
 
-/** Action values that mean "create the label *file* itself" (there is no dedicated action for this —
- *  action=create auto-creates a missing AxLabelFile as a side effect of creating the first label in it). */
+/** There is no dedicated "create label file" action — action=create auto-creates a missing AxLabelFile as a side effect. */
 const LABEL_FILE_ACTIONS = new Set(['create-label-file', 'create-file', 'create-labelfile', 'new-label-file']);
 
 export async function labelsTool(request: CallToolRequest, context: XppServerContext) {
@@ -115,12 +109,10 @@ export async function labelsTool(request: CallToolRequest, context: XppServerCon
     };
   }
 
-  // update is create with overwrite-on-collision — force the flag so callers
-  // can't accidentally clobber text via action="create".
+  // Force overwrite for update so it can't be triggered accidentally via action="create".
   if (action === 'update') (rest as Record<string, unknown>).overwriteExisting = true;
 
-  // Param near-misses for search: the handler expects `query`, but agents commonly
-  // reach for searchText/text/q. Map them so the first call succeeds.
+  // Map common param synonyms (searchText/text/q) to the `query` the handler expects.
   if (action === 'search') {
     const r = rest as Record<string, unknown>;
     if (r.query === undefined) {

@@ -234,7 +234,6 @@ export async function handleGenerateSmartTable(
     try {
       const db = symbolIndex.getReadDb();
 
-      // Copy fields directly from the symbols DB
       const dbFields = db.prepare(`
         SELECT name, signature FROM symbols
         WHERE type = 'field' AND parent_name = ?
@@ -250,7 +249,6 @@ export async function handleGenerateSmartTable(
         edt: f.signature || undefined,
       }));
 
-      // Copy relations from table_relations
       const dbRelations = db.prepare(`
         SELECT relation_name, target_table, constraint_fields FROM table_relations
         WHERE source_table = ?
@@ -276,7 +274,6 @@ export async function handleGenerateSmartTable(
     try {
       const db = symbolIndex.getReadDb();
 
-      // Use heuristic name patterns (matching analyzeTableGroup logic)
       const namePatterns: Record<string, string> = {
         Transaction: '%Trans%',
         Parameter: '%Parameters',
@@ -292,7 +289,6 @@ export async function handleGenerateSmartTable(
       `).all(...(namePattern ? [namePattern] : [])) as Array<{ name: string }>;
 
       if (sampleTables.length > 0) {
-        // Build field frequency map
         const fieldFrequency = new Map<string, { edt: string; count: number }>();
         for (const table of sampleTables) {
           const tableFields = db.prepare(`
@@ -382,9 +378,7 @@ export async function handleGenerateSmartTable(
     const hintDb = symbolIndex.getReadDb();
 
     for (const hint of hintFields) {
-      // Duplicate field name in hint list (e.g. agent passed the EDT name twice: "AmountMST, AmountMST"
-      // instead of distinct field names like "DailyRate, LineAmount"). Preserve both by suffixing the
-      // second occurrence rather than silently dropping it — the caller wanted two separate fields.
+      // On duplicate hint names, suffix the second occurrence instead of dropping it.
       let fieldName = hint;
       if (fields.find(f => f.name === fieldName)) {
         let suffix = 2;
@@ -395,13 +389,12 @@ export async function handleGenerateSmartTable(
 
       const edt = resolveBestEdt(hint, hintDb);
       const hintLower = hint.toLowerCase();
-      // Mark as mandatory only when the field name IS an identifier (ends with 'Id',
-      // equals 'RecId', or exactly 'AccountNum'/'CustAccount' patterns).
-      // Do NOT match fields that merely CONTAIN 'id' mid-word (e.g. ValidFrom, Description).
+      // Mandatory only when the name IS an identifier (ends with 'Id', or a known PK pattern) —
+      // not when it merely contains 'id' mid-word (e.g. ValidFrom, Description).
       const isMandatory =
         hintLower === 'recid' ||
-        /id$/.test(hintLower) ||          // SalesId, CustId, AccountId …
-        hintLower === 'accountnum' ||      // D365FO conventional PK fields
+        /id$/.test(hintLower) ||
+        hintLower === 'accountnum' ||
         hintLower === 'accountnumber' ||
         hintLower === 'num' ||
         hintLower === 'code';
@@ -420,7 +413,6 @@ export async function handleGenerateSmartTable(
     usedFallback = true;
     console.warn(`[generateSmartTable] No fieldsHint provided — generating GENERIC defaults only. The table will be incomplete!`);
     const nameLower = name.toLowerCase();
-    // Derive reasonable defaults from table name and group
     if (nameLower.includes('account') || tableGroup === 'Main') {
       fields.push({ name: 'AccountNum', edt: 'CustAccount', mandatory: true });
       fields.push({ name: 'Name', edt: 'Name' });
@@ -433,22 +425,19 @@ export async function handleGenerateSmartTable(
       fields.push({ name: 'Key', edt: 'String255', mandatory: true });
       fields.push({ name: 'Value', edt: 'String255' });
     } else {
-      // Generic fallback
       fields.push({ name: 'RecId', edt: 'RecId', mandatory: true });
     }
   }
 
-  // Resolve EDT base type from edt_metadata for each field that has an EDT but no explicit type.
-  // Without this, all EDT fields default to AxTableFieldString even for Real/Date/Int64 EDTs.
-  // Also validate that every EDT actually exists in the indexed metadata.
+  // Resolve each field's base type from edt_metadata (EDT fields otherwise default to
+  // AxTableFieldString even for Real/Date/Int64 EDTs), and validate EDTs exist in the index.
   const edtWarnings: string[] = [];
   const missingEdts: Array<{ field: string; edt: string }> = [];
   {
     const db = symbolIndex.getReadDb();
     for (const f of fields) {
-      // The resolved "EDT" may actually be an enum (e.g. a custom RentStatus enum
-      // or a field that resolveBestEdt echoed back as a same-session custom type).
-      // An enum-backed field must be AxTableFieldEnum + EnumType, not String + EDT.
+      // A resolved "EDT" may actually be an enum name; an enum-backed field needs
+      // AxTableFieldEnum + EnumType, not AxTableFieldString + ExtendedDataType.
       if (f.edt && !f.enumType && isEnumName(f.edt, db)) {
         f.enumType = f.edt;
         f.type = 'Enum';
@@ -456,13 +445,9 @@ export async function handleGenerateSmartTable(
         continue;
       }
       if (f.edt && !f.type) {
-        // Authoritative base type from the C# bridge (live IMetadataProvider) when
-        // available. The symbol index stores extends=null for ROOT Date/Real/Int64
-        // EDTs (e.g. TransDate→Date, Qty→Real), so resolveEdtBaseType wrongly
-        // defaulted them to String — the #1 source of "scaffold made my date/amount
-        // field a string". The bridge reads the real AxEdt element type and resolves
-        // it correctly. Fall back to the index + name heuristic only when the bridge
-        // is unavailable (Azure/Linux) or doesn't know the EDT.
+        // Prefer the bridge (live IMetadataProvider) for the base type: the symbol index
+        // stores extends=null for ROOT Date/Real/Int64 EDTs, so it can't distinguish them
+        // from String-based EDTs. Fall back to the index/heuristic when no bridge is available.
         f.type = await bridgeEdtBaseType(bridge, f.edt)
               ?? resolveEdtBaseType(f.edt, db)
               ?? heuristicEdtBaseType(f.edt);
@@ -478,12 +463,9 @@ export async function handleGenerateSmartTable(
     }
   }
 
-  // ── BP rule: BPErrorEDTNotMigrated ─────────────────────────────────────────
-  // When a field uses an EDT that carries an implicit relation (e.g. ItemId → InventTable),
-  // D365FO BP requires an explicit table relation on the table — otherwise you get:
-  //   BPErrorEDTNotMigrated: The relation under the EDT must be migrated to table relation.
-  //   BPUpgradeMetadataEDTRelation: EDT relation found in field X. It should be migrated.
-  // Auto-detect from edt_metadata.reference_table and generate matching relations.
+  // BP rule BPErrorEDTNotMigrated: a field whose EDT carries an implicit relation
+  // (e.g. ItemId → InventTable) requires an explicit table relation. Auto-detect
+  // from edt_metadata.reference_table and generate matching relations.
   {
     const db = symbolIndex.getReadDb();
     for (const f of fields) {
@@ -497,9 +479,9 @@ export async function handleGenerateSmartTable(
         ).get(f.edt) as { reference_table: string } | undefined;
 
         if (edtRow?.reference_table) {
-          // Determine the related field — typically the EDT name itself is the PK field on the target table
-          // e.g. ItemId EDT → InventTable.ItemId, WHSZoneId → WHSZone.WHSZoneId
-          const relatedField = f.edt;  // The EDT name is the canonical field name on the target table
+          // The EDT name is typically the PK field name on the target table too
+          // (e.g. ItemId EDT → InventTable.ItemId).
+          const relatedField = f.edt;
           relations.push({
             name: f.name,
             targetTable: edtRow.reference_table,

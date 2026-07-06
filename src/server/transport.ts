@@ -1,7 +1,6 @@
 /**
- * Custom HTTP Transport for MCP over Azure Web Service
- * Implements direct JSON responses (not SSE streaming) for Azure orchestrator compatibility
- * CRITICAL: Includes server.connect() call for proper MCP protocol lifecycle
+ * Custom HTTP Transport for MCP over Azure Web Service.
+ * Uses direct JSON responses (not SSE streaming) for Azure orchestrator compatibility.
  */
 
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -14,22 +13,17 @@ import { getConfigManager } from '../utils/configManager.js';
 import { buildProgressMessage } from '../utils/toolProgressMessage.js';
 
 /**
- * Per-request timeout for the HTTP transport (ms).
- * Azure App Service + SQLite over SMB storage can be significantly slower than
- * local SSD. batch_search may run 10 parallel FTS5 queries which compounds the
- * latency. Default 120 s is generous but still well below Azure's 230 s limit.
+ * Per-request timeout for the HTTP transport (ms). Default 120s stays well below
+ * Azure's 230s request limit while allowing for slower SMB-backed SQLite I/O.
  */
 const TOOL_TIMEOUT_MS = Math.max(10_000,
   parseInt(process.env.MCP_TOOL_TIMEOUT_MS || '120000', 10) || 120_000
 );
 
 /**
- * Per-tool timeout classes. A single global ceiling has two failure modes:
- *  - fast tools (get_object_info, search) starve the request slot when a
- *    misbehaving call hangs for the full 120 s
- *  - heavy tools (build, db-sync, systest) get killed prematurely
- *
- * We split timeouts by workload. All values can be overridden via env.
+ * Per-tool timeout classes so fast tools don't wait out a hung call's full
+ * timeout and heavy tools (build/db-sync/systest) aren't killed prematurely.
+ * All values can be overridden via env.
  */
 const TOOL_TIMEOUT_FAST_MS  = Math.max(5_000,  parseInt(process.env.MCP_TOOL_TIMEOUT_FAST_MS  || '30000',  10) || 30_000);
 const TOOL_TIMEOUT_HEAVY_MS = Math.max(60_000, parseInt(process.env.MCP_TOOL_TIMEOUT_HEAVY_MS || '600000', 10) || 600_000);
@@ -47,7 +41,7 @@ const FAST_TOOLS = new Set<string>([
   'get_object_info',
   'get_method',
   'extension_info', 'security_info',
-  // `labels` is NOT here — write actions (create/rename) can scan many files and exceed the fast timeout.
+  // `labels` excluded: write actions (create/rename) can scan many files.
 ]);
 
 function resolveToolTimeout(toolName: string | undefined): number {
@@ -58,12 +52,10 @@ function resolveToolTimeout(toolName: string | undefined): number {
 }
 
 /**
- * Extract workspace folder path from GitHub Copilot MCP request.
- * Copilot can pass workspace info via HTTP headers or _meta in params.
- * Returns a local file-system path (converts file:// URI → path).
+ * Extract workspace folder path from GitHub Copilot MCP request (HTTP headers or
+ * params._meta). Returns a local file-system path (converts file:// URI → path).
  */
 function extractWorkspaceFromRequest(req: Request, requestBody: JSONRPCRequest): string | null {
-  // 1. Check known VS Code / GitHub Copilot HTTP headers
   const headerCandidates = [
     req.headers['x-vscode-workspace-folder-uris'],
     req.headers['x-vscode-workspace-folder'],
@@ -79,10 +71,8 @@ function extractWorkspaceFromRequest(req: Request, requestBody: JSONRPCRequest):
     }
   }
 
-  // 2. Check params._meta for workspace folder URIs (tool calls and initialize)
   const meta = (requestBody as any).params?._meta;
   if (meta) {
-    // Array form: workspaceFolders / workspaceFolderUris
     for (const key of ['workspaceFolders', 'workspaceFolderUris', 'roots']) {
       const val = meta[key];
       if (Array.isArray(val) && val.length > 0) {
@@ -91,7 +81,6 @@ function extractWorkspaceFromRequest(req: Request, requestBody: JSONRPCRequest):
         if (path) return path;
       }
     }
-    // Single string form
     for (const key of ['workspaceFolderUri', 'workspaceFolder', 'workspacePath']) {
       const val = meta[key];
       if (typeof val === 'string') {

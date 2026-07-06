@@ -91,8 +91,6 @@ export async function getMethodSignatureTool(request: CallToolRequest, context: 
     const methodRow = methodStmt.get(methodName, className);
 
     // 3. C# bridge (IMetadataProvider — live source, always current)
-    // Bridge returns full source → parse signature locally + detect obsolete.
-    // This is the sole data path — eliminates JSON file I/O and XML parsing.
     const includeCoc = args.includeCocTemplate ?? false;
     const bridgeSignature = await tryBridgeMethodSignature(
       context.bridge, className, methodName, classRow.model, includeCoc,
@@ -117,9 +115,7 @@ export async function getMethodSignatureTool(request: CallToolRequest, context: 
     }
 
     // classDeclaration is the class header pseudo-member — it has no
-    // parenthesised signature, so the signature path can never parse it even
-    // though its source is retrievable. Give an accurate pointer instead of the
-    // misleading "delegate / SubscribesTo" not-found message below.
+    // parenthesised signature and can't be parsed by the signature path.
     if (methodName.toLowerCase() === 'classdeclaration') {
       return {
         content: [{
@@ -132,7 +128,6 @@ export async function getMethodSignatureTool(request: CallToolRequest, context: 
       };
     }
 
-    // Method not in SQLite and not reachable via bridge/XML.
     // Delegates and SubscribesTo handlers are commonly absent from the index.
     if (!methodRow) {
       return {
@@ -172,10 +167,8 @@ export async function getMethodSignatureTool(request: CallToolRequest, context: 
 }
 
 /**
- * Try C# bridge for method signature.
- * Bridge returns full source → parse signature locally + detect obsolete.
- * This is the fastest path on Windows VMs (one IPC call, no JSON/XML file I/O).
- * Returns null to signal fallback when bridge is unavailable.
+ * Try C# bridge for method signature. Returns null to signal fallback when
+ * the bridge is unavailable.
  */
 async function tryBridgeMethodSignature(
   bridge: BridgeClient | undefined,
@@ -189,7 +182,6 @@ async function tryBridgeMethodSignature(
     const ms = await bridge.getMethodSource(className, methodName);
     if (!ms.found || !ms.source) return null;
 
-    // Parse signature from full source — same function used by the XML path
     const signature = parseMethodSignature(ms.source, methodName);
     if (!signature) return null;
 
@@ -203,9 +195,7 @@ async function tryBridgeMethodSignature(
 }
 
 /**
- * Try XML file parsing for method signature.
- * Fallback when C# bridge is unavailable (Azure, Linux, bridge not running).
- * Mirrors the pattern from classInfo.ts: parse XML with timeout guard.
+ * Fallback when C# bridge is unavailable: parse the XML file with a timeout guard.
  * Returns null to signal fallback to SQLite-only.
  */
 async function tryXmlMethodSignature(

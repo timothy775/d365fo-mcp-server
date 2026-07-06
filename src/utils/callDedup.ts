@@ -20,16 +20,10 @@ export const DEDUP_EXCLUDED_TOOLS = new Set([
   'run_bp_check', 'run_systest_class', 'review_workspace_changes',
   'verify_d365fo_project', 'get_workspace_info',
   'prepare', // issues fresh grounding tokens
-  // generate_object(mode="scaffold") writes the object file directly to disk in
-  // traditional/Windows mode (same write-tool semantics as d365fo_file) AND reads
-  // live, mutable state (the symbol index) via cloneFrom/tableMapping/fieldsHint.
-  // Caching it by input args alone is unsound: a legitimate retry after
-  // update_symbol_index() (or after fixing a copyFrom/cloneFrom table) served the
-  // IDENTICAL stale/broken result from the dedup cache instead of re-reading the
-  // now-current index — found live 2026-07-01 (usage-examples eval, scenario 2):
-  // cloneFrom="CustGroup" + tableMapping to a brand-new table not yet indexed
-  // silently produced a 0-datasource form, and re-running after indexing the
-  // table returned the exact same broken cached result.
+  // generate_object(mode="scaffold") writes directly to disk (like d365fo_file) and
+  // reads live, mutable index state via cloneFrom/tableMapping/fieldsHint, so caching
+  // by input args alone is unsound: a retry after update_symbol_index() must re-read
+  // the now-current index rather than replay a stale cached result.
   'generate_object',
 ]);
 

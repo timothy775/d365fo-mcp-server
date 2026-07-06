@@ -29,8 +29,7 @@ export async function startCommand(instanceName: string | undefined): Promise<vo
     }
   }
 
-  // UDE staleness guard: a pinned XPP config that no longer exists means the
-  // environment was upgraded and this database indexes the old version.
+  // A pinned XPP config that no longer exists means the UDE was upgraded and the indexed database is stale.
   if (isWindows && target.envFile && isXppConfigStale(target.envFile)) {
     const configName = readEnvValue(target.envFile, 'XPP_CONFIG_NAME');
     p.log.warn(`XPP_CONFIG_NAME '${configName}' does not match any file in ${xppConfigDir()}.\n` +

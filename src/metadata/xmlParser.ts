@@ -53,7 +53,6 @@ export class XppMetadataParser {
       // Methods are nested in SourceCode.Methods.Method
       const methodsData = axClass.SourceCode?.Methods?.Method || axClass.Methods?.Method;
 
-      // Parse once — reused for both classInfo.methods and extractClassDependencies
       const parsedMethods = this.parseMethods(methodsData, className);
       const parsedImplements = this.parseImplements(axClass.Implements);
       const parsedDeclaration = this.extractClassDeclaration(axClass);
@@ -74,10 +73,8 @@ export class XppMetadataParser {
         documentation: axClass.DeveloperDocumentation || undefined,
       };
 
-      // Extract class metadata
       const classInfo: XppClassInfo = {
         ...classInfoBase,
-        // Enhanced metadata — reuse already-parsed methods to avoid double work
         tags: this.enhancedParser.generateClassTags({ ...classInfoBase, methods: [] }),
         usedTypes: this.enhancedParser.extractClassDependencies(classInfoBase),
         description: axClass.DeveloperDocumentation || `${className} class${extendsClass ? ` extending ${extendsClass}` : ''}`,
@@ -110,7 +107,7 @@ export class XppMetadataParser {
       const tableInfo: XppTableInfo = {
         name: tableName,
         model: model || 'Unknown',
-        sourcePath: filePath,  // Store original XML file path
+        sourcePath: filePath,
         label: axTable.Label || tableName,
         tableGroup: axTable.TableGroup || 'Main',
         primaryIndex: axTable.PrimaryIndex || undefined,
@@ -207,7 +204,6 @@ export class XppMetadataParser {
         documentation: method.DeveloperDocumentation || undefined,
       };
 
-      // Add enhanced metadata
       return this.enhancedParser.parseMethodEnhanced(baseMethod, parentClass);
     });
   }
@@ -221,16 +217,14 @@ export class XppMetadataParser {
   }
 
   /**
-   * Parse table fields from <AxTableField xmlns="" i:type="AxTableFieldString"> nodes.
-   * xml2js (explicitArray:false) groups all <AxTableField> children under the AxTableField key.
-   * The field type is carried in the i:type XML attribute → field.$['i:type'].
+   * Parses <AxTableField i:type="AxTableFieldString"> nodes; the field type
+   * comes from the i:type XML attribute (field.$['i:type']), not an element.
    */
   private parseFields(fieldsData: any): XppFieldInfo[] {
     if (!fieldsData) return [];
 
     const fields = Array.isArray(fieldsData) ? fieldsData : [fieldsData];
     return fields.map(field => {
-      // i:type attribute value e.g. 'AxTableFieldString' → strip prefix to get 'String'
       const rawType: string = field.$?.['i:type'] || 'AxTableFieldString';
       const xppType = rawType.replace('AxTableField', '') || 'String';
       return {
@@ -251,7 +245,7 @@ export class XppMetadataParser {
     return indexes.map(index => ({
       name: index.Name || 'unknown',
       fields: this.parseIndexFields(index.Fields),
-      // D365FO uses <AlternateKey>Yes</AlternateKey> to mark unique indexes (NOT AllowDuplicates)
+      // Uniqueness is marked via AlternateKey, not AllowDuplicates
       unique: index.AlternateKey === 'Yes' || index.AlternateKey === 'true',
       clustered: index.IsClustered === 'Yes' || index.IsClustered === 'true',
     }));
@@ -271,7 +265,6 @@ export class XppMetadataParser {
     }
 
     if (typeof fieldsStr !== 'string') {
-      // Handle case where xml2js returns an object or array
       if (Array.isArray(fieldsStr)) {
         return fieldsStr
           .map((field: any) => {

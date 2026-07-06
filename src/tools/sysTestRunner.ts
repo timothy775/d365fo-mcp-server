@@ -42,13 +42,9 @@ export const sysTestRunnerTool = async (params: any, _context: any) => {
       || configManager.getPackagePath()
       || 'K:\\AosService\\PackagesLocalDirectory';
 
-    // SysTestConsole.exe is the binary D365FO actually ships for running SysTest
-    // classes from the command line (verified CLI: `/test:<class> /xml:<file>`).
-    // xppbp.exe is the BP checker and has NO test-running capability — an earlier
-    // version of this tool assumed a `-runtest:` flag that does not exist on it.
-    // SysTestRunner.exe is kept as a legacy/forward-compat fallback in case a
-    // future or differently-packaged install ships it; it has not been observed
-    // on a real D365FO install.
+    // SysTestConsole.exe is the binary D365FO ships for running SysTest classes from the CLI
+    // (`/test:<class> /xml:<file>`). xppbp.exe is the BP checker and cannot run tests.
+    // SysTestRunner.exe is a legacy/forward-compat fallback, not observed on real installs.
     const sysTestConsolePath = path.join(packagesRoot, 'Bin', 'SysTestConsole.exe');
     const sysTestRunnerPath = path.join(packagesRoot, 'Bin', 'SysTestRunner.exe');
 
@@ -114,8 +110,7 @@ export const sysTestRunnerTool = async (params: any, _context: any) => {
       try {
         xmlResult = await fs.readFile(xmlResultPath, 'utf8');
       } catch {
-        // Best-effort only — SysTestConsole may name/format the result file
-        // differently than expected; fall back to stdout/stderr below.
+        // Best-effort — fall back to stdout/stderr below.
       }
     }
 
@@ -147,10 +142,8 @@ export const sysTestRunnerTool = async (params: any, _context: any) => {
         content: [{
           type: 'text',
           text: '❌ SysTestConsole.exe requires an interactive console session.\n\n' +
-            'It unconditionally calls a debugger-attach prompt (Console.ReadKey) before running any ' +
-            'test, even in local-AOS mode. This fails when invoked from a non-interactive/automation ' +
-            'session (no real console available) — confirmed even with a freshly allocated console window. ' +
-            'This is a platform limitation of SysTestConsole.exe itself, not a bug in this tool.\n\n' +
+            'It unconditionally prompts for debugger-attach (Console.ReadKey) before running any test, ' +
+            'even in local-AOS mode — this is a platform limitation, not a bug in this tool.\n\n' +
             'Workaround: run the test from an interactive RDP/console session on the dev VM, or wire up ' +
             'vstest.console.exe with RunnableDropSysTest.TestAdapter.dll (shipped alongside SysTestConsole.exe), ' +
             'which is the non-interactive path Microsoft documents for CI.\n\n' + output,

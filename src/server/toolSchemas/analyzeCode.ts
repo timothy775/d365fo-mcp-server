@@ -20,10 +20,10 @@ export const analyzeCodeTool = {
           enum: ['patterns', 'implementations', 'completeness', 'api-usage'],
           description: 'Which analysis to run.',
         },
-        // ── mode=patterns ──────────────────────────────────────────────
+        // mode=patterns
         scenario: { type: 'string', description: '[patterns] REQUIRED. Scenario/functionality to analyze (e.g., "financial dimensions", "inventory transactions").' },
         classPattern: { type: 'string', description: '[patterns] Optional class name pattern to filter results (e.g., "Helper", "Service").' },
-        // ── mode=implementations ───────────────────────────────────────
+        // mode=implementations
         methodName: { type: 'string', description: '[implementations] REQUIRED. Name of the method to implement.' },
         parameters: {
           type: 'array',
@@ -38,12 +38,12 @@ export const analyzeCodeTool = {
           },
         },
         returnType: { type: 'string', default: 'void', description: '[implementations] Method return type.' },
-        // ── mode=implementations|completeness ──────────────────────────
+        // mode=implementations|completeness
         className: { type: 'string', description: '[implementations|completeness] REQUIRED. Class to analyze / containing the method.' },
-        // ── mode=api-usage ─────────────────────────────────────────────
+        // mode=api-usage
         apiName: { type: 'string', description: '[api-usage] REQUIRED. Name of the API/class to get usage patterns for.' },
         context: { type: 'string', description: '[api-usage] Optional context to filter patterns (e.g., "initialization", "validation").' },
-        // ── shared ─────────────────────────────────────────────────────
+        // shared
         limit: { type: 'number', description: '[patterns] Maximum number of pattern examples to return', default: 5 },
       },
       required: ['mode'],
