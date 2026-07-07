@@ -28,6 +28,7 @@ import {
   bridgeRefreshProvider,
 } from '../bridge/index.js';
 import { ProjectFileManager, ProjectFileFinder } from './createD365File.js';
+import { heuristicEdtBaseType } from './generateSmartTable.js';
 import { normalizeD365Xml } from '../utils/d365XmlNormalizer.js';
 import { enforceGrounding } from '../utils/provenanceStore.js';
 import { gateOnReferenceErrors } from './resolveReferences.js';
@@ -37,6 +38,7 @@ import {
 } from './validateFormPattern.js';
 import { validateEdtExtensionChange } from '../utils/edtExtensionValidator.js';
 import { lintXppSelect } from '../utils/xppSelectLint.js';
+import { getRequiredParams, renderOpSpec, OP_PARAM_ALIASES } from './d365foFileOpSpecs.js';
 
 /**
  * Decode the standard XML entities (&lt;, &gt;, &apos;, &quot;, &amp;) and normalise
@@ -244,12 +246,9 @@ export function extractMethodNameFromSource(source: string | undefined): string 
 }
 
 /**
- * Direct XML file-level replace-code fallback.
- * Used when the C# bridge fails or returns null for replace-code on forms/form-extensions
- * (e.g. control override methods that the SDK doesn't expose via the Methods API).
- *
- * Reads the XML file, performs a simple string replacement inside <Source> CDATA blocks,
- * and writes the file back. This is a last-resort fallback — the bridge is always preferred.
+ * Direct XML file-level replace-code fallback, used when the C# bridge can't
+ * reach a method (e.g. form/form-extension control overrides not exposed via
+ * the Methods API). Last resort — the bridge is always preferred.
  */
 async function directXmlReplaceCode(
   filePath: string,
@@ -257,10 +256,8 @@ async function directXmlReplaceCode(
   newCode: string,
 ): Promise<{ success: boolean; message: string } | null> {
   try {
-    // D365FO XML files on disk are CRLF, but oldCode passed by the AI is typically
-    // copied from get_method_source / get_object_info output that already strips CRs.
-    // Normalize both sides to LF for matching, then let normalizeD365Xml put the
-    // file back into D365FO's canonical shape (no BOM, CRLF, no trailing newline).
+    // Files on disk are CRLF; oldCode from get_method_source is typically LF-only.
+    // Normalize both to LF for matching, then normalizeD365Xml restores CRLF on write.
     const rawContent = await fs.readFile(filePath, 'utf-8');
     const content = rawContent.replace(/^﻿/, '').replace(/\r\n/g, '\n');
     const normOld = oldCode.replace(/\r\n/g, '\n');
@@ -270,9 +267,8 @@ async function directXmlReplaceCode(
       return null; // oldCode not found in file at all
     }
 
-    // Ensure there is exactly one occurrence so we replace the correct block.
-    // String.prototype.replace() without /g only replaces the FIRST occurrence,
-    // which would silently leave other occurrences and produce ambiguous results.
+    // Without /g, String.replace() only replaces the first occurrence, so require
+    // exactly one match to avoid silently picking the wrong one.
     const occurrences = content.split(normOld).length - 1;
     if (occurrences > 1) {
       return {
@@ -294,6 +290,61 @@ async function directXmlReplaceCode(
     };
   } catch (err) {
     console.error(`[modify_d365fo_file] directXmlReplaceCode failed: ${err}`);
+    return null;
+  }
+}
+
+/**
+ * Direct XML fallback for modify-property, used when the bridge rejects
+ * modify-property for an object type (e.g. AxForm) even though the property
+ * is a plain text element (e.g. <Caption>) editable by string replacement.
+ * Only used when the bridge itself reports failure.
+ *
+ * `propertyPath` is a bare element name (no XPath/dotted-path support).
+ * Refuses to act if the element is missing (returns null so the caller
+ * surfaces the original bridge error) or ambiguous (appears more than once).
+ */
+async function directXmlModifyProperty(
+  filePath: string,
+  propertyPath: string,
+  propertyValue: string,
+): Promise<{ success: boolean; message: string } | null> {
+  try {
+    const rawContent = await fs.readFile(filePath, 'utf-8');
+    const content = rawContent.replace(/^﻿/, '');
+    const escapedValue = String(propertyValue)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    const tagName = propertyPath.split(/[./]/).pop()!;
+    const openTagRe = new RegExp(`<${tagName}\\b[^>]*>[\\s\\S]*?</${tagName}>`, 'g');
+    const selfClosingRe = new RegExp(`<${tagName}\\b([^>]*)/>`, 'g');
+
+    const openMatches = content.match(openTagRe) ?? [];
+    const selfClosingMatches = content.match(selfClosingRe) ?? [];
+    const totalMatches = openMatches.length + selfClosingMatches.length;
+
+    if (totalMatches === 0) {
+      return null; // property element not found — let the caller surface the original bridge error
+    }
+    if (totalMatches > 1) {
+      return {
+        success: false,
+        message: `❌ directXmlModifyProperty: <${tagName}> appears ${totalMatches} times in ${filePath} — ambiguous, refusing to guess which one.`,
+      };
+    }
+
+    const updated = openMatches.length === 1
+      ? content.replace(openTagRe, m => m.replace(/>[\s\S]*?</, `>${escapedValue}<`))
+      : content.replace(selfClosingRe, (_m, attrs) => `<${tagName}${attrs}>${escapedValue}</${tagName}>`);
+
+    await fs.writeFile(filePath, normalizeD365Xml(updated), 'utf-8');
+    console.error(`[modify_d365fo_file] ✅ directXmlModifyProperty fallback: set <${tagName}> in ${filePath}`);
+    return {
+      success: true,
+      message: `✅ Property '${propertyPath}' set via direct XML fallback (bridge does not support modify-property for this object type). File: ${filePath}`,
+    };
+  } catch (err) {
+    console.error(`[modify_d365fo_file] directXmlModifyProperty failed: ${err}`);
     return null;
   }
 }
@@ -1451,6 +1502,18 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
             args.propertyPath,
             args.propertyValue,
           );
+
+          // Fallback: some object types (confirmed: AxForm) are rejected by the
+          // bridge outright for modify-property even though the property is a
+          // plain text element trivially editable by string replacement.
+          if (!bridgeResult || !bridgeResult.success) {
+            const xmlFallbackResult = await directXmlModifyProperty(
+              actualFilePath, args.propertyPath, String(args.propertyValue),
+            );
+            if (xmlFallbackResult) {
+              bridgeResult = xmlFallbackResult;
+            }
+          }
         }
         break;
       }
@@ -1503,8 +1566,8 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
             `replace-code requires both 'oldCode' and 'newCode' parameters.\n` +
             `  oldCode: ${args.oldCode ? 'provided' : '⛔ MISSING'}\n` +
             `  newCode: ${args.newCode !== undefined ? 'provided' : '⛔ MISSING'}\n` +
-            `Note: 'sourceCode' is NOT an alias for replace-code — you must use 'oldCode' and 'newCode'.\n` +
-            `For form control override methods, use methodName="ControlName.methodName" (e.g. "PostButton.clicked").`
+            `Note: 'sourceCode' is NOT an alias for replace-code — you must use 'oldCode' and 'newCode'.\n\n` +
+            renderOpSpec('replace-code')
           );
         }
         break;
@@ -1548,12 +1611,25 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
       }
       case 'add-control': {
         if ((args as any).controlName && (args as any).parentControl) {
+          // The tool never exposes a `controlType` input (not in the Zod schema below),
+          // so this always used to fall back to the literal string "String" — every
+          // control, regardless of the bound field's actual type, was created as a plain
+          // string edit control. Infer a better default from the field name heuristic
+          // (the same one used for table field base-type resolution) when a
+          // controlDataField is given; this is a best-effort name heuristic, not an
+          // index/bridge EDT lookup (that would need resolving controlDataSource, a form
+          // DATA SOURCE name, back to its bound table — out of scope here), but it is
+          // strictly better than always guessing "String".
+          const resolvedControlType =
+            (args as any).controlType
+            ?? ((args as any).controlDataField ? heuristicEdtBaseType((args as any).controlDataField) : undefined)
+            ?? 'String';
           bridgeResult = await bridgeAddControl(
             context.bridge,
             objectName,
             (args as any).controlName,
             (args as any).parentControl,
-            (args as any).controlType ?? 'String',
+            resolvedControlType,
             (args as any).controlDataSource,
             (args as any).controlDataField,
             (args as any).controlLabel,
@@ -1567,7 +1643,7 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
               actualFilePath,
               (args as any).controlName,
               (args as any).parentControl,
-              (args as any).controlType ?? 'String',
+              resolvedControlType,
               (args as any).controlDataSource,
               (args as any).controlDataField,
               (args as any).controlLabel,
@@ -1631,40 +1707,13 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
     }
 
     if (!bridgeResult) {
-      const paramHints: Record<string, string[]> = {
-        'add-method': ['methodName', 'sourceCode'],
-        'add-display-method': ['methodName', 'sourceCode'],
-        'add-table-method': ['methodName', 'sourceCode'],
-        'remove-method': ['methodName'],
-        'replace-code': ['oldCode', 'newCode'],
-        'add-field': ['fieldName', 'fieldType'],
-        'modify-field': ['fieldName'],
-        'rename-field': ['fieldName', 'fieldNewName'],
-        'remove-field': ['fieldName'],
-        'replace-all-fields': ['fields'],
-        'add-index': ['indexName', 'indexFields'],
-        'remove-index': ['indexName'],
-        'add-relation': ['relationName', 'relatedTable'],
-        'remove-relation': ['relationName'],
-        'add-field-group': ['fieldGroupName'],
-        'remove-field-group': ['fieldGroupName'],
-        'add-field-to-field-group': ['fieldGroupName', 'fieldName'],
-        'add-control': ['controlName', 'parentControl'],
-        'add-data-source': ['dataSourceName', 'dataSourceTable'],
-        'add-field-modification': ['fieldName'],
-        'add-enum-value': ['enumValueName'],
-        'modify-enum-value': ['enumValueName'],
-        'remove-enum-value': ['enumValueName'],
-        'add-menu-item-to-menu': ['menuItemToAdd'],
-        'modify-property': ['propertyPath', 'propertyValue'],
-      };
-      const required = paramHints[operation] ?? [];
+      // Required params + full per-op specs live in the central registry
+      // (d365foFileOpSpecs.ts) — the published schema only advertises a
+      // free-form `params` object, so this error must carry the whole spec.
+      const required = getRequiredParams(operation);
       // Treat a supplied alias as satisfying the requirement.
-      const aliases: Record<string, string[]> = {
-        sourceCode: ['methodCode'],
-      };
       const isProvided = (p: string) =>
-        (args as any)[p] !== undefined || (aliases[p] ?? []).some(a => (args as any)[a] !== undefined);
+        (args as any)[p] !== undefined || (OP_PARAM_ALIASES[p] ?? []).some(a => (args as any)[a] !== undefined);
       const missing = required.filter(p => !isProvided(p));
 
       // Auto-refresh retry: all required params are present but bridge returned
@@ -1689,7 +1738,8 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
         throw new Error(
           `Bridge operation '${operation}' returned null — required parameters are missing.\n` +
           `Required parameters for '${operation}':\n${[...providedList, ...missingList].join('\n')}\n` +
-          `Provided args: ${Object.keys(args).filter(k => (args as any)[k] !== undefined).join(', ')}`
+          `Provided args: ${Object.keys(args).filter(k => (args as any)[k] !== undefined).join(', ')}\n\n` +
+          renderOpSpec(operation)
         );
       }
 

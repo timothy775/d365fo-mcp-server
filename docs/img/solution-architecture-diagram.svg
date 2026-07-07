@@ -162,7 +162,7 @@
   <rect x="1064" y="306" width="212" height="74" rx="8" fill="#ffffff" stroke="#86c79c"/>
   <text x="1076" y="328" font-size="12" font-weight="600" fill="#15803d">Automation</text>
   <text x="1076" y="346" font-size="10" fill="#475569">Azure DevOps — extract→build→upload</text>
-  <text x="1076" y="362" font-size="10" fill="#475569">GitHub Actions — app CI · 850+ tests</text>
+  <text x="1076" y="362" font-size="10" fill="#475569">GitHub Actions — app CI · 1400+ tests</text>
 
   <text x="1100" y="424" text-anchor="middle" font-size="10" fill="#15803d">produces both databases</text>
   <text x="1052" y="468" font-size="9.5" fill="#15803d">reads AOT XML</text>
@@ -190,7 +190,7 @@
   <text x="699" y="762" text-anchor="middle" font-size="13" font-weight="700" fill="#ffffff">C# Metadata Bridge</text>
   <text x="699" y="782" text-anchor="middle" font-size="10.5" fill="#ddd6fe">D365MetadataBridge.exe · .NET Framework 4.8</text>
   <text x="699" y="799" text-anchor="middle" font-size="10.5" fill="#ddd6fe">JSON-RPC over stdio · IMetadataProvider</text>
-  <text x="699" y="816" text-anchor="middle" font-size="10.5" fill="#ddd6fe">sole write path · 18 create · 25 modify ops</text>
+  <text x="699" y="816" text-anchor="middle" font-size="10.5" fill="#ddd6fe">sole write path · 13 create · 25 modify ops</text>
   <text x="699" y="840" text-anchor="middle" font-size="9.5" fill="#c4b5fd">Windows VM only — graceful fallback to SQLite elsewhere</text>
 
   <rect x="898" y="736" width="376" height="120" rx="9" fill="#eff6ff" stroke="#3b82f6"/>

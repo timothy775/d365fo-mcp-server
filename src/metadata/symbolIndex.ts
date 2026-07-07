@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { XppSymbol } from './types.js';
 import { isStandardModel } from '../utils/modelClassifier.js';
+import { c, log } from '../utils/terminalUi.js';
 
 /**
  * Detect if running in CI environment
@@ -27,16 +28,9 @@ export class XppSymbolIndex {
   // Key: "nodeType|property|value|model", Value: accumulated count
   private propStatBuffer: Map<string, number> = new Map();
 
-  // ─── Read-only connection pool ───────────────────────────────────────────────
-  // SQLite WAL mode allows N concurrent readers + 1 writer without blocking each
-  // other at the OS/SQLite level.  In a single Node.js process the event loop is
-  // still single-threaded, but having separate connection objects means the OS
-  // can hand each reader its own shared-cache page without serialising through a
-  // single connection lock.  Each connection also carries its own stmt cache so
-  // concurrent FTS5 queries don't share a mutable prepared-statement object.
-  // Pool size: READ_POOL_SIZE env var (default 3, clamped to 1–8).
-  // Not used for :memory: databases (each new Database(':memory:') is a separate,
-  // initially-empty DB).
+  // Read-only connection pool: WAL mode allows N readers + 1 writer without
+  // blocking each other. Pool size: READ_POOL_SIZE env var (default 3, clamped 1-8).
+  // Not used for :memory: databases (each connection would be a separate empty DB).
   private readPool: Database.Database[] = [];
   private labelsReadPool: Database.Database[] = [];
   private readPoolRR = 0;
@@ -52,37 +46,29 @@ export class XppSymbolIndex {
     }
 
     this.db = new Database(dbPath);
-    
-    // 🎯 PERFORMANCE: Separate database for labels
-    // This keeps the main symbol DB small and fast for search operations
-    // Labels DB can be huge (20M+ rows) without affecting search performance
+
+    // Labels live in a separate DB so the main symbol DB stays small and fast;
+    // labels can be huge (20M+ rows) without affecting search performance.
     const labelPath = labelsDbPath || dbPath.replace('.db', '-labels.db');
     this.labelsDb = new Database(labelPath);
-    
-    // Enable SQLite performance optimizations for both DBs
-    // Note: journal_mode should be set by caller (MEMORY for build, WAL for production)
-    // pragma('journal_mode', { simple: true }) returns a non-empty string like "wal" or "delete".
-    // A non-empty string is always truthy, so !pragma(...) is always false — the comparison
-    // must be done against the actual value string.
+
+    // journal_mode should be set by caller (MEMORY for build, WAL for production).
+    // pragma() returns a string like "wal"/"delete" — always truthy, so compare the value, not !pragma(...).
     const currentJournalMode = this.db.pragma('journal_mode', { simple: true }) as string;
     if (currentJournalMode !== 'wal') {
-      // Set default to WAL if not already configured
       this.db.pragma('journal_mode = WAL'); // Write-Ahead Logging for better concurrency
     }
     this.db.pragma('synchronous = NORMAL'); // Faster writes, still crash-safe
     this.db.pragma('cache_size = -64000'); // 64MB cache (negative = kibibytes)
     this.db.pragma('temp_store = MEMORY'); // Store temp tables in memory
     this.db.pragma('mmap_size = 268435456'); // 256MB memory-mapped I/O
-    // Retry for up to 5 s before throwing SQLITE_BUSY ("database is locked").
-    // With the read pool + WAL auto-checkpoint, without this the writer would
-    // fail immediately whenever a checkpoint races with an active reader.
+    // Without a busy_timeout the writer fails immediately (SQLITE_BUSY) whenever
+    // a WAL checkpoint races with an active reader; retry for up to 5s instead.
     this.db.pragma('busy_timeout = 5000');
-    // Raise checkpoint threshold: auto-checkpoint fires every N WAL frames.
-    // Default is 1000; raising it reduces checkpoint frequency and therefore
-    // the chance of readers blocking the checkpoint (and vice versa).
-    // In production the DB is effectively read-only so checkpoints rarely write.
+    // Raise checkpoint threshold (default 1000 WAL frames) to reduce checkpoint
+    // frequency and reader/checkpoint contention; production DB is read-mostly.
     this.db.pragma('wal_autocheckpoint = 4000');
-    
+
     // Configure labels DB similarly
     const labelsJournalMode = this.labelsDb.pragma('journal_mode', { simple: true }) as string;
     if (labelsJournalMode !== 'wal') {
@@ -94,32 +80,26 @@ export class XppSymbolIndex {
     this.labelsDb.pragma('mmap_size = 134217728'); // 128MB memory-mapped I/O
     this.labelsDb.pragma('busy_timeout = 5000');
     this.labelsDb.pragma('wal_autocheckpoint = 4000');
-    // Note: page_size is a no-op on an existing database; only applies to new DBs
-    // Note: optimize and ANALYZE are intentionally NOT run here — they are slow
-    //       (seconds on 500K+ rows) and the pre-built DB already has persisted stats.
-    //       Call runPostBuildTasks() from build scripts instead.
-    
+    // page_size is a no-op on an existing database (only applies to new DBs).
+    // optimize/ANALYZE intentionally NOT run here (slow on 500K+ rows) — the
+    // pre-built DB already has persisted stats; use runPostBuildTasks() instead.
+
     this.loadStandardModels();
     this.initializeDatabase();
 
-    // Open read-only pool connections (skip for :memory: — each new connection
-    // would be a separate empty in-memory DB)
+    // Skip pool for :memory: — each new connection would be a separate empty DB.
     if (dbPath !== ':memory:') {
       const poolSize = Math.min(8, Math.max(1,
         parseInt(process.env.READ_POOL_SIZE || '3', 10) || 3
       ));
       for (let i = 0; i < poolSize; i++) {
         const rConn = new Database(dbPath, { readonly: true });
-        // Read-only connections: set busy_timeout so that if a WAL checkpoint
-        // races with this reader, SQLite waits up to 5 s instead of failing
-        // immediately with SQLITE_BUSY ("database is locked").
         rConn.pragma('busy_timeout = 5000');
         rConn.pragma('cache_size = -32000'); // 32 MB page cache per connection
         rConn.pragma('temp_store = MEMORY');
         rConn.pragma('mmap_size = 268435456');
         this.readPool.push(rConn);
 
-        // Labels read pool is only useful when a real file exists
         if (labelPath !== ':memory:') {
           const rLabels = new Database(labelPath, { readonly: true });
           rLabels.pragma('busy_timeout = 5000');
@@ -195,7 +175,7 @@ export class XppSymbolIndex {
    * Do NOT call from the production server startup — the pre-built DB already has stats.
    */
   runPostBuildTasks(): void {
-    console.log('🔧 Running post-build database optimization (ANALYZE + optimize)...');
+    log.step('Running post-build database optimization (ANALYZE + optimize)...');
     const start = Date.now();
     try {
       // Optimize main symbol database
@@ -209,9 +189,9 @@ export class XppSymbolIndex {
       this.labelsDb.pragma('optimize');
       
       const elapsed = ((Date.now() - start) / 1000).toFixed(2);
-      console.log(`✅ Post-build optimization complete in ${elapsed}s`);
+      log.ok(`Post-build optimization complete in ${elapsed}s`);
     } catch (e) {
-      console.warn('⚠️  Post-build optimization failed (non-fatal):', e);
+      log.warn(`Post-build optimization failed (non-fatal): ${e instanceof Error ? e.message : e}`);
     }
   }
 
@@ -247,13 +227,10 @@ export class XppSymbolIndex {
   }
 
   /**
-   * Load standard models - now determined dynamically
-   * Standard = all models NOT in CUSTOM_MODELS env variable
+   * Kept for compatibility; standard-model determination now lives in
+   * isStandardModel() from modelClassifier (standard = not in CUSTOM_MODELS).
    */
   private loadStandardModels(): void {
-    // Standard models are now determined dynamically based on CUSTOM_MODELS
-    // This method kept for compatibility but standardModels array is no longer used
-    // Use isStandardModel() from modelClassifier instead
     this.standardModels = [];
   }
 
@@ -390,9 +367,7 @@ export class XppSymbolIndex {
       CREATE INDEX IF NOT EXISTS idx_patterns_domain ON code_patterns(domain);
     `);
 
-    // 🎯 LABELS MOVED TO SEPARATE DATABASE (labelsDb)
-    // This keeps the main symbol DB fast for search operations
-    // Initialize labels tables in the separate labels database
+    // Labels live in the separate labelsDb (keeps the main symbol DB fast for search).
     this.labelsDb.exec(`
       CREATE TABLE IF NOT EXISTS labels (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -447,7 +422,7 @@ export class XppSymbolIndex {
       END;
     `);
 
-    // ── Extended Metadata Tables for Smart Generation ───────────────────────
+    // Extended metadata tables for smart generation
 
     // Table Relations - for analyzing table relationships
     this.db.exec(`
@@ -546,7 +521,7 @@ export class XppSymbolIndex {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_edt_metadata_unique ON edt_metadata(edt_name, model);
     `);
 
-    // ── Security Tables ──────────────────────────────────────────────────────
+    // Security tables
 
     // Security Privilege Entry Points
     this.db.exec(`
@@ -589,7 +564,7 @@ export class XppSymbolIndex {
       CREATE INDEX IF NOT EXISTS idx_srd_model ON security_role_duties(model);
     `);
 
-    // ── Menu Item Targets ─────────────────────────────────────────────────────
+    // Menu item targets
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS menu_item_targets (
@@ -607,9 +582,7 @@ export class XppSymbolIndex {
       CREATE INDEX IF NOT EXISTS idx_mit_model ON menu_item_targets(model);
     `);
 
-    // ── Index Metadata (key-value) ───────────────────────────────────────────
-    // Small bookkeeping table: e.g. last_indexed_at drives the staleness
-    // detector in get_workspace_info.
+    // Index metadata (key-value); e.g. last_indexed_at drives staleness detection in get_workspace_info.
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS _index_meta (
@@ -618,12 +591,9 @@ export class XppSymbolIndex {
       );
     `);
 
-    // ── Property Statistics ──────────────────────────────────────────────────
-    // Distribution of metadata property values across STANDARD models, mined
-    // during build-database. Drives data-driven BP property rules in
-    // validate_xpp: "what does Microsoft actually set on this node type"
-    // instead of hardcoded rule tables. Presence is encoded as the special
-    // values '(present)' / '(absent)'.
+    // Property stats: distribution of metadata property values across STANDARD models,
+    // used for data-driven BP rules in validate_xpp instead of hardcoded tables.
+    // Presence is encoded via special values '(present)' / '(absent)'.
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS property_stats (
@@ -637,7 +607,7 @@ export class XppSymbolIndex {
       CREATE INDEX IF NOT EXISTS idx_ps_node_prop ON property_stats(node_type, property);
     `);
 
-    // ── Extension Metadata ───────────────────────────────────────────────────
+    // Extension metadata
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS extension_metadata (
@@ -658,7 +628,7 @@ export class XppSymbolIndex {
       CREATE INDEX IF NOT EXISTS idx_em_model ON extension_metadata(model);
     `);
 
-    // ── Service Operations & Service Group Membership ─────────────────────────
+    // Service operations & service group membership
     // AxService → exposed operations (each maps to a public method on the class).
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS service_operations (
@@ -687,7 +657,7 @@ export class XppSymbolIndex {
       CREATE INDEX IF NOT EXISTS idx_sgm_model ON service_group_members(model);
     `);
 
-    // ── Map Mappings ──────────────────────────────────────────────────────────
+    // Map mappings
     // AxMap → tables it maps onto (with field-connection counts).
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS map_mappings (
@@ -702,7 +672,7 @@ export class XppSymbolIndex {
       CREATE INDEX IF NOT EXISTS idx_mm_model ON map_mappings(model);
     `);
 
-    // ── Security Policies (row-level / OLS) ───────────────────────────────────
+    // Security policies (row-level / OLS)
     // Indexed by primary table so get_security_coverage_for_object can report
     // which OLS policies constrain a given table.
     this.db.exec(`
@@ -721,7 +691,7 @@ export class XppSymbolIndex {
       CREATE INDEX IF NOT EXISTS idx_sp_model ON security_policies(model);
     `);
 
-    // ── Macro Defines ─────────────────────────────────────────────────────────
+    // Macro defines
     // AxMacroDictionary → its #define entries.
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS macro_defines (
@@ -775,7 +745,6 @@ export class XppSymbolIndex {
    * Add a symbol to the index with enhanced metadata
    */
   addSymbol(symbol: XppSymbol): void {
-    // Use cached prepared statement for performance
     let stmt = this.stmtCache.get('addSymbol');
     if (!stmt) {
       stmt = this.db.prepare(`
@@ -933,7 +902,10 @@ export class XppSymbolIndex {
       // FTS5 syntax error (e.g. user typed *, ", (, ), -) — fall back to LIKE contains search
       // PERFORMANCE: Also select only essential columns in fallback
       const fallbackCacheKey = types?.length ? `fallback_typed_${types.join('_')}` : 'fallback_all';
-      let fallbackSql = `SELECT s.id, s.name, s.type, s.parent_name, s.signature, s.file_path, s.model, s.description FROM symbols s WHERE s.name LIKE ?`;
+      // ESCAPE '\' is required — without it the backslashes produced by
+      // escapeLikePattern are literal characters and any query containing
+      // '_' or '%' (e.g. "SalesLine_MyExt") silently matches nothing.
+      let fallbackSql = `SELECT s.id, s.name, s.type, s.parent_name, s.signature, s.file_path, s.model, s.description FROM symbols s WHERE s.name LIKE ? ESCAPE '\\'`;
       const escapeLikePattern = (value: string): string => {
         // First escape backslashes, then escape SQL LIKE wildcards % and _
         return value
@@ -1025,14 +997,14 @@ export class XppSymbolIndex {
    * Optimized for 300k+ methods with minimal memory usage
    */
   computeUsageStatistics(): void {
-    console.log('📊 Computing usage statistics...');
+    log.step('Computing usage statistics...');
     const startTime = Date.now();
+    const inCI = isCI();
     
     // Temporarily disable synchronous writes for speed during statistics computation
     const originalSync = this.db.pragma('synchronous', { simple: true });
     this.db.pragma('synchronous = OFF');
     
-    // Step 1: Create temporary table with all method calls
     this.db.exec(`
       CREATE TEMP TABLE IF NOT EXISTS temp_method_calls (
         caller_method TEXT,
@@ -1040,23 +1012,21 @@ export class XppSymbolIndex {
       );
       DELETE FROM temp_method_calls;
     `);
-    
-    // Get all methods with their method_calls
+
     const allMethods = this.db.prepare(`
       SELECT name, method_calls 
       FROM symbols 
       WHERE type = 'method' AND method_calls IS NOT NULL AND method_calls != ''
     `).all() as Array<{ name: string; method_calls: string }>;
     
-    console.log(`   Found ${allMethods.length} methods with call references`);
+    log.detail(`${allMethods.length.toLocaleString('en-US')} methods with call references`);
     
     if (allMethods.length === 0) {
-      console.log('   No method calls to process, skipping statistics');
+      log.detail('No method calls to process, skipping statistics');
       return;
     }
     
-    // Step 2: Batch insert parsed method calls - OPTIMIZED
-    console.log('   Parsing and inserting method calls...');
+    log.detail('Parsing and inserting method calls...');
     const insertStmt = this.db.prepare(
       'INSERT INTO temp_method_calls (caller_method, called_method) VALUES (?, ?)'
     );
@@ -1070,10 +1040,8 @@ export class XppSymbolIndex {
       const batchEnd = Math.min(batchStart + BATCH_SIZE, allMethods.length);
       const batchMethods = allMethods.slice(batchStart, batchEnd);
       
-      // Insert batch in single transaction
       const insertBatch = this.db.transaction(() => {
         for (const method of batchMethods) {
-          // Fast CSV parsing - avoid unnecessary trim/filter
           const calls = method.method_calls.split(',');
           for (let i = 0; i < calls.length; i++) {
             const calledMethod = calls[i].trim();
@@ -1085,10 +1053,17 @@ export class XppSymbolIndex {
       });
       insertBatch();
       
-      // Progress every 10%
+      // Progress every 10% — a single overwriting line in interactive terminals
+      // (matches the model-indexing progress style below), plain periodic lines
+      // in CI logs where \r overwriting doesn't render.
       if ((batchIdx + 1) % Math.ceil(totalBatches / 10) === 0 || batchIdx === totalBatches - 1) {
         const percent = Math.round(((batchIdx + 1) / totalBatches) * 100);
-        console.log(`   Progress: ${percent}% (${batchEnd}/${allMethods.length} methods)`);
+        const text = `${percent}% (${batchEnd.toLocaleString('en-US')}/${allMethods.length.toLocaleString('en-US')} methods)`;
+        if (inCI) {
+          log.detail(text);
+        } else {
+          process.stdout.write(`\r      ${c.dim(text.padEnd(44))}`);
+        }
       }
       
       // Force GC in CI after each batch to prevent memory buildup
@@ -1096,12 +1071,11 @@ export class XppSymbolIndex {
         global.gc();
       }
     }
+    if (!inCI) console.log(''); // newline after the overwriting progress line
     
-    console.log('   Computing aggregated statistics...');
-    
-    // Step 3: OPTIMIZED - Use single UPDATE with JOIN instead of correlated subqueries
+    log.detail('Computing aggregated statistics...');
+
     const updateTransaction = this.db.transaction(() => {
-      // Create temp table with aggregated counts and index
       this.db.exec(`
         CREATE TEMP TABLE temp_call_stats AS
         SELECT 
@@ -1114,13 +1088,12 @@ export class XppSymbolIndex {
         CREATE INDEX idx_temp_call_stats ON temp_call_stats(called_method);
       `);
       
-      console.log('   Applying statistics to symbols...');
-      
-      // OPTIMIZED: Use LEFT JOIN UPDATE (SQLite 3.33+) - much faster!
-      // If not supported, falls back to correlated subquery with index
+      log.detail('Applying statistics to symbols...');
+
+      // LEFT JOIN UPDATE (SQLite 3.33+); falls back to correlated subquery if unsupported.
       try {
-        if (isCI()) {
-          console.log('   Updating usage_frequency and called_by_count (this may take 1-2 minutes)...');
+        if (inCI) {
+          log.detail('Updating usage_frequency and called_by_count (this may take 1-2 minutes)...');
         }
         
         this.db.exec(`
@@ -1140,8 +1113,8 @@ export class XppSymbolIndex {
             AND EXISTS (SELECT 1 FROM temp_call_stats WHERE temp_call_stats.called_method = symbols.name);
         `);
         
-        if (isCI()) {
-          console.log('   Setting zero counts for unused methods...');
+        if (inCI) {
+          log.detail('Setting zero counts for unused methods...');
         }
         
         // Set to 0 for methods not in temp_call_stats
@@ -1152,7 +1125,7 @@ export class XppSymbolIndex {
             AND NOT EXISTS (SELECT 1 FROM temp_call_stats WHERE temp_call_stats.called_method = symbols.name);
         `);
       } catch (e) {
-        console.warn('   Optimized UPDATE failed, using fallback method');
+        log.warn('Optimized UPDATE failed, using fallback method');
         // Fallback to correlated subquery (slower but compatible)
         this.db.exec(`
           UPDATE symbols
@@ -1176,7 +1149,7 @@ export class XppSymbolIndex {
     
     const endTime = Date.now();
     const duration = ((endTime - startTime) / 1000).toFixed(2);
-    console.log(`✅ Usage statistics computed in ${duration}s`);
+    log.ok(`Usage statistics computed in ${duration}s`);
   }
 
   /**
@@ -1201,7 +1174,7 @@ export class XppSymbolIndex {
       const skipped = models.filter(m => done.has(m));
       models = models.filter(m => !done.has(m));
       if (skipped.length > 0) {
-        console.log(`   ♻️  Resuming build: skipping ${skipped.length} already-indexed model(s)`);
+        log.detail(`Resuming build: skipping ${skipped.length} already-indexed model(s)`);
       }
     }
 
@@ -1217,11 +1190,9 @@ export class XppSymbolIndex {
       ? this.db.prepare(`INSERT OR REPLACE INTO _build_progress (model, indexed_at) VALUES (?, ?)`)
       : null;
 
-    // Per-model transactions instead of one giant transaction.
-    // Benefits vs. single transaction:
-    //   • Peak memory = 1 model's inserts (not 100K files × full dataset in MEMORY journal)
-    //   • Progress is committed to disk after each model — safe to resume on timeout
-    //   • Foundation (56K files) no longer holds 7+ GB in RAM before first commit
+    // Per-model transactions (not one giant transaction): bounds peak memory to
+    // one model's inserts and commits progress to disk after each model, so a
+    // CI timeout can resume instead of losing all progress.
     let modelIndex = 0;
     for (const model of models) {
       modelIndex++;
@@ -1328,38 +1299,34 @@ export class XppSymbolIndex {
       const progressPercent = ((modelIndex / models.length) * 100).toFixed(0);
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
       
-      // Detect CI environment (Azure DevOps, GitHub Actions, GitLab CI, etc.)
-      const isCI = process.env.CI === 'true' || process.env.TF_BUILD === 'True' || process.env.GITHUB_ACTIONS === 'true';
-      
-      if (isCI) {
+      if (isCI()) {
         // CI environment: use normal console.log (one line per model)
-        console.log(`   📦 [${progressPercent}%] ${model} - ${modelDuration}s (${elapsed}s total)`);
+        log.detail(`[${progressPercent}%] ${model} - ${modelDuration}s (${elapsed}s total)`);
       } else {
         // Interactive terminal: overwrite same line for compact output
-        process.stdout.write(`\r   📦 [${progressPercent}%] ${model.padEnd(40)} ${modelDuration}s (${elapsed}s total)`);
+        process.stdout.write(`\r      ${c.dim(`[${progressPercent}%]`)} ${model.padEnd(40)} ${c.dim(`${modelDuration}s (${elapsed}s total)`)}`);
       }
     }
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
     
     // Add newline only if we were overwriting (interactive mode)
-    const isCI = process.env.CI === 'true' || process.env.TF_BUILD === 'True' || process.env.GITHUB_ACTIONS === 'true';
-    if (!isCI) {
+    if (!isCI()) {
       console.log(''); // New line after progress
     }
 
     if (skipFts) {
       // Phase 1 of two-phase CI build: symbols only, FTS deferred to build-fts step
-      console.log(`   ⏭️  Skipping FTS rebuild (SKIP_FTS=true) — run 'npm run build-fts' to finish`);
+      log.info(`Skipping FTS rebuild (SKIP_FTS=true) - run 'npm run build-fts' to finish`);
       this.createFTSTriggers();
-      console.log(`   ✅ Indexed ${models.length} model(s) in ${duration}s`);
+      log.ok(`Indexed ${models.length} model(s) in ${duration}s`);
     } else {
       // Rebuild FTS index from scratch (much faster than per-insert triggers)
       const ftsStartTime = Date.now();
       this.db.exec("INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild');");
       const ftsDuration = ((Date.now() - ftsStartTime) / 1000).toFixed(1);
       this.createFTSTriggers();
-      console.log(`   ✅ Indexed ${models.length} model(s) in ${duration}s (FTS rebuilt in ${ftsDuration}s)`);
+      log.ok(`Indexed ${models.length} model(s) in ${duration}s (FTS rebuilt in ${ftsDuration}s)`);
     }
 
     this.touchLastIndexed();
@@ -1417,7 +1384,7 @@ export class XppSymbolIndex {
    * Use this as a standalone step after a SKIP_FTS=true build (Phase 2 of two-phase CI).
    */
   rebuildFTS(): void {
-    console.log('🔍 Rebuilding symbols FTS index...');
+    log.step('Rebuilding symbols FTS index...');
     this.db.exec('DROP TRIGGER IF EXISTS symbols_ai;');
     this.db.exec('DROP TRIGGER IF EXISTS symbols_au;');
     this.db.exec('DROP TRIGGER IF EXISTS symbols_ad;');
@@ -1425,7 +1392,7 @@ export class XppSymbolIndex {
     this.db.exec("INSERT INTO symbols_fts(symbols_fts) VALUES('rebuild');");
     const duration = ((Date.now() - start) / 1000).toFixed(1);
     this.createFTSTriggers();
-    console.log(`✅ Symbols FTS index rebuilt in ${duration}s`);
+    log.ok(`Symbols FTS index rebuilt in ${duration}s`);
   }
 
   private async getModelDirectories(metadataPath: string): Promise<string[]> {
@@ -1497,8 +1464,7 @@ export class XppSymbolIndex {
         
         processedCount++;
       } catch (error) {
-        // Only log errors, don't stop processing
-        console.error(`      ⚠️  Skipped ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
@@ -1515,7 +1481,6 @@ export class XppSymbolIndex {
         // Use sourcePath from metadata (original XML file) instead of JSON file path
         const sourceFilePath = tableData.sourcePath || filePath;
 
-        // Add table symbol
         this.addSymbol({
           name: tableData.name,
           type: 'table',
@@ -1590,8 +1555,7 @@ export class XppSymbolIndex {
           }
         }
       } catch (error) {
-        // Only log errors, don't stop processing
-        console.error(`      ⚠️  Skipped table ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped table ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
@@ -1609,7 +1573,6 @@ export class XppSymbolIndex {
         const sourceFilePath = enumData.sourcePath || filePath;
         const enumName = enumData.name || path.basename(file, '.json');
 
-        // Add enum symbol
         this.addSymbol({
           name: enumName,
           type: 'enum',
@@ -1618,8 +1581,7 @@ export class XppSymbolIndex {
         });
       
       } catch (error) {
-        // Only log errors, don't stop processing
-        console.error(`      ⚠️  Skipped enum ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped enum ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
@@ -1684,7 +1646,7 @@ export class XppSymbolIndex {
           );
         }
       } catch (error) {
-        console.error(`      ⚠️  Skipped edt ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped edt ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
@@ -1709,7 +1671,7 @@ export class XppSymbolIndex {
           model,
         });
       } catch (error) {
-        console.error(`      ⚠️  Skipped report ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped report ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
@@ -1727,7 +1689,6 @@ export class XppSymbolIndex {
         const sourceFilePath = formData.sourcePath || filePath;
         const formName = formData.name || path.basename(file, '.json');
 
-        // Add form symbol
         this.addSymbol({
           name: formName,
           type: 'form',
@@ -1794,8 +1755,7 @@ export class XppSymbolIndex {
         }
       
       } catch (error) {
-        // Only log errors, don't stop processing
-        console.error(`      ⚠️  Skipped form ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped form ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
@@ -1813,7 +1773,6 @@ export class XppSymbolIndex {
         const sourceFilePath = queryData.sourcePath || filePath;
         const queryName = queryData.name || path.basename(file, '.json');
 
-        // Add query symbol
         this.addSymbol({
           name: queryName,
           type: 'query',
@@ -1823,8 +1782,7 @@ export class XppSymbolIndex {
         });
       
       } catch (error) {
-        // Only log errors, don't stop processing
-        console.error(`      ⚠️  Skipped query ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped query ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
@@ -1842,7 +1800,6 @@ export class XppSymbolIndex {
         const sourceFilePath = viewData.sourcePath || filePath;
         const viewName = viewData.name || path.basename(file, '.json');
 
-        // Add view symbol
         this.addSymbol({
           name: viewName,
           type: 'view',
@@ -1890,8 +1847,7 @@ export class XppSymbolIndex {
         }
 
       } catch (error) {
-        // Only log errors, don't stop processing
-        console.error(`      ⚠️  Skipped view ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped view ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
@@ -1941,7 +1897,7 @@ export class XppSymbolIndex {
           );
         }
       } catch (error) {
-        console.error(`      ⚠️  Skipped security-privilege ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped security-privilege ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
@@ -1974,7 +1930,7 @@ export class XppSymbolIndex {
           insertPriv.run(name, priv, model);
         }
       } catch (error) {
-        console.error(`      ⚠️  Skipped security-duty ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped security-duty ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
@@ -2007,7 +1963,7 @@ export class XppSymbolIndex {
           insertDuty.run(name, duty, model);
         }
       } catch (error) {
-        console.error(`      ⚠️  Skipped security-role ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped security-role ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
@@ -2047,7 +2003,7 @@ export class XppSymbolIndex {
           model
         );
       } catch (error) {
-        console.error(`      ⚠️  Skipped menu-item-${menuItemType} ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped menu-item-${menuItemType} ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
@@ -2085,7 +2041,7 @@ export class XppSymbolIndex {
           }
         }
       } catch (error) {
-        console.error(`      ⚠️  Skipped service ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped service ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
@@ -2119,7 +2075,7 @@ export class XppSymbolIndex {
           }
         }
       } catch (error) {
-        console.error(`      ⚠️  Skipped service-group ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped service-group ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
@@ -2149,7 +2105,7 @@ export class XppSymbolIndex {
           }
         }
       } catch (error) {
-        console.error(`      ⚠️  Skipped map ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped map ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
@@ -2171,7 +2127,7 @@ export class XppSymbolIndex {
           signature: data.parentKey || undefined,
         });
       } catch (error) {
-        console.error(`      ⚠️  Skipped configuration-key ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped configuration-key ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
@@ -2194,7 +2150,7 @@ export class XppSymbolIndex {
           signature: sig,
         });
       } catch (error) {
-        console.error(`      ⚠️  Skipped license-code ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped license-code ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
@@ -2229,7 +2185,7 @@ export class XppSymbolIndex {
           model,
         );
       } catch (error) {
-        console.error(`      ⚠️  Skipped security-policy ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped security-policy ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
@@ -2258,7 +2214,7 @@ export class XppSymbolIndex {
           }
         }
       } catch (error) {
-        console.error(`      ⚠️  Skipped macro ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped macro ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
@@ -2302,12 +2258,12 @@ export class XppSymbolIndex {
           model
         );
       } catch (error) {
-        console.error(`      ⚠️  Skipped ${extensionType} ${file}: ${error instanceof Error ? error.message : error}`);
+        log.warn(`Skipped ${extensionType} ${file}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }
 
-  // ─── Index freshness bookkeeping ────────────────────────────────────────────
+  // Index freshness bookkeeping
 
   /** Record "the index was (re)built/updated now" — drives staleness detection. */
   touchLastIndexed(): void {
@@ -2332,7 +2288,7 @@ export class XppSymbolIndex {
     }
   }
 
-  // ─── Property statistics (data-driven BP rules) ────────────────────────────
+  // Property statistics (data-driven BP rules)
 
   /**
    * Record one observation of a metadata property value.
@@ -2938,14 +2894,14 @@ export class XppSymbolIndex {
     });
     deleteAll();
 
-    console.log(`🗑️  Cleared symbols for models: ${modelNames.join(', ')}`);
+    log.step(`Cleared symbols for models: ${modelNames.join(', ')}`);
     
     if (shouldVacuum) {
-      console.log('🧹 Running VACUUM to optimize database...');
+      log.step('Running VACUUM to optimize database...');
       this.vacuum();
-      console.log('✅ VACUUM completed');
+      log.ok('VACUUM completed');
     } else {
-      console.log('⏭️  Skipping VACUUM for faster incremental build');
+      log.info('Skipping VACUUM for faster incremental build');
     }
   }
 
@@ -2957,23 +2913,57 @@ export class XppSymbolIndex {
   }
 
   /**
-   * Get all symbol names for fuzzy matching
-   * Used by suggestion engine for typo detection
-   * Uses iterator to avoid loading all names into memory at once
+   * Get candidate symbol names for fuzzy matching ("did you mean" suggestions).
+   *
+   * When a query is given, candidates are anchored to it: names sharing the
+   * query's leading characters plus names containing its root term (avoids
+   * always sampling the same alphabetical slice of a 580K-symbol index).
+   * Without a query, falls back to the first 5000 names alphabetically.
    */
-  getAllSymbolNames(): string[] {
-    const stmt = this.db.prepare(`
-      SELECT DISTINCT name
-      FROM symbols
-      ORDER BY name
-      LIMIT 5000
-    `);
-    
-    const names: string[] = [];
-    for (const row of stmt.iterate() as IterableIterator<{ name: string }>) {
-      names.push(row.name);
+  getAllSymbolNames(query?: string, limit: number = 2000): string[] {
+    const trimmed = query?.trim();
+    if (!trimmed) {
+      const stmt = this.db.prepare(`
+        SELECT DISTINCT name
+        FROM symbols
+        ORDER BY name
+        LIMIT 5000
+      `);
+
+      const names: string[] = [];
+      for (const row of stmt.iterate() as IterableIterator<{ name: string }>) {
+        names.push(row.name);
+      }
+      return names;
     }
-    return names;
+
+    const escapeLike = (value: string): string =>
+      value.replace(/\\/g, '\\\\').replace(/[%_]/g, '\\$&');
+
+    // Typo distance is usually in the tail of the name, so same-prefix names
+    // are the best candidate pool; contains-matches on the root term catch
+    // wrong-prefix typos (e.g. "CusTable" → "CustTable").
+    const half = Math.max(1, Math.floor(limit / 2));
+    const prefix = escapeLike(trimmed.slice(0, 2));
+    const root = escapeLike(trimmed.slice(0, Math.max(3, Math.ceil(trimmed.length / 2))));
+
+    const names = new Set<string>();
+    const db = this.getReadDb();
+    try {
+      const prefixStmt = this.getReadStmt(db, 'suggest_prefix', () =>
+        `SELECT DISTINCT name FROM symbols WHERE name LIKE ? ESCAPE '\\' LIMIT ?`);
+      for (const row of prefixStmt.iterate(`${prefix}%`, half) as IterableIterator<{ name: string }>) {
+        names.add(row.name);
+      }
+      const containsStmt = this.getReadStmt(db, 'suggest_contains', () =>
+        `SELECT DISTINCT name FROM symbols WHERE name LIKE ? ESCAPE '\\' LIMIT ?`);
+      for (const row of containsStmt.iterate(`%${root}%`, half) as IterableIterator<{ name: string }>) {
+        names.add(row.name);
+      }
+    } catch {
+      // Best-effort — suggestions are advisory, never fail the search
+    }
+    return [...names];
   }
 
   /**
@@ -3032,16 +3022,9 @@ export class XppSymbolIndex {
   }
 
   /**
-   * Close the database connection and release all pooled resources.
-   *
-   * Includes:
-   *  - prepared-statement cache
-   *  - main writer DB + read pool
-   *  - labels DB + labels read pool
-   *  - any pending debounced labels FTS rebuild timer
-   *
-   * Previously only the writer DB was closed, leaving file handles and a
-   * pending timer behind which caused shutdown hangs and file-handle leaks.
+   * Close the database connection and release all pooled resources: the
+   * prepared-statement cache, writer + read pool, labels DB + its read pool,
+   * and any pending debounced labels FTS rebuild timer.
    */
   close(): void {
     // Flush any debounced labels FTS rebuild to avoid losing writes on shutdown.
@@ -3058,9 +3041,7 @@ export class XppSymbolIndex {
     try { this.labelsDb.close(); } catch { /* ignore */ }
   }
 
-  // ============================================
-  // Label Methods
-  // ============================================
+  // Label methods
 
   /**
    * Add (or replace) a label entry in the index.
@@ -3171,7 +3152,7 @@ export class XppSymbolIndex {
     `);
   }
 
-  // ── Debounced labels FTS rebuild ────────────────────────────────────────────
+  // Debounced labels FTS rebuild
   private _labelsFtsTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly LABELS_FTS_SETTLE_MS = 300;
 

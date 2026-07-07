@@ -24,9 +24,8 @@ export async function findCocExtensionsTool(request: CallToolRequest, context: X
     const className = args.className;
     const methodName = args.methodName;
 
-    // ── Bridge fast-path (DYNAMICSXREFDB) ──
-    // Enriched: bridge now returns method-level CoC detail (wrappedMethods per extension class),
-    // so we can use it even when methodName filter is specified.
+    // Bridge fast-path (DYNAMICSXREFDB): returns method-level CoC detail (wrappedMethods per
+    // extension class), so it can be used even when a methodName filter is specified.
     const bridgeResult = await tryBridgeCocExtensions(context.bridge, className, methodName);
     if (bridgeResult) return bridgeResult;
 
@@ -92,10 +91,8 @@ export async function findCocExtensionsTool(request: CallToolRequest, context: X
     if (filtered.length === 0) {
       output += `No class extensions found for: ${className}\n`;
 
-      // ── Filesystem fallback ────────────────────────────────────────────────
-      // Class extensions live in AxClass/ as `ClassName_Extension.xml` (or
-      // `ClassName_ModelExtension.xml`). When the DB index is stale these won't
-      // appear via symbol queries — scan the filesystem directly.
+      // Filesystem fallback: class extensions live in AxClass/ as `ClassName_Extension.xml`
+      // (or `ClassName_ModelExtension.xml`). Scan the filesystem directly when the DB index is stale.
       if (process.platform === 'win32') {
         const configManager = getConfigManager();
         const packagePath = configManager.getPackagePath();

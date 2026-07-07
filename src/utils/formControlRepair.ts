@@ -1,17 +1,13 @@
 /**
- * Form control repair — the "fill an existing form" half of TRUDUtils'
- * Form Template Control Builder.
- *
- * Where the validator only *reports* that a pattern-required control is missing
- * (FP003), this turns that into an auto-fix: it reads the form's declared
- * pattern, works out which required top-level controls are absent, generates
- * them from the catalog (via the deterministic expander), and splices them into
- * the Design <Controls> collection at the spec-mandated position.
+ * Form control repair: auto-fixes a form missing pattern-required top-level
+ * controls (FP003). Reads the form's declared pattern, works out which
+ * required top-level controls are absent, generates them from the catalog
+ * (via the deterministic expander), and splices them into the Design
+ * <Controls> collection at the spec-mandated position.
  *
  * The splice is a depth-aware string operation: existing controls are preserved
- * byte-for-byte (their children, methods and customisations are untouched) —
- * only the missing required controls are inserted. We do NOT reserialize the
- * whole form, so there is no fidelity loss.
+ * byte-for-byte (children, methods, customisations untouched) — only the
+ * missing required controls are inserted. The whole form is never reserialized.
  *
  * Scope: top-level (direct Design child) required controls only. Missing
  * children deeper inside a container, and sub-pattern attachment, are out of
@@ -74,8 +70,7 @@ export function findDesignControls(
   const openTag = xml.slice(ctrlAbs, tagEnd + 1);
 
   if (openTag.endsWith('/>')) {
-    // Empty <Controls … /> — caller turns it into an open/close pair around the
-    // generated controls.
+    // Empty <Controls … /> — caller expands it into an open/close pair.
     return { innerStart: ctrlAbs, innerEnd: tagEnd + 1, selfClosed: true, selfCloseAt: ctrlAbs };
   }
 
@@ -198,11 +193,11 @@ export function repairFormXml(
   let innerStart: number;
   let innerEnd: number;
   if (loc.selfClosed) {
-    const tag = xml.slice(loc.innerStart, loc.innerEnd); // e.g. <Controls xmlns="" />
+    const tag = xml.slice(loc.innerStart, loc.innerEnd);
     const opened = tag.replace(/\s*\/>$/, '>') + '\n' + '</Controls>';
     workXml = xml.slice(0, loc.innerStart) + opened + xml.slice(loc.innerEnd);
-    innerStart = loc.innerStart + tag.replace(/\s*\/>$/, '>').length + 1; // just after the new '>\n'
-    innerEnd = innerStart; // empty inner
+    innerStart = loc.innerStart + tag.replace(/\s*\/>$/, '>').length + 1;
+    innerEnd = innerStart;
   } else {
     innerStart = loc.innerStart;
     innerEnd = loc.innerEnd;

@@ -3,8 +3,7 @@
  * Main entry point
  */
 
-// Load .env — supports ENV_FILE env var for multi-instance setups.
-// See src/utils/loadEnv.ts for details.
+// Load .env — supports ENV_FILE env var for multi-instance setups (see src/utils/loadEnv.ts).
 import { loadEnv } from './utils/loadEnv.js';
 loadEnv(import.meta.url);
 import { fileURLToPath } from 'url';
@@ -21,6 +20,7 @@ import { HybridSearch } from './workspace/hybridSearch.js';
 import { initializeDatabase } from './database/download.js';
 import { initializeConfig, getConfigManager } from './utils/configManager.js';
 import { SERVER_MODE, LOCAL_TOOLS } from './server/serverMode.js';
+import { TOOL_ANNOTATIONS } from './server/toolAnnotations.js';
 import { apiKeyAuth } from './middleware/apiKeyAuth.js';
 import { setInitializeParams } from './utils/stdioSessionInfo.js';
 import { box, kv, sectionTitle, statusLine, spread, c, glyph, sanitize, supportsUnicode, log, shortPath, startupWarnings } from './utils/terminalUi.js';
@@ -29,19 +29,11 @@ import * as fsSync from 'node:fs';
 import { Transform } from 'node:stream';
 
 // Filter verbose debug progress messages unless DEBUG_LOGGING is enabled.
-// Only suppress messages that are KNOWN debug output (tool-handler progress)
-// and do NOT contain any error/warning indicators.
 const originalConsoleError = console.error;
 const DEBUG_LOGGING = process.env.DEBUG_LOGGING === 'true';
 
-// ─── Optional file-based logging ──────────────────────────────────────────────
-// Set LOG_FILE env var to an absolute path to get a copy of all stderr output
-// written to a file. Useful when the IDE doesn't expose MCP subprocess stderr
-// (e.g. VS 2022 Output window only shows Copilot extension logs, not ours).
-//
-// In .mcp.json:  "LOG_FILE": "C:\\Temp\\d365fo-mcp.log"
-// Tail in PS:    Get-Content C:\Temp\d365fo-mcp.log -Wait -Tail 50
-// ─────────────────────────────────────────────────────────────────────────────
+// Optional file-based logging: set LOG_FILE to an absolute path to mirror stderr
+// to a file (useful when the IDE doesn't expose MCP subprocess stderr).
 const LOG_FILE = process.env.LOG_FILE;
 let _logStream: fsSync.WriteStream | undefined;
 if (LOG_FILE) {
@@ -56,7 +48,7 @@ if (LOG_FILE) {
       return origStderrWrite(chunk, ...rest) as boolean;
     };
   } catch (e) {
-    // Don't crash if log file can't be opened — just disable file logging
+    // Don't crash the server if the log file can't be opened
     process.stderr.write(`[d365fo-mcp] ⚠️ Cannot open LOG_FILE=${LOG_FILE}: ${e}\n`);
     _logStream = undefined;
   }
@@ -597,8 +589,10 @@ async function main() {
       console.error(statusLine('err', 'Background initialization failed:'), err);
     });
 
-    // Log tool count immediately (transport is already connected)
-    const totalTools = 26;
+    // Log tool count immediately (transport is already connected).
+    // TOOL_ANNOTATIONS is guaranteed complete by tests/utils/toolInventory.test.ts,
+    // so its size tracks the real tool count without a hardcoded literal.
+    const totalTools = Object.keys(TOOL_ANNOTATIONS).length;
     const localToolCount = LOCAL_TOOLS.size;
     const toolCount = SERVER_MODE === 'write-only' ? localToolCount :
                      SERVER_MODE === 'read-only' ? totalTools - localToolCount : totalTools;
@@ -751,7 +745,7 @@ async function main() {
           { name: 'build_d365fo_project',         desc: 'Run MSBuild compilation locally to capture errors' },
           { name: 'trigger_db_sync',              desc: 'Run a database sync for the current model' },
           { name: 'run_bp_check',                 desc: 'Run Microsoft Best Practices (xppbp.exe) analysis' },
-          { name: 'run_systest_class',            desc: 'Execute unit tests using SysTestRunner.exe' },
+          { name: 'run_systest_class',            desc: 'Execute unit tests using SysTestConsole.exe' },
         ]},
         { icon: '🔄', category: 'Code Review & Source Control', tools: [
           { name: 'review_workspace_changes',     desc: 'AI-based D365FO code review on uncommitted X++ changes (git diff)' },

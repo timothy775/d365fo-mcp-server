@@ -20,7 +20,6 @@ export async function securityCoverageInfoTool(request: CallToolRequest, context
     const db = context.symbolIndex.getReadDb();
     const objName = args.objectName;
 
-    // ── Step 1: Detect object type ──
     let resolvedType = args.objectType;
     if (resolvedType === 'auto') {
       const sym = db.prepare(
@@ -36,8 +35,7 @@ export async function securityCoverageInfoTool(request: CallToolRequest, context
     if (resolvedType !== 'auto') output += ` (${resolvedType})`;
     output += '\n\n';
 
-    // ── Row-level security (OLS) policies constraining this object's table ──
-    // AxSecurityPolicy applies to a primary table; surface any that name this object.
+    // AxSecurityPolicy (row-level security / OLS) applies to a primary table; surface any that name this object.
     let olsSection = '';
     if (resolvedType === 'table' || resolvedType === 'auto') {
       try {
@@ -62,8 +60,7 @@ export async function securityCoverageInfoTool(request: CallToolRequest, context
       }
     }
 
-    // ── Step 2: Find menu items targeting this object ──
-    // From menu_item_targets table
+    // Find menu items targeting this object
     let menuItems: any[] = [];
     try {
       menuItems = db.prepare(
@@ -112,11 +109,9 @@ export async function securityCoverageInfoTool(request: CallToolRequest, context
     const allDuties = new Set<string>();
     const allRoles = new Set<string>();
 
-    // ── Steps 3-5: Batch-fetch entire privilege→duty→role chain in 3 queries ──
-    // This replaces the previous O(N·M·K) nested-loop pattern where each
-    // privilege and duty triggered individual DB round-trips.
+    // Batch-fetch entire privilege→duty→role chain in 3 queries (avoids per-privilege/per-duty round-trips).
 
-    // 3. All privileges for all menu items at once
+    // All privileges for all menu items at once
     const miNames = menuItems.map(mi => mi.menu_item_name);
     const miPH = miNames.map(() => '?').join(',');
     const allPrivEntries = db.prepare(
@@ -132,7 +127,7 @@ export async function securityCoverageInfoTool(request: CallToolRequest, context
       privilegesByMi.get(pe.entry_point_name)!.push(pe);
     }
 
-    // 4. All duties for all privilege names at once
+    // All duties for all privilege names at once
     const allPrivNames = [...new Set(allPrivEntries.map(pe => pe.privilege_name))];
     const dutiesByPrivilege = new Map<string, string[]>();
     const dutiesCounts = new Map<string, number>();
@@ -156,7 +151,7 @@ export async function securityCoverageInfoTool(request: CallToolRequest, context
         dutiesByPrivilege.set(k, v.slice(0, 5));
       }
 
-      // 5. All roles for all duty names at once
+      // All roles for all duty names at once
       const allDutyNames = [...new Set(allDutyRows.map(d => d.duty_name))];
       if (allDutyNames.length > 0) {
         const dutyPH = allDutyNames.map(() => '?').join(',');

@@ -196,7 +196,7 @@ async function analyzeTableGroup(symbolIndex: any, tableGroup: string, limit: nu
 
   output += `**Sample Tables Found:** ${sampleTables.length}\n\n`;
 
-  // ── BATCHED field query: fetch all fields for all sample tables in ONE query ──
+  // Batched field query: fetch all fields for all sample tables in one query
   const tableNames = sampleTables.map(t => t.name);
   const placeholders = tableNames.map(() => '?').join(',');
   const allFields = rdb.prepare(`
@@ -242,7 +242,7 @@ async function analyzeTableGroup(symbolIndex: any, tableGroup: string, limit: nu
     output += `| ${fieldName} | ${data.edt} | ${frequency} |\n`;
   }
 
-  // ── BATCHED relation query: fetch all relations for all sample tables in ONE query ──
+  // Batched relation query: fetch all relations for all sample tables in one query
   const allRelations = rdb.prepare(`
     SELECT source_table, target_table FROM table_relations WHERE source_table IN (${placeholders})
   `).all(...tableNames) as Array<{ source_table: string; target_table: string }>;

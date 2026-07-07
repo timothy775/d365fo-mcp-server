@@ -440,7 +440,7 @@ async function analyzeFormPattern(symbolIndex: any, formPattern: string, limit: 
 
   output += `**Sample Forms Found:** ${sampleForms.length}\n\n`;
 
-  // ── BATCHED datasource query: fetch all datasources for all sample forms in ONE query ──
+  // Fetch all datasources for all sample forms in one query
   const formNames = sampleForms.map(f => f.name);
   const placeholders = formNames.map(() => '?').join(',');
   const allDatasources = rdb.prepare(`

@@ -33,10 +33,6 @@ import { resolveObjectPrefix, applyObjectPrefix, getObjectSuffix, applyObjectSuf
 import { extractModelFromProject, findProjectInSolution } from '../utils/projectUtils.js';
 import { normalizeD365Xml } from '../utils/d365XmlNormalizer.js';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Types
-// ─────────────────────────────────────────────────────────────────────────────
-
 interface ReportFieldSpec {
   /** Field name on the TmpTable (e.g. "ItemId", "Amount") */
   name: string;
@@ -97,10 +93,6 @@ interface GenerateSmartReportArgs {
   /** Base packages directory path */
   packagePath?: string;
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Tool definition
-// ─────────────────────────────────────────────────────────────────────────────
 
 export const generateSmartReportTool: Tool = {
   name: 'generate_smart_report',
@@ -243,10 +235,6 @@ Examples:
   },
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Handler
-// ─────────────────────────────────────────────────────────────────────────────
-
 export async function handleGenerateSmartReport(
   args: GenerateSmartReportArgs,
   symbolIndex: XppSymbolIndex
@@ -274,7 +262,6 @@ export async function handleGenerateSmartReport(
   const log = (msg: string) => console.error(`[generateSmartReport] ${msg}`);
   log(`Generating report: ${name}, fields=${fieldsHint ?? '(structured)'}, copyFrom=${copyFrom ?? 'none'}, contractParams=${contractParams.length}`);
 
-  // ── Resolve model / prefix / paths (same pattern as generateSmartTable) ────
   const configManager = getConfigManager();
   await configManager.ensureLoaded();
 
@@ -337,10 +324,14 @@ export async function handleGenerateSmartReport(
   const controllerClassName = `${finalName}Controller`;
   const reportCaption = caption || finalName;
 
-  // Read pool connection for all symbol lookups in this function
+  // Only decorate a plain-text caption with the suffix; appending to a label
+  // reference (e.g. "@Module:LabelId") would create mixed content that xppbp
+  // flags as BPErrorLabelIsText.
+  const tmpTableLabel = (suffix: string): string =>
+    reportCaption.startsWith('@') ? reportCaption : `${reportCaption}${suffix}`;
+
   const rdb = symbolIndex.getReadDb();
 
-  // ── Resolve fields ─────────────────────────────────────────────────────────
   let reportFields: ReportFieldSpec[] = [];
 
   // Strategy 1: copyFrom — read fields from existing report's TmpTable
@@ -348,14 +339,12 @@ export async function handleGenerateSmartReport(
     log(`Copying field structure from: ${copyFrom}`);
     try {
       const db = symbolIndex.getReadDb();
-      // Try to find the DP class's TmpTable
       const dpSearch = db.prepare(
         `SELECT name FROM symbols WHERE type = 'class' AND name LIKE ? LIMIT 1`
       ).get(`${copyFrom}%DP`) as { name: string } | undefined;
 
       let srcTmpTable: string | undefined;
       if (dpSearch) {
-        // Search for a TmpTable-like table referenced by the DP class
         const tmpSearch = db.prepare(
           `SELECT name FROM symbols WHERE type = 'table' AND name LIKE ? LIMIT 1`
         ).get(`${copyFrom}%Tmp`) as { name: string } | undefined;
@@ -363,7 +352,7 @@ export async function handleGenerateSmartReport(
       }
 
       if (!srcTmpTable) {
-        // Try the direct convention: <ReportName>Tmp
+        // Fallback: direct naming convention <ReportName>Tmp
         const directTmp = db.prepare(
           `SELECT name FROM symbols WHERE type = 'table' AND name = ? LIMIT 1`
         ).get(`${copyFrom}Tmp`) as { name: string } | undefined;
@@ -435,7 +424,7 @@ export async function handleGenerateSmartReport(
     };
   }
 
-  // ── Resolve additional datasets (Improvement 9) ───────────────────────────
+  // Resolve additional datasets
   type ResolvedExtraDataset = {
     name: string;
     tmpTableName: string;
@@ -471,7 +460,6 @@ export async function handleGenerateSmartReport(
     };
   });
 
-  // ── Generate objects ────────────────────────────────────────────────────────
   const generatedObjects: Array<{
     objectType: string;
     objectName: string;
@@ -479,9 +467,7 @@ export async function handleGenerateSmartReport(
     content: string;
   }> = [];
 
-  // ──────────────────────────────────────────────────────────────────────────
   // 1. TmpTable (AxTable with TableType=TempDB)
-  // ──────────────────────────────────────────────────────────────────────────
   const tableFields: TableFieldSpec[] = reportFields.map(f => ({
     name: f.name,
     edt: f.edt,
@@ -491,7 +477,7 @@ export async function handleGenerateSmartReport(
   const builder = new SmartXmlBuilder(symbolIndex);
   const tmpTableXml = builder.buildTableXml({
     name: tmpTableName,
-    label: `${reportCaption} (temp)`,
+    label: tmpTableLabel(' (temp)'),
     tableGroup: 'Main',
     tableType: 'TempDB',
     fields: tableFields,
@@ -506,7 +492,7 @@ export async function handleGenerateSmartReport(
   });
   log(`Generated TmpTable: ${tmpTableName} (${tableFields.length} fields)`);
 
-  // Additional TmpTables for multi-dataset (Improvement 9)
+  // Additional TmpTables for multi-dataset reports
   for (const ds of resolvedExtraDatasets) {
     if (ds.tableFields.length === 0) {
       log(`⚠ Skipping extra dataset "${ds.name}" — no fields resolved`);
@@ -514,7 +500,7 @@ export async function handleGenerateSmartReport(
     }
     const dsTblXml = builder.buildTableXml({
       name: ds.tmpTableName,
-      label: `${reportCaption} - ${ds.name} (temp)`,
+      label: tmpTableLabel(` - ${ds.name} (temp)`),
       tableGroup: 'Main',
       tableType: 'TempDB',
       fields: ds.tableFields,
@@ -529,9 +515,7 @@ export async function handleGenerateSmartReport(
     log(`Generated extra TmpTable: ${ds.tmpTableName} (${ds.tableFields.length} fields)`);
   }
 
-  // ──────────────────────────────────────────────────────────────────────────
   // 2. Contract class
-  // ──────────────────────────────────────────────────────────────────────────
   const contractParms = contractParams.map(p => ({
     ...p,
     type: p.type || 'str',
@@ -544,8 +528,8 @@ export async function handleGenerateSmartReport(
   const contractParmMethods = contractParms.map(p => {
     const methodName = `parm${p.name.charAt(0).toUpperCase()}${p.name.slice(1)}`;
     const labelAttr = p.label ? `,\n        SysOperationLabelAttribute('${p.label}')` : '';
-    const mandatoryAttr = p.mandatory ? `,\n        SysOperationMandatoryAttribute(true)` : '';
-    // Use explicit defaultValue when provided, else fall back to the member variable (standard parm pattern)
+    // No SysOperationMandatoryAttribute — it doesn't exist in D365FO. Mandatory
+    // enforcement is done in validate() via checkFailed(), not a per-parameter attribute.
     const defaultExpr = p.defaultValue ? p.defaultValue : p.name;
     return [
       `    /// <summary>`,
@@ -553,7 +537,7 @@ export async function handleGenerateSmartReport(
       `    /// </summary>`,
       `    /// <param name="_${p.name}">The ${p.name} value.</param>`,
       `    /// <returns>The current ${p.name} value.</returns>`,
-      `    [DataMemberAttribute('${p.name}')${labelAttr}${mandatoryAttr}]`,
+      `    [DataMemberAttribute('${p.name}')${labelAttr}]`,
       `    public ${p.type} ${methodName}(${p.type} _${p.name} = ${defaultExpr})`,
       `    {`,
       `        ${p.name} = _${p.name};`,
@@ -562,7 +546,7 @@ export async function handleGenerateSmartReport(
     ].join('\n');
   }).join('\n\n');
 
-  // ── Build validate() method when there are mandatory params or a date range ─
+  // Build validate() when there are mandatory params or a from/to date range
   const mandatoryContractParams = contractParms.filter(p => p.mandatory);
   const fromDateParam = contractParms.find(p => {
     const n = p.name.toLowerCase();

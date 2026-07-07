@@ -234,7 +234,6 @@ export async function handleGenerateSmartTable(
     try {
       const db = symbolIndex.getReadDb();
 
-      // Copy fields directly from the symbols DB
       const dbFields = db.prepare(`
         SELECT name, signature FROM symbols
         WHERE type = 'field' AND parent_name = ?
@@ -250,7 +249,6 @@ export async function handleGenerateSmartTable(
         edt: f.signature || undefined,
       }));
 
-      // Copy relations from table_relations
       const dbRelations = db.prepare(`
         SELECT relation_name, target_table, constraint_fields FROM table_relations
         WHERE source_table = ?
@@ -276,7 +274,6 @@ export async function handleGenerateSmartTable(
     try {
       const db = symbolIndex.getReadDb();
 
-      // Use heuristic name patterns (matching analyzeTableGroup logic)
       const namePatterns: Record<string, string> = {
         Transaction: '%Trans%',
         Parameter: '%Parameters',
@@ -292,7 +289,6 @@ export async function handleGenerateSmartTable(
       `).all(...(namePattern ? [namePattern] : [])) as Array<{ name: string }>;
 
       if (sampleTables.length > 0) {
-        // Build field frequency map
         const fieldFrequency = new Map<string, { edt: string; count: number }>();
         for (const table of sampleTables) {
           const tableFields = db.prepare(`
@@ -338,12 +334,51 @@ export async function handleGenerateSmartTable(
   if (fieldsHint && !copyFrom) {
     console.log(`[generateSmartTable] Parsing field hints: ${fieldsHint}`);
     const hintFields = fieldsHint.split(',').map(s => s.trim()).filter(s => s.length > 0);
+
+    // Guard: reject reserved system field names before any generation attempt.
+    // Adding a field named e.g. "CreatedDateTime" produces a compiler error:
+    // "Invalid field name; 'CreatedDateTime' is reserved for system fields."
+    // The platform auto-provides these fields; users should NOT declare them.
+    const reservedHits = hintFields.filter(f => RESERVED_SYSTEM_FIELD_NAMES.has(f.toLowerCase()));
+    if (reservedHits.length > 0) {
+      return {
+        content: [{
+          type: 'text',
+          text: [
+            `❌ **Reserved system field name(s): ${reservedHits.map(f => `"${f}"`).join(', ')}**`,
+            ``,
+            `These names are reserved by the D365FO platform. Adding a custom field with one of`,
+            `these names causes the compiler error:`,
+            `  "Invalid field name; '<name>' is reserved for system fields."`,
+            ``,
+            `**The platform auto-provides these fields** at the table level — you do NOT need to declare them:`,
+            `  • \`CreatedDateTime\`, \`ModifiedDateTime\` — auto-tracked creation/modification timestamps`,
+            `  • \`CreatedBy\`, \`ModifiedBy\`             — auto-tracked user references`,
+            `  • \`RecId\`, \`RecVersion\`                 — system record identity/concurrency`,
+            `  • \`DataAreaId\`, \`Partition\`             — multi-company/partition isolation`,
+            ``,
+            `**To fix:** rename the field(s) to a non-reserved name. Examples:`,
+            `${reservedHits.map(f => {
+              const suggestions: Record<string, string> = {
+                createddatetime: '"NoteDateTime", "DocumentDateTime", "EventDateTime"',
+                modifieddatetime: '"LastModifiedOn", "UpdatedDateTime"',
+                createdby: '"AuthorId", "RequestedBy"',
+                modifiedby: '"LastModifiedUser"',
+              };
+              return `  • "${f}" → ${suggestions[f.toLowerCase()] ?? '"CustomFieldName"'}`;
+            }).join('\n')}`,
+            ``,
+            `🔄 **Call generate again** with the corrected \`fieldsHint\`.`,
+          ].join('\n'),
+        }],
+        isError: true,
+      };
+    }
+
     const hintDb = symbolIndex.getReadDb();
 
     for (const hint of hintFields) {
-      // Duplicate field name in hint list (e.g. agent passed the EDT name twice: "AmountMST, AmountMST"
-      // instead of distinct field names like "DailyRate, LineAmount"). Preserve both by suffixing the
-      // second occurrence rather than silently dropping it — the caller wanted two separate fields.
+      // On duplicate hint names, suffix the second occurrence instead of dropping it.
       let fieldName = hint;
       if (fields.find(f => f.name === fieldName)) {
         let suffix = 2;
@@ -354,13 +389,12 @@ export async function handleGenerateSmartTable(
 
       const edt = resolveBestEdt(hint, hintDb);
       const hintLower = hint.toLowerCase();
-      // Mark as mandatory only when the field name IS an identifier (ends with 'Id',
-      // equals 'RecId', or exactly 'AccountNum'/'CustAccount' patterns).
-      // Do NOT match fields that merely CONTAIN 'id' mid-word (e.g. ValidFrom, Description).
+      // Mandatory only when the name IS an identifier (ends with 'Id', or a known PK pattern) —
+      // not when it merely contains 'id' mid-word (e.g. ValidFrom, Description).
       const isMandatory =
         hintLower === 'recid' ||
-        /id$/.test(hintLower) ||          // SalesId, CustId, AccountId …
-        hintLower === 'accountnum' ||      // D365FO conventional PK fields
+        /id$/.test(hintLower) ||
+        hintLower === 'accountnum' ||
         hintLower === 'accountnumber' ||
         hintLower === 'num' ||
         hintLower === 'code';
@@ -379,7 +413,6 @@ export async function handleGenerateSmartTable(
     usedFallback = true;
     console.warn(`[generateSmartTable] No fieldsHint provided — generating GENERIC defaults only. The table will be incomplete!`);
     const nameLower = name.toLowerCase();
-    // Derive reasonable defaults from table name and group
     if (nameLower.includes('account') || tableGroup === 'Main') {
       fields.push({ name: 'AccountNum', edt: 'CustAccount', mandatory: true });
       fields.push({ name: 'Name', edt: 'Name' });
@@ -392,21 +425,19 @@ export async function handleGenerateSmartTable(
       fields.push({ name: 'Key', edt: 'String255', mandatory: true });
       fields.push({ name: 'Value', edt: 'String255' });
     } else {
-      // Generic fallback
       fields.push({ name: 'RecId', edt: 'RecId', mandatory: true });
     }
   }
 
-  // Resolve EDT base type from edt_metadata for each field that has an EDT but no explicit type.
-  // Without this, all EDT fields default to AxTableFieldString even for Real/Date/Int64 EDTs.
-  // Also validate that every EDT actually exists in the indexed metadata.
+  // Resolve each field's base type from edt_metadata (EDT fields otherwise default to
+  // AxTableFieldString even for Real/Date/Int64 EDTs), and validate EDTs exist in the index.
   const edtWarnings: string[] = [];
+  const missingEdts: Array<{ field: string; edt: string }> = [];
   {
     const db = symbolIndex.getReadDb();
     for (const f of fields) {
-      // The resolved "EDT" may actually be an enum (e.g. a custom RentStatus enum
-      // or a field that resolveBestEdt echoed back as a same-session custom type).
-      // An enum-backed field must be AxTableFieldEnum + EnumType, not String + EDT.
+      // A resolved "EDT" may actually be an enum name; an enum-backed field needs
+      // AxTableFieldEnum + EnumType, not AxTableFieldString + ExtendedDataType.
       if (f.edt && !f.enumType && isEnumName(f.edt, db)) {
         f.enumType = f.edt;
         f.type = 'Enum';
@@ -414,13 +445,9 @@ export async function handleGenerateSmartTable(
         continue;
       }
       if (f.edt && !f.type) {
-        // Authoritative base type from the C# bridge (live IMetadataProvider) when
-        // available. The symbol index stores extends=null for ROOT Date/Real/Int64
-        // EDTs (e.g. TransDate→Date, Qty→Real), so resolveEdtBaseType wrongly
-        // defaulted them to String — the #1 source of "scaffold made my date/amount
-        // field a string". The bridge reads the real AxEdt element type and resolves
-        // it correctly. Fall back to the index + name heuristic only when the bridge
-        // is unavailable (Azure/Linux) or doesn't know the EDT.
+        // Prefer the bridge (live IMetadataProvider) for the base type: the symbol index
+        // stores extends=null for ROOT Date/Real/Int64 EDTs, so it can't distinguish them
+        // from String-based EDTs. Fall back to the index/heuristic when no bridge is available.
         f.type = await bridgeEdtBaseType(bridge, f.edt)
               ?? resolveEdtBaseType(f.edt, db)
               ?? heuristicEdtBaseType(f.edt);
@@ -430,17 +457,15 @@ export async function handleGenerateSmartTable(
         const edtExists = validateEdtExists(f.edt, db);
         if (!edtExists) {
           edtWarnings.push(`⚠️ Field "${f.name}": "${f.edt}" not found in indexed metadata as an EDT or enum — if it is a same-session custom type, call update_symbol_index on its file first, then regenerate. Otherwise this will cause a build error.`);
+          missingEdts.push({ field: f.name, edt: f.edt });
         }
       }
     }
   }
 
-  // ── BP rule: BPErrorEDTNotMigrated ─────────────────────────────────────────
-  // When a field uses an EDT that carries an implicit relation (e.g. ItemId → InventTable),
-  // D365FO BP requires an explicit table relation on the table — otherwise you get:
-  //   BPErrorEDTNotMigrated: The relation under the EDT must be migrated to table relation.
-  //   BPUpgradeMetadataEDTRelation: EDT relation found in field X. It should be migrated.
-  // Auto-detect from edt_metadata.reference_table and generate matching relations.
+  // BP rule BPErrorEDTNotMigrated: a field whose EDT carries an implicit relation
+  // (e.g. ItemId → InventTable) requires an explicit table relation. Auto-detect
+  // from edt_metadata.reference_table and generate matching relations.
   {
     const db = symbolIndex.getReadDb();
     for (const f of fields) {
@@ -454,9 +479,9 @@ export async function handleGenerateSmartTable(
         ).get(f.edt) as { reference_table: string } | undefined;
 
         if (edtRow?.reference_table) {
-          // Determine the related field — typically the EDT name itself is the PK field on the target table
-          // e.g. ItemId EDT → InventTable.ItemId, WHSZoneId → WHSZone.WHSZoneId
-          const relatedField = f.edt;  // The EDT name is the canonical field name on the target table
+          // The EDT name is typically the PK field name on the target table too
+          // (e.g. ItemId EDT → InventTable.ItemId).
+          const relatedField = f.edt;
           relations.push({
             name: f.name,
             targetTable: edtRow.reference_table,
@@ -777,6 +802,34 @@ export async function handleGenerateSmartTable(
   }
 
   if (bridge && resolvedModel) {
+    // ── Pre-write reference gate ──────────────────────────────────────────────
+    // scaffold's bridge path writes the table to disk in one shot, bypassing the
+    // validate_code gate that d365fo_file(create) runs. Refuse to write when a
+    // field references an EDT that exists neither in the index NOR on disk — that
+    // always fails at build ("metadata error / BPErrorEDT"). An EDT that is on
+    // disk but unindexed (a same-session custom type) is allowed through: xppc
+    // reads it from disk, so the table builds. (Only the bridge write path is
+    // gated; the Azure/Linux text + fs-fallback paths keep their advisory
+    // warnings, since the index may legitimately be incomplete there.)
+    const modelDir = path.join(packagePath, resolvedModel, resolvedModel).replace(/\//g, '\\');
+    const unbuildable = selectUnbuildableEdts(missingEdts, modelDir);
+    if (unbuildable.length > 0) {
+      return {
+        isError: true,
+        content: [{
+          type: 'text',
+          text: [
+            `⛔ Refusing to write table **${finalName}** — ${unbuildable.length} field(s) reference an EDT that exists neither in the index nor on disk:`,
+            ...unbuildable.map(u => `  • Field "${u.field}" → EDT "${u.edt}" (not found)`),
+            ``,
+            `Writing now would produce a table that fails to build. Fix the EDT name(s) — use`,
+            `suggest_edt or search to find the correct one. For a same-session custom EDT, create`,
+            `the EDT first (and call \`update_symbol_index\` on its file), then re-run scaffold.`,
+          ].join('\n'),
+        }],
+      };
+    }
+
     console.log(`[generateSmartTable] Attempting bridge-first creation for ${finalName}...`);
     const bridgeResult = await bridgeCreateSmartTable(bridge, {
       objectName: finalName,
@@ -1013,7 +1066,7 @@ export async function handleGenerateSmartTable(
  * unavailable, doesn't know the EDT, or reports it as Enum (enum-backed EDTs are
  * handled separately via the enumType path, so we must not emit a bare "Enum" here).
  */
-async function bridgeEdtBaseType(bridge: BridgeClient | undefined, edtName: string): Promise<string | undefined> {
+export async function bridgeEdtBaseType(bridge: BridgeClient | undefined, edtName: string): Promise<string | undefined> {
   if (!bridge?.isReady) return undefined;
   try {
     const info = await bridge.readEdt(edtName);
@@ -1079,6 +1132,43 @@ export function resolveEdtBaseType(edtName: string, db: any, depth = 0): string 
 }
 
 /**
+ * Resolve the underlying ENUM NAME for an EDT whose own base type is Enum (e.g. "Posted"
+ * extends the "NoYes" enum, "SalesStatus" extends its own enum). Mirrors the chain-walk in
+ * resolveEdtBaseType() but returns the enum name instead of the literal string "Enum".
+ *
+ * Needed because resolveEdtBaseType() alone can only tell the caller "this field's type is
+ * Enum" — without also knowing WHICH enum, the bridge cannot emit a valid AxTableFieldEnum
+ * (it has no EnumType to write) and silently falls back to AxTableFieldString. This was
+ * discovered live: a table field created with only `{ name, edt: "Posted" }` (no explicit
+ * enumType) resolved `type: 'Enum'` via resolveEdtBaseType() but the created field came back
+ * as plain AxTableFieldString with ExtendedDataType=Posted — a valid-looking but semantically
+ * wrong field (the compiler accepts a String-typed field pointed at an Enum-based EDT via
+ * ExtendedDataType, so this doesn't even fail the build; it just isn't what was asked for).
+ *
+ * Returns undefined when the EDT isn't enum-backed (or isn't indexed).
+ */
+export function resolveEdtEnumType(edtName: string, db: any, depth = 0): string | undefined {
+  if (depth > 8) return undefined; // guard against circular chains
+
+  try {
+    const row = db.prepare(
+      `SELECT extends, enum_type FROM edt_metadata WHERE edt_name = ? LIMIT 1`
+    ).get(edtName) as { extends: string | null; enum_type: string | null } | undefined;
+
+    if (!row) return undefined;
+    // Enum-based EDT: extends is null but enum_type is set (e.g. Posted → NoYes)
+    if (row.enum_type && !row.extends) return row.enum_type;
+    if (!row.extends) return undefined; // root EDT of a non-enum primitive
+    if (row.extends === 'Enum') return undefined; // extends the bare primitive, no named enum
+
+    // Follow the chain to the parent EDT (e.g. a custom EDT extending "Posted")
+    return resolveEdtEnumType(row.extends, db, depth + 1);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Heuristic base type from an EDT/field name when the EDT is not in the index
  * (e.g. a standard EDT whose edt_metadata wasn't loaded, or a same-session EDT).
  * Mirrors SmartXmlBuilder.getAxTableFieldType's name heuristics but returns the
@@ -1089,7 +1179,14 @@ export function resolveEdtBaseType(edtName: string, db: any, depth = 0): string 
 export function heuristicEdtBaseType(edtName: string): string | undefined {
   const e = edtName.toLowerCase();
   if (e === 'recid' || e.endsWith('recid') || e.includes('refrecid')) return 'Int64';
-  if (e.includes('utcdatetime') || (e.includes('datetime') && !e.includes('transdate'))) return 'UtcDateTime';
+  // Any "...DateTime" name (TransDateTime, CreatedDateTime, ModifiedDateTime, UtcDateTime,
+  // ...) is UtcDateTime-based. The previous `&& !e.includes('transdate')` guard was meant
+  // to protect something else but instead excluded the single most common case: a name
+  // containing BOTH "datetime" and "transdate" (e.g. "TransDateTime" itself, since
+  // "transdatetime" contains "transdate" as a substring) fell through this branch entirely
+  // AND the next Date branch (which excludes names containing "time"), so it resolved to
+  // undefined and the caller defaulted the field to plain AxTableFieldString.
+  if (e.includes('datetime')) return 'UtcDateTime';
   if (e.includes('date') && !e.includes('time') && !e.includes('update')) return 'Date';
   if (e.includes('amount') || e.includes('price') || e.includes('qty') || e.includes('quantity')
       || e.includes('percent') || e.includes('rate') || e === 'real' || e.endsWith('mst')) return 'Real';
@@ -1118,6 +1215,27 @@ export function isEnumName(name: string, db: any): boolean {
  * Check whether an EDT exists in the indexed edt_metadata.
  * Falls back to checking the symbols table for EDT type entries.
  */
+/**
+ * From the EDTs that resolve to neither an indexed EDT nor an enum, select those
+ * that are ALSO absent from disk — i.e. truly missing and guaranteed to fail the
+ * build. An EDT whose `AxEdt/<name>.xml` exists in the model package (a
+ * same-session custom EDT not yet indexed) is NOT returned: xppc reads it from
+ * disk, so the table will build. Used to gate scaffold's one-shot bridge write
+ * without false-blocking the valid same-session-EDT workflow.
+ *
+ * `existsOnDisk` is injectable for testing; defaults to fs.existsSync.
+ */
+export function selectUnbuildableEdts(
+  missingEdts: Array<{ field: string; edt: string }>,
+  modelDir: string,
+  existsOnDisk: (p: string) => boolean = fs.existsSync,
+): Array<{ field: string; edt: string }> {
+  return missingEdts.filter(({ edt }) => {
+    const edtFile = path.join(modelDir, 'AxEdt', `${edt}.xml`);
+    return !existsOnDisk(edtFile);
+  });
+}
+
 function validateEdtExists(edtName: string, db: any): boolean {
   // Skip validation for well-known D365FO primitive/system EDTs that may not be in our index
   const SYSTEM_EDTS = new Set([
@@ -1148,14 +1266,26 @@ function validateEdtExists(edtName: string, db: any): boolean {
 /**
  * Suggest EDT based on field name heuristics
  */
+/**
+ * D365FO system-managed field names that are reserved by the platform.
+ * Attempting to declare a custom field with one of these names produces
+ * the compiler error: "Invalid field name; '<name>' is reserved for system fields."
+ * The platform auto-provides these fields — users should NOT add them manually.
+ */
+export const RESERVED_SYSTEM_FIELD_NAMES = new Set([
+  'createddatetime', 'modifieddatetime',
+  'createdby', 'modifiedby',
+  'createdtransactionid', 'modifiedtransactionid',
+  'recid', 'recversion', 'dataareaid', 'partition',
+  'tableid', 'instancerelationtype',
+]);
+
 /** Framework/audit fields that should never be auto-injected from frequency mining. */
 export function isInfrastructureField(fieldName: string): boolean {
   const INFRA = new Set([
     'mcrholdcode', 'mcrholduserid', 'mcrholddatetime',
     'sortorder', 'displayorder',
-    'createdby', 'createddatetime', 'modifiedby', 'modifieddatetime',
-    'createdtransactionid', 'modifiedtransactionid',
-    'recid', 'recversion', 'dataareaid', 'partition', 'tableid', 'instancerelationtype',
+    ...RESERVED_SYSTEM_FIELD_NAMES,
   ]);
   return INFRA.has(fieldName.toLowerCase());
 }
@@ -1224,7 +1354,13 @@ export function resolveBestEdt(fieldName: string, db: any): string {
     // looks like a PascalCase custom EDT (starts uppercase, ≥5 chars, non-generic), return
     // the fieldName directly — it's likely a custom EDT not yet in the index.
     // The edtWarnings system will validate it later and warn if it truly doesn't exist.
-    if (heuristic === 'String255' && acceptFuzzy && /^[A-Z]/.test(fieldName) && fieldName.length >= 5) {
+    // Only echo the field name back as a presumed same-session custom EDT when it
+    // looks like a multi-part domain-specific name (≥3 CamelCase tokens, e.g.
+    // "ContosoRentEquipmentId"). Short 1-2 token names like "NoteText" or "NoteId"
+    // are NOT custom EDT echoes — they are generic column names that default to the
+    // heuristic result instead. The edtWarnings system validates echoed names later.
+    const camelTokens = fieldName.split(/(?=[A-Z])/).filter(t => t.length > 0);
+    if (heuristic === 'String255' && acceptFuzzy && camelTokens.length >= 3 && /^[A-Z]/.test(fieldName)) {
       return fieldName;
     }
     if (validateEdtExists(heuristic, db)) return heuristic;
@@ -1248,6 +1384,11 @@ export function suggestEdtFromFieldName(fieldName: string): string {
   if (nameLower.includes('name')) return 'Name';
   if (nameLower === 'description') return 'Description';
   if (nameLower.includes('description') || nameLower === 'desc') return 'Description';
+  if (nameLower.includes('subject') || nameLower === 'title') return 'Name';
+  // Long-text / memo fields → Notes (unlimited string, base type String -1)
+  if (nameLower === 'notes' || nameLower === 'note' || nameLower === 'notetext' ||
+      nameLower.endsWith('text') || nameLower.endsWith('notes') ||
+      nameLower === 'body' || nameLower === 'content' || nameLower === 'message') return 'Notes';
   if (nameLower.includes('amount')) return 'AmountMST';
   if (nameLower.includes('rate')) return 'AmountMST';
   if (nameLower.includes('quantity') || nameLower.includes('qty')) return 'Qty';
@@ -1264,9 +1405,8 @@ export function suggestEdtFromFieldName(fieldName: string): string {
   if (nameLower.includes('percent') || nameLower.includes('pct')) return 'Percent';
   if (nameLower.includes('enabled') || nameLower.includes('active') || nameLower.includes('flag')) return 'NoYesId';
 
-  // No blanket "*id → RefRecId" / "status → NoYesId" rule: those force the wrong
-  // base type. Such fields fall through to the string default unless resolveBestEdt
-  // matches a real EDT.
+  // No blanket "*id → Num" / "status → NoYesId" rule: those force the wrong base type.
+  // Such fields fall through to the string default unless resolveBestEdt matches a real EDT.
 
   // Default to string
   return 'String255';

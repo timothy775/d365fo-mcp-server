@@ -23,8 +23,6 @@ import {
   type FormControlNode,
 } from '../metadata/formPatternMiner.js';
 
-// ── Schema ──────────────────────────────────────────────────────────────────
-
 export const validateFormPatternArgsSchema = z.object({
   xml: z.string().optional().describe(
     'Complete AxForm XML to validate. Provide this OR formName/filePath.'
@@ -39,8 +37,6 @@ export const validateFormPatternArgsSchema = z.object({
 
 // Tool registration (name, description, inputSchema) lives inline in
 // src/server/mcpServer.ts - the single source of truth for tool instructions.
-
-// ── Formatting ──────────────────────────────────────────────────────────────
 
 function formatReport(report: FormPatternReport, source: string): string {
   const errors = report.violations.filter((v) => v.severity === 'error');
@@ -77,8 +73,6 @@ function formatReport(report: FormPatternReport, source: string): string {
   }
   return lines.join('\n');
 }
-
-// ── Tool handler ────────────────────────────────────────────────────────────
 
 export async function validateFormPatternTool(
   request: any,
@@ -142,8 +136,6 @@ export async function validateFormPatternTool(
     content: [{ type: 'text', text: formatReport(report, source) }],
   };
 }
-
-// ── Write-gate helper (used by create_d365fo_file / generate) ────
 
 /** FORM_PATTERN_ENFORCE defaults to enabled; set to 'false'/'0' to disable blocking. */
 export function isFormPatternEnforceEnabled(): boolean {
@@ -227,7 +219,6 @@ export async function gateOnFormPatternErrors(
 
   if (errors.length === 0 || !isFormPatternEnforceEnabled()) {
     if (errors.length > 0) {
-      // Enforcement disabled — surface errors as warnings instead of blocking
       const downgraded =
         `⚠️ FORM_PATTERN_ENFORCE is disabled — ${errors.length} pattern error(s) NOT blocking:\n` +
         errors.map((v) => `   🔴 [${v.rule}] ${v.path}: ${v.excerpt}`).join('\n');

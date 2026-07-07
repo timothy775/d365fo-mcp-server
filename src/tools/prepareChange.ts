@@ -25,7 +25,7 @@ import { tryBridgeCocExtensions } from '../bridge/bridgeAdapter.js';
 import { getConfigManager } from '../utils/configManager.js';
 import { rankContext, renderRankedContext } from '../workspace/contextRanker.js';
 
-// ── Schema ────────────────────────────────────────────────────────────────────
+// Schema
 
 export const prepareChangeArgsSchema = z.object({
   goal: z.string().describe(
@@ -42,7 +42,7 @@ export const prepareChangeArgsSchema = z.object({
   ),
   objectType: z.enum([
     'class', 'table', 'form', 'query', 'view', 'enum', 'edt',
-    'data-entity', 'map', 'report',
+    'data-entity', 'map', 'report', 'security-duty', 'security-role',
   ]).optional().describe(
     'D365FO object type. Auto-detected from the symbol index when omitted.',
   ),
@@ -52,7 +52,7 @@ export const prepareChangeArgsSchema = z.object({
   ),
 });
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// Helpers
 
 /** Resolve object type from the symbol index. */
 async function resolveObjectType(
@@ -184,6 +184,12 @@ function fetchStrategy(objectType: string | undefined): string {
     strategies.push('• Form datasource extension [ExtensionOf(formDataSourceStr(...))] — CoC on DS methods');
   } else if (objectType === 'map') {
     strategies.push('• Map extension class [ExtensionOf(mapStr(...))] — add/wrap map methods');
+  } else if (objectType === 'security-duty') {
+    strategies.push('• security-duty-extension (AxSecurityDutyExtension) — add privileges to this EXISTING duty without overlaying it');
+    strategies.push('• New standalone security-duty — only if this duty is not a fit for the new privilege at all');
+  } else if (objectType === 'security-role') {
+    strategies.push('• security-role-extension (AxSecurityRoleExtension) — add duties/privileges to this EXISTING role without overlaying it');
+    strategies.push('• New standalone security-role — only if this role is not a fit for the new duty at all');
   } else {
     strategies.push('• Extension class via [ExtensionOf] — check the object type for supported extension mechanisms');
   }
@@ -244,7 +250,7 @@ async function fetchPatterns(
   return '(no similar patterns found in index)';
 }
 
-// ── Tool handler ──────────────────────────────────────────────────────────────
+// Tool handler
 
 export async function prepareChangeTool(request: any, context: XppServerContext): Promise<any> {
   const raw = request?.params?.arguments ?? request;
@@ -323,7 +329,7 @@ export async function prepareChangeTool(request: any, context: XppServerContext)
   lines.push(patternText);
   lines.push('');
 
-  // Ranked neighborhood: goal-driven, anchored on the target object. Best-effort.
+  // Ranked neighborhood, anchored on the target object; additive, best-effort.
   try {
     const ranked = rankContext(context, {
       intent: `${goal} ${objectName} ${methodName ?? ''}`,
@@ -332,7 +338,7 @@ export async function prepareChangeTool(request: any, context: XppServerContext)
     lines.push(...renderRankedContext(ranked));
     lines.push('');
   } catch {
-    // Ranked context is additive — omit on failure.
+    // omit on failure
   }
 
   if (namingText !== null) {
