@@ -24,7 +24,7 @@ resources:
   repositories:
     - repository: mcpServer
       type: github
-      endpoint: timothy775
+      endpoint: github.com_timothy775
       name: timothy775/d365fo-mcp-server
       ref: refs/heads/main
 
