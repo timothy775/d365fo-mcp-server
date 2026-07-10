@@ -24,8 +24,8 @@ resources:
   repositories:
     - repository: mcpServer
       type: github
-      endpoint: github.com_dynamics365ninja
-      name: dynamics365ninja/d365fo-mcp-server
+      endpoint: timothy775
+      name: timothy775/d365fo-mcp-server
       ref: refs/heads/main
 
 variables:
