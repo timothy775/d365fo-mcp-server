@@ -24,11 +24,11 @@ import { createXppMcpServer } from '../../src/server/mcpServer';
 const CHARS_PER_TOKEN = 4;
 
 // Ceilings in characters of serialized JSON. Current actuals (2026-07, after
-// the structural schema diet moved d365fo_file modify-op params into a single
-// `params` object with error-driven per-op specs — see d365foFileOpSpecs.ts):
-// total ≈ 60,368 · d365fo_file ≈ 8,390 (generate_object ≈ 7,996 is now a close
-// second). Headroom is small on purpose so creep is caught early.
-const TOTAL_BUDGET = 61_200;
+// adding label where-used to find_references — a new capability, so the ceiling
+// was raised deliberately: total ≈ 61,350 · d365fo_file ≈ 8,390 (generate_object
+// ≈ 7,996 is now a close second). Headroom is small on purpose so creep is
+// caught early.
+const TOTAL_BUDGET = 61_600;
 const LARGEST_TOOL_BUDGET = 8_800;
 
 async function getTools(): Promise<Array<{ name: string }>> {

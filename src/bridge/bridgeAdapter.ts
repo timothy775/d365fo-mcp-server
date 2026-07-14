@@ -426,6 +426,7 @@ export async function tryBridgeReferences(
   target: string | string[],
   limit = 50,
   displayName?: string,
+  formatAs: 'default' | 'label' = 'default',
 ): Promise<BridgeReferencesOutcome> {
   if (!bridge?.isReady || !bridge.xrefAvailable) return { status: 'unavailable' };
   // Accept several candidate paths (e.g. one per container type when an owner
@@ -454,6 +455,14 @@ export async function tryBridgeReferences(
   // No rows: "empty" is authoritative only when nothing went wrong; otherwise
   // signal "error" so the caller falls back instead of trusting the 0.
   if (merged.length === 0) return errored ? { status: 'error' } : { status: 'empty' };
+
+  // Labels are referenced from every object type (tables, forms, EDTs, enums,
+  // reports, menu items, security objects, …), mostly via declarative metadata
+  // properties rather than X++ code — so they get a dedicated formatter that
+  // groups by source object type and surfaces the referencing property.
+  if (formatAs === 'label') {
+    return { status: 'ok', result: formatLabelReferences(merged, label, limit) };
+  }
 
   {
     const refs = { count: merged.length, references: merged };
@@ -514,6 +523,130 @@ export async function tryBridgeReferences(
 
     return { status: 'ok', result: { content: [{ type: 'text', text: out }] } };
   }
+}
+
+// LABEL REFERENCES (formatting)
+
+/**
+ * Friendly display name for an xref source-container segment. Handles both xref
+ * path conventions seen for label references: code references use plural,
+ * slash-prefixed containers ("/Classes/…", "/Tables/…"), while declarative
+ * metadata references use singular containers with no leading slash
+ * ("Table/…", "Form/…", "EdtString/…", "MenuItemDisplay/…").
+ */
+const XREF_SOURCE_TYPE_LABELS: Record<string, string> = {
+  classes: 'Class', class: 'Class',
+  tables: 'Table', table: 'Table', tableextension: 'Table extension',
+  forms: 'Form', form: 'Form', formextension: 'Form extension',
+  views: 'View', view: 'View', viewextension: 'View extension',
+  maps: 'Map', map: 'Map',
+  queries: 'Query', querysimple: 'Query',
+  enum: 'Enum', enums: 'Enum', enumextension: 'Enum extension',
+  reports: 'Report', report: 'Report',
+  dataentityviews: 'Data entity', dataentityview: 'Data entity',
+  compositedataentityview: 'Composite data entity', dataentityviewextension: 'Data entity extension',
+  aggregatedataentity: 'Aggregate data entity', aggregatedimension: 'Aggregate dimension',
+  aggregatemeasurement: 'Aggregate measurement',
+  menu: 'Menu', menuextension: 'Menu extension',
+  menuitemdisplay: 'Menu item (display)', menuitemaction: 'Menu item (action)', menuitemoutput: 'Menu item (output)',
+  securityprivilege: 'Security privilege', securityduty: 'Security duty',
+  securityrole: 'Security role', securitypolicy: 'Security policy',
+  configurationkey: 'Configuration key', configurationkeygroup: 'Configuration key group',
+  tile: 'Tile', kpi: 'KPI', licensecode: 'License code', resource: 'Resource',
+};
+
+function friendlyXrefSourceType(container: string): string {
+  const key = container.toLowerCase();
+  if (XREF_SOURCE_TYPE_LABELS[key]) return XREF_SOURCE_TYPE_LABELS[key];
+  if (key.startsWith('edt')) return 'EDT';            // EdtString, EdtEnum, EdtReal, EdtInt64, …
+  if (key.startsWith('workflow')) return 'Workflow';  // WorkflowTemplate, WorkflowApproval, …
+  return container || 'Other';
+}
+
+interface ParsedLabelSource {
+  type: string;        // friendly source type, e.g. "Form", "EDT", "Table"
+  objectName: string;  // referencing object, e.g. "AbatementCertificate_IN"
+  detail?: string;     // X++ method (code ref) or referencing property (metadata ref)
+}
+
+/**
+ * Parse an xref source path for a label reference into (type, object, detail).
+ * Examples:
+ *   "/Classes/WhsWorkManualComplete/Methods/performValidation" → Class · WhsWorkManualComplete · performValidation
+ *   "Form/AbatementCertificate_IN/FormDesign/.../ShowData?Text" → Form  · AbatementCertificate_IN · Text
+ *   "EdtString/ABNControllingCorporation_AU?HelpText"          → EDT   · ABNControllingCorporation_AU · HelpText
+ */
+function parseLabelSource(sourcePath: string): ParsedLabelSource {
+  const parts = sourcePath.split('/').filter(Boolean);
+  const type = friendlyXrefSourceType(parts[0] ?? '');
+
+  let objectName = parts[1] ?? sourcePath;
+  const objQ = objectName.indexOf('?');            // e.g. "EdtString/Foo?HelpText" — object is 2nd segment
+  if (objQ >= 0) objectName = objectName.substring(0, objQ);
+
+  let detail: string | undefined;
+  const mi = parts.indexOf('Methods');
+  if (mi >= 0 && parts[mi + 1]) {
+    detail = parts[mi + 1].split('?')[0];           // X++ method name (code reference)
+  } else {
+    const q = sourcePath.lastIndexOf('?');
+    if (q >= 0) detail = sourcePath.substring(q + 1); // referencing property: Label/Caption/HelpText/Text/…
+  }
+  return { type, objectName, detail };
+}
+
+/**
+ * Format label where-used results, grouped by source object type. Unlike the
+ * default (caller/method-oriented) formatter, this makes the object-type spread
+ * explicit — a label is typically referenced far more from metadata (form
+ * captions, field/EDT labels, menu-item captions, …) than from X++ code.
+ */
+function formatLabelReferences(references: BridgeReferenceInfo[], label: string, limit: number): ToolResult {
+  type LabelRefRow = ParsedLabelSource & { module?: string; line: number };
+  const parsed: LabelRefRow[] = references.map(r => ({
+    ...parseLabelSource(r.sourcePath),
+    module: r.sourceModule,
+    line: r.line,
+  }));
+
+  let out = `# References to label \`${label}\`\n\n`;
+  out += `**Total:** ${references.length} reference(s) found\n`;
+  out += `_Source: C# bridge (DYNAMICSXREFDB) — includes both X++ code and declarative metadata references_\n\n`;
+
+  // Summary: count by source object type (most-referenced first)
+  const byType = new Map<string, number>();
+  for (const p of parsed) byType.set(p.type, (byType.get(p.type) || 0) + 1);
+  out += `## 📊 By source object type\n\n`;
+  for (const [type, count] of [...byType.entries()].sort((a, b) => b[1] - a[1])) {
+    out += `- **${type}**: ${count} reference(s)\n`;
+  }
+  out += `\n`;
+
+  // Detail: grouped by type, capped at `limit` total rows
+  out += `## 📍 References\n\n`;
+  const visible = parsed.slice(0, limit);
+  const groups = new Map<string, LabelRefRow[]>();
+  for (const p of visible) {
+    const bucket = groups.get(p.type) ?? [];
+    bucket.push(p);
+    groups.set(p.type, bucket);
+  }
+  for (const [type, refs] of [...groups.entries()].sort((a, b) => b[1].length - a[1].length)) {
+    out += `### ${type} (${refs.length})\n\n`;
+    for (const r of refs) {
+      const loc = r.line > 0 ? `:${r.line}` : '';
+      const mod = r.module ? ` [${r.module}]` : '';
+      const det = r.detail ? ` › ${r.detail}` : '';
+      out += `- **${r.objectName}**${det}${loc}${mod}\n`;
+    }
+    out += `\n`;
+  }
+
+  if (references.length > limit) {
+    out += `> ⚠️ Showing first ${limit} of ${references.length} references. Raise \`limit\` to see more.\n`;
+  }
+
+  return { content: [{ type: 'text', text: out }] };
 }
 
 // SEARCH
