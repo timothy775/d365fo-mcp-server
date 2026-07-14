@@ -141,7 +141,26 @@ export function registerToolHandler(server: Server, context: XppServerContext): 
     // LOCAL_TOOLS need no DB (filesystem/in-memory config only) and skip the wait.
     if (context.dbReady && !LOCAL_TOOLS.has(toolName)) {
       const t0 = Date.now();
-      await context.dbReady;
+      // Race dbReady against a 55-second timeout so VS Code's ~60 s client
+      // timeout doesn't silently cancel the request. If the DB is still loading
+      // after 55 s, return an informative message instead of hanging forever.
+      const DB_WAIT_TIMEOUT_MS = 55_000;
+      const timeoutPromise = new Promise<'timeout'>(resolve =>
+        setTimeout(() => resolve('timeout'), DB_WAIT_TIMEOUT_MS),
+      );
+      const result = await Promise.race([
+        context.dbReady.then(() => 'ready' as const),
+        timeoutPromise,
+      ]);
+      if (result === 'timeout') {
+        return {
+          content: [{
+            type: 'text',
+            text: `⏳ The MCP server is still loading the X++ symbol database (takes 30–90 s on first start). Please retry the request in a few seconds.`,
+          }],
+          isError: true,
+        };
+      }
       const elapsed = Date.now() - t0;
       if (elapsed > 200) {
         console.error(`[toolHandler] ⏳ ${toolName}: DB was loading, waited ${elapsed} ms`);
