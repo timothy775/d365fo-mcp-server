@@ -92,9 +92,27 @@ describe('tryBridgeReferences — label formatting', () => {
 
     expect(text).toContain('WhsWorkManualComplete');
     expect(text).toContain('performValidation');               // X++ method (code ref)
-    expect(text).toContain('ABNControllingCorporation_AU');
-    expect(text).toContain('HelpText');                        // declarative property
-    expect(text).toContain('Text');                            // form control caption property
+    // Declarative refs name the member the property sits on, not just the leaf
+    // property — so "which field/control/value" survives, not only "Label"/"Text".
+    expect(text).toContain('ShowData › Text');                 // form control › caption property
+    expect(text).toContain('A › Label');                       // enum value › label property
+    // …except when the property is on the object itself (no redundant member).
+    expect(text).toContain('ABNControllingCorporation_AU** › HelpText');
+  });
+
+  it('marks a per-type group as truncated when limit cuts into it', async () => {
+    // 6 refs, all Class, but limit=4 → the Class group must read "4 of 6",
+    // reconciling with the summary count above it.
+    const many = Array.from({ length: 6 }, (_, i) => ({
+      sourcePath: `/Classes/Cls${i}/Methods/m${i}`, sourceModule: 'ApplicationSuite', line: i + 1, column: 1,
+    }));
+    const bridge = makeXrefBridge(many);
+    const outcome = await tryBridgeReferences(bridge, '/Labels/@WAX2194', 4, '@WAX2194', 'label');
+    const text = (outcome as any).result.content[0].text as string;
+
+    expect(text).toContain('**Class**: 6 reference(s)');       // summary: full population
+    expect(text).toContain('### Class (4 of 6)');              // detail: truncated marker
+    expect(text).toContain('Showing first 4 of 6 references');
   });
 
   it('reports xref bridge unavailable', async () => {

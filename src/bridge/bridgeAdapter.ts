@@ -571,9 +571,16 @@ interface ParsedLabelSource {
 
 /**
  * Parse an xref source path for a label reference into (type, object, detail).
+ * `detail` names *where on the object* the label is used, so a reader can jump
+ * straight to it — the X++ method for code refs, or "<member> › <property>" for
+ * declarative metadata refs (the referencing field / enum value / form control
+ * plus the property it sits on). The member is omitted when the property is
+ * declared directly on the object itself (e.g. an EDT's own HelpText).
  * Examples:
  *   "/Classes/WhsWorkManualComplete/Methods/performValidation" → Class · WhsWorkManualComplete · performValidation
- *   "Form/AbatementCertificate_IN/FormDesign/.../ShowData?Text" → Form  · AbatementCertificate_IN · Text
+ *   "Form/AbatementCertificate_IN/FormDesign/.../ShowData?Text" → Form  · AbatementCertificate_IN · ShowData › Text
+ *   "Table/Foo/Fields/Bar?Label"                               → Table · Foo · Bar › Label
+ *   "Enum/ABC/EnumValue/A?Label"                               → Enum  · ABC · A › Label
  *   "EdtString/ABNControllingCorporation_AU?HelpText"          → EDT   · ABNControllingCorporation_AU · HelpText
  */
 function parseLabelSource(sourcePath: string): ParsedLabelSource {
@@ -590,7 +597,14 @@ function parseLabelSource(sourcePath: string): ParsedLabelSource {
     detail = parts[mi + 1].split('?')[0];           // X++ method name (code reference)
   } else {
     const q = sourcePath.lastIndexOf('?');
-    if (q >= 0) detail = sourcePath.substring(q + 1); // referencing property: Label/Caption/HelpText/Text/…
+    if (q >= 0) {
+      const property = sourcePath.substring(q + 1); // property: Label/Caption/HelpText/Text/…
+      // The member the property sits on is the last path segment before the "?"
+      // (a form control, table field, enum value, …). Keep it unless it *is* the
+      // object — a property declared directly on the object needs no member.
+      const member = (parts[parts.length - 1] ?? '').split('?')[0];
+      detail = member && member !== objectName ? `${member} › ${property}` : property;
+    }
   }
   return { type, objectName, detail };
 }
@@ -613,7 +627,10 @@ function formatLabelReferences(references: BridgeReferenceInfo[], label: string,
   out += `**Total:** ${references.length} reference(s) found\n`;
   out += `_Source: C# bridge (DYNAMICSXREFDB) — includes both X++ code and declarative metadata references_\n\n`;
 
-  // Summary: count by source object type (most-referenced first)
+  // Summary: count by source object type (most-referenced first). This counts
+  // ALL references, whereas the detail section below is capped at `limit` — so
+  // each truncated group carries a "showing X of Y" marker to keep the two
+  // sections reconcilable.
   const byType = new Map<string, number>();
   for (const p of parsed) byType.set(p.type, (byType.get(p.type) || 0) + 1);
   out += `## 📊 By source object type\n\n`;
@@ -632,7 +649,11 @@ function formatLabelReferences(references: BridgeReferenceInfo[], label: string,
     groups.set(p.type, bucket);
   }
   for (const [type, refs] of [...groups.entries()].sort((a, b) => b[1].length - a[1].length)) {
-    out += `### ${type} (${refs.length})\n\n`;
+    // When the overall `limit` truncates a group, show "shown of total" so the
+    // rows below don't appear to contradict the summary count above.
+    const total = byType.get(type) ?? refs.length;
+    const heading = refs.length < total ? `${refs.length} of ${total}` : `${refs.length}`;
+    out += `### ${type} (${heading})\n\n`;
     for (const r of refs) {
       const loc = r.line > 0 ? `:${r.line}` : '';
       const mod = r.module ? ` [${r.module}]` : '';
