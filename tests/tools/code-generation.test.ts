@@ -52,7 +52,17 @@ const buildContext = (overrides: Partial<XppServerContext> = {}): XppServerConte
     findSimilarMethods: vi.fn(() => []),
     suggestMissingMethods: vi.fn(() => []),
     getApiUsagePatterns: vi.fn(() => []),
-    db: { prepare: vi.fn(() => ({ all: vi.fn(() => []), get: vi.fn((...args: any[]) => typeof args[0] === 'string' ? { name: args[0] } : undefined), run: vi.fn() })) },
+    // The nocase symbol lookup (utils/symbolLookup) probes via .all() with
+    // `parent_name IS NULL`; echo a hit for any name — same "every object
+    // exists" behavior the old .get() echo provided.
+    db: { prepare: vi.fn((sql: string) => ({
+      all: vi.fn((...args: any[]) =>
+        typeof sql === 'string' && sql.includes('parent_name IS NULL') && typeof args[0] === 'string'
+          ? [{ name: args[0], type: 'table', model: 'MyModel', extends_class: null, file_path: null }]
+          : []),
+      get: vi.fn((...args: any[]) => typeof args[0] === 'string' ? { name: args[0] } : undefined),
+      run: vi.fn(),
+    })) },
     getReadDb: vi.fn(function(this: any) { return this.db; }),
   } as any,
   parser: {
@@ -976,21 +986,21 @@ describe('generate_smart_form', () => {
       symbolIndex: {
         ...ctx.symbolIndex,
         getReadDb: vi.fn(() => ({
-          prepare: vi.fn((sql: string) => {
-            // The later staleness check (this fix) selects file_path specifically.
-            if (sql.includes('file_path')) {
-              return { get: vi.fn(() => ({ file_path: 'K:\\Definitely\\Does\\Not\\Exist\\GoneTable.xml' })) };
-            }
-            // The earlier "does the table exist at all" lookup (dataSource resolution,
-            // a SEPARATE existing check) — the stale DB row still matches by name here,
-            // same as a real un-invalidated `symbols` row would; the table is only
-            // discovered to be gone once the file_path staleness check runs later.
-            if (sql.includes('SELECT name FROM symbols')) {
-              return { get: vi.fn(() => ({ name: 'GoneTable' })) };
-            }
+          prepare: vi.fn((sql: string) => ({
+            // The nocase symbol lookup (both the dataSource resolution and the
+            // staleness check) probes via .all() with `parent_name IS NULL` and
+            // carries file_path in the hit. Echo the stale row: it still matches
+            // by name — same as a real un-invalidated `symbols` row would — and
+            // is only discovered to be gone by the fs.existsSync check on its
+            // file_path.
+            all: vi.fn(() =>
+              sql.includes('parent_name IS NULL')
+                ? [{ name: 'GoneTable', type: 'table', model: 'MyModel', extends_class: null,
+                     file_path: 'K:\\Definitely\\Does\\Not\\Exist\\GoneTable.xml' }]
+                : []),
             // "closest alternate name" suggestion lookup — no suggestion.
-            return { get: vi.fn(() => undefined) };
-          }),
+            get: vi.fn(() => undefined),
+          })),
         })),
       } as any,
     });

@@ -27,6 +27,7 @@
 
 import { z } from 'zod';
 import type { XppServerContext } from '../types/context.js';
+import { distinctSymbolTypesNocase, lookupSymbolNocase } from '../utils/symbolLookup.js';
 
 export const resolveReferencesArgsSchema = z.object({
   code: z.string().describe(
@@ -260,10 +261,9 @@ function lineOf(code: string, index: number): number {
 
 function symbolTypes(deps: ResolverDeps, name: string): string[] {
   try {
-    const rows = deps.db
-      .prepare('SELECT DISTINCT type FROM symbols WHERE name = ? COLLATE NOCASE LIMIT 10')
-      .all(name) as Array<{ type: string }>;
-    return rows.map(r => r.type);
+    // Index-safe nocase lookup — the former `name = ? COLLATE NOCASE` shape
+    // full-scanned the symbols table per identifier (13+ s cold).
+    return distinctSymbolTypesNocase(deps.db, name);
   } catch {
     return [];
   }
@@ -271,6 +271,11 @@ function symbolTypes(deps: ResolverDeps, name: string): string[] {
 
 function menuItemExists(deps: ResolverDeps, name: string): boolean {
   try {
+    const exact = deps.db
+      .prepare('SELECT 1 AS x FROM menu_item_targets WHERE menu_item_name = ? LIMIT 1')
+      .get(name);
+    if (exact !== undefined) return true;
+    // Rare differently-cased fallback: bounded covering-index scan (~18k rows).
     const row = deps.db
       .prepare('SELECT 1 AS x FROM menu_item_targets WHERE menu_item_name = ? COLLATE NOCASE LIMIT 1')
       .get(name);
@@ -291,17 +296,29 @@ function findMethod(
 ): MethodRow | undefined {
   if (depth > 10) return undefined;
   try {
+    // Canonicalize the owner once (exact probe + FTS fallback) so every probe
+    // below stays BINARY on idx_parent_type_name / idx_em_base — the former
+    // `parent_name = ? COLLATE NOCASE` shape scanned all 627k method rows.
+    const ownerHit = lookupSymbolNocase(deps.db, ownerName);
+    const owner = ownerHit?.name ?? ownerName;
     const row = deps.db.prepare(
       `SELECT signature FROM symbols
-       WHERE parent_name = ? COLLATE NOCASE AND name = ? COLLATE NOCASE AND type = 'method'
+       WHERE parent_name = ? AND type = 'method' AND name = ? COLLATE NOCASE
        LIMIT 1`,
-    ).get(ownerName, methodName) as MethodRow | undefined;
+    ).get(owner, methodName) as MethodRow | undefined;
     if (row) return row;
     // Extension-added methods (CoC wrappers, augmentation classes)
-    const extRows = deps.db.prepare(
+    let extRows = deps.db.prepare(
       `SELECT added_methods, coc_methods FROM extension_metadata
-       WHERE base_object_name = ? COLLATE NOCASE`,
-    ).all(ownerName) as Array<{ added_methods: string | null; coc_methods: string | null }>;
+       WHERE base_object_name = ?`,
+    ).all(owner) as Array<{ added_methods: string | null; coc_methods: string | null }>;
+    if (extRows.length === 0 && !ownerHit) {
+      // Owner not in symbols under any casing — nocase scan is bounded (~3k rows).
+      extRows = deps.db.prepare(
+        `SELECT added_methods, coc_methods FROM extension_metadata
+         WHERE base_object_name = ? COLLATE NOCASE`,
+      ).all(ownerName) as Array<{ added_methods: string | null; coc_methods: string | null }>;
+    }
     const target = methodName.toLowerCase();
     for (const ext of extRows) {
       for (const col of [ext.added_methods, ext.coc_methods]) {
@@ -318,11 +335,7 @@ function findMethod(
       }
     }
     // Walk inheritance chain
-    const parent = deps.db.prepare(
-      `SELECT extends_class FROM symbols
-       WHERE name = ? COLLATE NOCASE AND type IN ('class','table') AND extends_class IS NOT NULL
-       LIMIT 1`,
-    ).get(ownerName) as { extends_class: string | null } | undefined;
+    const parent = lookupSymbolNocase(deps.db, owner, ['class', 'table']);
     if (parent?.extends_class && parent.extends_class.toLowerCase() !== ownerName.toLowerCase()) {
       return findMethod(deps, parent.extends_class, methodName, depth + 1);
     }
@@ -334,16 +347,26 @@ function findMethod(
 function fieldExists(deps: ResolverDeps, tableName: string, fieldName: string): boolean {
   if (TABLE_SYSTEM_FIELDS.has(fieldName.toLowerCase())) return true;
   try {
+    // Canonicalize the table once so the probes stay BINARY on the indexes
+    // (see findMethod above for the rationale).
+    const tableHit = lookupSymbolNocase(deps.db, tableName);
+    const table = tableHit?.name ?? tableName;
     const row = deps.db.prepare(
       `SELECT 1 AS x FROM symbols
-       WHERE parent_name = ? COLLATE NOCASE AND name = ? COLLATE NOCASE AND type = 'field'
+       WHERE parent_name = ? AND type = 'field' AND name = ? COLLATE NOCASE
        LIMIT 1`,
-    ).get(tableName, fieldName);
+    ).get(table, fieldName);
     if (row !== undefined) return true;
-    const extRows = deps.db.prepare(
+    let extRows = deps.db.prepare(
       `SELECT added_fields FROM extension_metadata
-       WHERE base_object_name = ? COLLATE NOCASE AND extension_type = 'table-extension'`,
-    ).all(tableName) as Array<{ added_fields: string | null }>;
+       WHERE base_object_name = ? AND extension_type = 'table-extension'`,
+    ).all(table) as Array<{ added_fields: string | null }>;
+    if (extRows.length === 0 && !tableHit) {
+      extRows = deps.db.prepare(
+        `SELECT added_fields FROM extension_metadata
+         WHERE base_object_name = ? COLLATE NOCASE AND extension_type = 'table-extension'`,
+      ).all(tableName) as Array<{ added_fields: string | null }>;
+    }
     const target = fieldName.toLowerCase();
     for (const ext of extRows) {
       if (!ext.added_fields) continue;

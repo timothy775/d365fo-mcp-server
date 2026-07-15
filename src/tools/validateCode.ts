@@ -23,6 +23,7 @@ import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 import type { XppServerContext } from '../types/context.js';
 import { validateXppTool } from './validateXpp.js';
 import { resolveReferencesTool } from './resolveReferences.js';
+import { lookupSymbolNocase, type DbLike } from '../utils/symbolLookup.js';
 
 function err(text: string) {
   return { content: [{ type: 'text' as const, text }], isError: true };
@@ -49,15 +50,14 @@ function extractTagValues(xml: string, tag: string): string[] {
 }
 
 function symbolExistsInIndex(
-  db: { prepare(sql: string): { get(...p: unknown[]): unknown } },
+  db: DbLike,
   name: string,
   type?: string,
 ): boolean {
   try {
-    const row = type
-      ? db.prepare('SELECT 1 FROM symbols WHERE name = ? COLLATE NOCASE AND type = ? AND parent_name IS NULL LIMIT 1').get(name, type)
-      : db.prepare('SELECT 1 FROM symbols WHERE name = ? COLLATE NOCASE AND parent_name IS NULL LIMIT 1').get(name);
-    return row != null;
+    // Index-safe nocase lookup (exact probe + FTS fallback) — the former
+    // `name = ? COLLATE NOCASE` shape full-scanned symbols PER IDENTIFIER.
+    return lookupSymbolNocase(db, name, type ? [type] : undefined) !== undefined;
   } catch {
     return true; // index unavailable — don't false-block
   }
@@ -71,7 +71,7 @@ function resolveXmlReferences(
   const violations: XmlRefViolation[] = [];
   let verified = 0;
 
-  let db: { prepare(sql: string): { get(...p: unknown[]): unknown } } | undefined;
+  let db: DbLike | undefined;
   try {
     db = ctx.symbolIndex?.getReadDb?.() as typeof db;
   } catch {

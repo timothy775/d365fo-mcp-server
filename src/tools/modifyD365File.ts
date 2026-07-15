@@ -39,6 +39,7 @@ import {
 import { validateEdtExtensionChange } from '../utils/edtExtensionValidator.js';
 import { lintXppSelect } from '../utils/xppSelectLint.js';
 import { getRequiredParams, renderOpSpec, OP_PARAM_ALIASES } from './d365foFileOpSpecs.js';
+import { lookupSymbolNocase } from '../utils/symbolLookup.js';
 
 /**
  * Decode the standard XML entities (&lt;, &gt;, &apos;, &quot;, &amp;) and normalise
@@ -2423,9 +2424,13 @@ function isMetadataBaseTypeKeyword(t: string): boolean {
 
 function resolveFieldEdt(tableName: string, fieldName: string, db: any): string | null {
   try {
+    // Canonicalize the parent — `parent_name = ? COLLATE NOCASE` cannot use
+    // idx_parent_type_name and scans all 360k field rows (180 s cold). NOCASE
+    // on the field name is fine inside the indexed parent+type range.
+    const canonical = lookupSymbolNocase(db, tableName)?.name ?? tableName;
     const row = db.prepare(
-      `SELECT signature FROM symbols WHERE type = 'field' AND parent_name = ? COLLATE NOCASE AND name = ? COLLATE NOCASE LIMIT 1`
-    ).get(tableName, fieldName) as { signature: string | null } | undefined;
+      `SELECT signature FROM symbols WHERE type = 'field' AND parent_name = ? AND name = ? COLLATE NOCASE LIMIT 1`
+    ).get(canonical, fieldName) as { signature: string | null } | undefined;
     const sig = row?.signature?.trim();
     // The index stores the field's BASE TYPE (e.g. "String"), not its EDT. A base-type
     // keyword is not a usable X++ parameter type, so treat it as unresolved — the caller
