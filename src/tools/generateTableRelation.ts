@@ -14,6 +14,7 @@
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { XppServerContext } from '../types/context.js';
+import { lookupSymbolNocase } from '../utils/symbolLookup.js';
 
 const TableRelationArgsSchema = z.object({
   name: z.string().describe('Table whose fields to generate relations for (e.g. "MyOrderLine").'),
@@ -122,9 +123,12 @@ export async function generateTableRelationTool(
     if (!db) {
       return text(`❌ Could not read table "${name}" (no bridge and symbol index unavailable).`, true);
     }
+    // Canonicalize first — `parent_name = ? COLLATE NOCASE` cannot use
+    // idx_parent_type_name and scans all 360k field rows (180 s cold).
+    const canonical = lookupSymbolNocase(db, name)?.name ?? name;
     const rows = db
-      .prepare(`SELECT name, signature FROM symbols WHERE type = 'field' AND parent_name = ? COLLATE NOCASE ORDER BY name`)
-      .all(name) as Array<{ name: string; signature: string | null }>;
+      .prepare(`SELECT name, signature FROM symbols WHERE type = 'field' AND parent_name = ? ORDER BY name`)
+      .all(canonical) as Array<{ name: string; signature: string | null }>;
     if (rows.length === 0) {
       return text(
         `❌ Table "${name}" not found via bridge or symbol index.\n\nIf it was just created, call update_symbol_index first.`,
