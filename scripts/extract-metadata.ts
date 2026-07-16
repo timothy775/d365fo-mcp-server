@@ -9,7 +9,8 @@ import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
-import { XppMetadataParser } from '../src/metadata/xmlParser.js';
+import { XppMetadataParser, buildClassExtensionRecord } from '../src/metadata/xmlParser.js';
+import type { XppClassInfo } from '../src/metadata/types.js';
 import { isCustomModel as checkIsCustomModel, getCustomModels } from '../src/utils/modelClassifier.js';
 import { XppConfigProvider } from '../src/utils/xppConfigProvider.js';
 import { box, kv, sectionTitle, statusLine, spread, c, glyph, log, shortPath, supportsUnicode, sanitize } from '../src/utils/terminalUi.js';
@@ -504,9 +505,10 @@ async function extractMetadata() {
     await extractMenuItems(parser, modelPath, modelName, 'action', stats, isCustom);
     await extractMenuItems(parser, modelPath, modelName, 'output', stats, isCustom);
 
-    // Extract extensions
+    // Extract extensions. No 'class-extension' entry here: the AOT has no
+    // AxClassExtension folder — class extensions are AxClass files carrying
+    // [ExtensionOf(...)], and extractClasses emits their records (#693).
     await extractExtensions(parser, modelPath, modelName, 'table-extension', 'AxTableExtension', stats, isCustom);
-    await extractExtensions(parser, modelPath, modelName, 'class-extension', 'AxClassExtension', stats, isCustom);
     await extractExtensions(parser, modelPath, modelName, 'form-extension', 'AxFormExtension', stats, isCustom);
     await extractExtensions(parser, modelPath, modelName, 'enum-extension', 'AxEnumExtension', stats, isCustom);
     await extractExtensions(parser, modelPath, modelName, 'edt-extension', 'AxEdtExtension', stats, isCustom);
@@ -635,12 +637,45 @@ async function extractClasses(
       await fs.writeFile(outputFile, JSON.stringify(classInfo.data, isCustom ? sourcePathReplacer : undefined, 2));
 
       stats.classes++;
+
+      // A class carrying [ExtensionOf(...)] is also a class extension. It stays
+      // indexed as a class (it is a real AxClass) and additionally gets an
+      // extension record, which is what find_coc_extensions and
+      // resolve_references' extension-method path query.
+      if (classInfo.data.extensionOf) {
+        await writeClassExtensionRecord(classInfo.data, modelName, stats, isCustom);
+      }
     } catch (error) {
       log.err(`Error parsing ${file}: ${error instanceof Error ? error.message : error}`);
       stats.errors++;
     }
   }
 
+}
+
+/**
+ * Write the class-extension record for an AxClass carrying [ExtensionOf(...)]
+ * into the `class-extensions/` folder symbolIndex.indexExtensions already
+ * reads, so both the symbols row and the extension_metadata row come out of
+ * the existing pipeline unchanged.
+ */
+async function writeClassExtensionRecord(
+  classInfo: XppClassInfo,
+  modelName: string,
+  stats: ExtractionStats,
+  isCustom: boolean,
+) {
+  const record = buildClassExtensionRecord(classInfo, modelName);
+  if (!record) return;
+
+  const outputDir = path.join(OUTPUT_PATH, modelName, 'class-extensions');
+  await fs.mkdir(outputDir, { recursive: true });
+  await fs.writeFile(
+    path.join(outputDir, `${classInfo.name}.json`),
+    JSON.stringify(record, isCustom ? sourcePathReplacer : undefined, 2),
+  );
+
+  stats.classExtensions++;
 }
 
 async function extractTables(

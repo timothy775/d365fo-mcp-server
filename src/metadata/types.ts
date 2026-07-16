@@ -2,6 +2,10 @@
  * X++ Metadata Type Definitions
  */
 
+import type { XppExtensionOf } from './xppDeclaration.js';
+
+export type { XppExtensionOf };
+
 export interface XppParseResult<T> {
   success: boolean;
   data?: T;
@@ -17,6 +21,12 @@ export interface XppClassInfo {
   isAbstract: boolean;
   isFinal: boolean;
   declaration: string;
+  /**
+   * Set when the class carries [ExtensionOf(...)] — i.e. it is a class
+   * extension. Class extensions are plain AxClass files (the AOT has no
+   * AxClassExtension artifact), so this attribute is what distinguishes them.
+   */
+  extensionOf?: XppExtensionOf;
   methods: XppMethodInfo[];
   documentation?: string;
   tags?: string[];
