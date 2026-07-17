@@ -71,6 +71,18 @@ describe('get_method name resolution is case-insensitive (#686)', () => {
     expect(r.isError).toBeFalsy();
   });
 
+  it('signature: renders the indexed method casing, not the caller\'s (#691)', async () => {
+    // Bridge and parser are both absent here, so this exercises the SQLite
+    // last-resort branch — where the index's own `name` is the canonical
+    // spelling available to the header.
+    const r: any = await getMethodSignatureTool(
+      req('get_method', { className: 'whsrfcontroldata', methodName: 'PROCESSLEGACYCONTROL' }),
+      context,
+    );
+    expect(textOf(r)).toContain('WHSRFControlData.processLegacyControl');
+    expect(textOf(r)).not.toContain('PROCESSLEGACYCONTROL');
+  });
+
   it('signature: canonical casing keeps working', async () => {
     const r: any = await getMethodSignatureTool(
       req('get_method', { className: 'WHSRFControlData', methodName: 'processLegacyControl' }),

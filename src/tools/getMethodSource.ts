@@ -153,8 +153,12 @@ async function tryXmlMethodSource(
       ? `\n\n> ⚠️ **This method is marked obsolete.** Do NOT generate calls to it.\n> Replacement hint from the attribute: _"${obsoleteMatch[1]}"_\n> Read the hint above and use the stated replacement instead.`
       : '';
 
+    // `method.name` is the AOT's own spelling; the find above is
+    // case-insensitive, so echoing `methodName` would print the caller's casing
+    // for a member that doesn't exist under it (#691). The bridge path already
+    // renders the authoritative `ms.methodName`.
     const text =
-      `## ${className}.${methodName}\n\n` +
+      `## ${className}.${method.name}\n\n` +
       `_Source: XML file parsing (bridge unavailable)_\n` +
       obsoleteWarning +
       `\n\`\`\`xpp\n${method.source}\n\`\`\``;

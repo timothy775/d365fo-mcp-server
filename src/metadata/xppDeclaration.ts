@@ -17,6 +17,12 @@
  */
 
 export interface XppDeclaration {
+  /**
+   * The method name as spelled in the source. X++ identifiers are
+   * case-insensitive, so a caller's `CONSTRUCT` locates the declaration of
+   * `construct` — callers that render a name should prefer this one (#691).
+   */
+  name: string;
   modifiers: string[];
   returnType: string;
   parameters: XppDeclarationParameter[];
@@ -170,7 +176,7 @@ function parseParameter(raw: string, blanked: string): XppDeclarationParameter |
  * Try to read a declaration whose name starts at `nameStart`. Returns null when
  * this occurrence is a call rather than a declaration, or is malformed.
  */
-function tryDeclarationAt(source: string, blanked: string, nameStart: number): XppDeclaration | null {
+function tryDeclarationAt(source: string, blanked: string, nameStart: number, name: string): XppDeclaration | null {
   const openParen = blanked.indexOf('(', nameStart);
   if (openParen < 0) return null;
 
@@ -231,7 +237,7 @@ function tryDeclarationAt(source: string, blanked: string, nameStart: number): X
     }
   }
 
-  return { modifiers, returnType, parameters };
+  return { name, modifiers, returnType, parameters };
 }
 
 /**
@@ -333,6 +339,9 @@ export function callsNext(source: string): boolean {
 /**
  * Locate and parse the declaration of `methodName` in X++ source.
  * Returns null when no trustworthy declaration is found.
+ *
+ * The match is case-insensitive (X++ identifiers are), so the returned `name` is
+ * the source's spelling and may differ in case from `methodName`.
  */
 export function parseXppDeclaration(source: string, methodName: string): XppDeclaration | null {
   if (!source || !methodName) return null;
@@ -347,7 +356,9 @@ export function parseXppDeclaration(source: string, methodName: string): XppDecl
   // call appearing before the declaration can't shadow it.
   const nameRe = new RegExp(`(^|[^\\w.:])(${escapeRegExp(methodName)})\\s*\\(`, 'gi');
   for (const m of blanked.matchAll(nameRe)) {
-    const decl = tryDeclarationAt(source, blanked, m.index + m[1].length);
+    // m[2] is taken from the blanked copy, which leaves identifiers in code
+    // untouched — so it is the verbatim source spelling of the name.
+    const decl = tryDeclarationAt(source, blanked, m.index + m[1].length, m[2]);
     if (decl) return decl;
   }
   return null;

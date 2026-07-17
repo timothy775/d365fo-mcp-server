@@ -118,10 +118,12 @@ export async function getMethodSignatureTool(request: CallToolRequest, context: 
     );
     if (xmlSignature) return xmlSignature;
 
-    // Last resort: use SQLite signature column if available
+    // Last resort: use SQLite signature column if available. No declaration is
+    // parsed on this path, so the index's own `name` is the canonical spelling
+    // to render rather than the caller's argument (#691).
     if ((methodRow as any)?.signature) {
       const sigText = (methodRow as any).signature as string;
-      let output = `# Method: \`${className}.${methodName}\`\n`;
+      let output = `# Method: \`${className}.${(methodRow as any).name ?? methodName}\`\n`;
       output += `**Model:** ${classRow.model}\n`;
       output += `_Source: SQLite index (signature only — bridge and XML unavailable)_\n\n`;
       output += `\`\`\`xpp\n${sigText}\n\`\`\`\n`;
@@ -201,7 +203,7 @@ async function tryBridgeMethodSignature(
     if (!signature) return null;
 
     const obsoleteWarning = detectObsolete(ms.source);
-    const result = formatOutput(className, methodName, signature, modelName, includeCoc, obsoleteWarning);
+    const result = formatOutput(className, signature, modelName, includeCoc, obsoleteWarning);
     return result;
   } catch (e) {
     console.error(`[methodSignature] Bridge getMethodSource(${className}, ${methodName}) failed: ${e}`);
@@ -241,7 +243,7 @@ async function tryXmlMethodSignature(
     if (!signature) return null;
 
     const obsoleteWarning = detectObsolete(method.source);
-    const result = formatOutput(className, methodName, signature, modelName, includeCoc, obsoleteWarning);
+    const result = formatOutput(className, signature, modelName, includeCoc, obsoleteWarning);
     return result;
   } catch (e) {
     console.error(`[methodSignature] XML parse for ${className}.${methodName} failed: ${e}`);
@@ -278,15 +280,19 @@ export function parseMethodSignature(source: string, methodName: string): Method
   const decl = parseXppDeclaration(source, methodName);
   if (!decl) return null;
 
-  const { modifiers, returnType, parameters } = decl;
+  // Render the declaration's own spelling, never the caller's argument: the
+  // lookup path is case-insensitive end to end, so `methodName` may be
+  // mis-cased. Echoing it would emit a `next CONSTRUCT(...)` CoC template and a
+  // header naming a member that doesn't exist in the AOT with that spelling (#691).
+  const { name, modifiers, returnType, parameters } = decl;
 
   return {
     modifiers,
     returnType,
-    methodName,
+    methodName: name,
     parameters,
-    signature: buildSignatureString(modifiers, returnType, methodName, parameters),
-    cocTemplate: buildCoCTemplate(modifiers, returnType, methodName, parameters),
+    signature: buildSignatureString(modifiers, returnType, name, parameters),
+    cocTemplate: buildCoCTemplate(modifiers, returnType, name, parameters),
   };
 }
 
@@ -396,15 +402,19 @@ function detectObsolete(source: string): string {
   }\n> Use the stated replacement instead.`;
 }
 
+/**
+ * `signature.methodName` is the declaration's own spelling (#691) — there is
+ * deliberately no separate name parameter, so the caller's possibly mis-cased
+ * argument cannot reach the output.
+ */
 function formatOutput(
   className: string,
-  methodName: string,
   signature: MethodSignature,
   modelName: string,
   includeCocTemplate: boolean = false,
   obsoleteWarning: string = ''
 ): any {
-  let output = `# Method: \`${className}.${methodName}\`\n`;
+  let output = `# Method: \`${className}.${signature.methodName}\`\n`;
   output += `**Model:** ${modelName}  **Returns:** ${signature.returnType}  **Modifiers:** ${signature.modifiers.join(', ') || 'none'}\n`;
   if (obsoleteWarning) output += obsoleteWarning + '\n';
   output += `\n\`\`\`xpp\n${signature.signature}\n\`\`\`\n`;

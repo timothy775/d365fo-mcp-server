@@ -189,3 +189,53 @@ describe('parseMethodSignature', () => {
     expect(sig!.cocTemplate).toContain('next setName(_name);');
   });
 });
+
+/**
+ * X++ identifiers are case-insensitive, so a mis-cased methodName still locates
+ * the declaration (#687 made the search case-insensitive). The rendered output
+ * must then report the AOT's spelling, not the caller's: a CoC template with
+ * `next CONSTRUCT(...)` compiles, but it is wrong output to hand an agent, and
+ * the header would name a member that exists under no such spelling (#691).
+ */
+describe('parseMethodSignature reports the declaration\'s own casing (#691)', () => {
+  const src = [
+    '    public static PurchFormLetter_Invoice construct(',
+    '        IdentifierName _className = classStr(FormletterService),',
+    '        SysOperationExecutionMode _executionMode = SysOperationExecutionMode::Synchronous)',
+    '    {',
+    '        return new PurchFormLetter_Invoice(_className, _executionMode);',
+    '    }',
+  ].join('\n');
+
+  it('reports the source spelling for an upper-cased request', () => {
+    const sig = parseMethodSignature(src, 'CONSTRUCT');
+    expect(sig).not.toBeNull();
+    expect(sig!.methodName).toBe('construct');
+  });
+
+  it('does not leak the caller\'s casing into the signature', () => {
+    const sig = parseMethodSignature(src, 'CONSTRUCT');
+    expect(sig!.signature).toContain('construct(');
+    expect(sig!.signature).not.toContain('CONSTRUCT');
+  });
+
+  it('does not leak the caller\'s casing into the CoC template', () => {
+    const sig = parseMethodSignature(src, 'CONSTRUCT');
+    // Both the extension method declaration and its next() call.
+    expect(sig!.cocTemplate).toContain('next construct(');
+    expect(sig!.cocTemplate).not.toContain('CONSTRUCT');
+  });
+
+  it('preserves a camelCase declaration requested in lower case', () => {
+    const sig = parseMethodSignature('public void initFromCustTable(CustTable _custTable)\n{\n}', 'initfromcusttable');
+    expect(sig).not.toBeNull();
+    expect(sig!.methodName).toBe('initFromCustTable');
+    expect(sig!.signature).toBe('public void initFromCustTable(CustTable _custTable)');
+    expect(sig!.cocTemplate).toContain('next initFromCustTable(_custTable);');
+  });
+
+  it('canonical casing is unaffected', () => {
+    const sig = parseMethodSignature(src, 'construct');
+    expect(sig!.methodName).toBe('construct');
+  });
+});
