@@ -84,3 +84,6 @@ bridge/D365MetadataBridge/bridge-stderr.log
 .cache/
 deployment.zip
 .claude/settings.local.json
+
+# Transient git worktrees created by Claude Code subagents
+.claude/worktrees/

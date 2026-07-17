@@ -19,7 +19,7 @@ import { WorkspaceScanner } from './workspace/workspaceScanner.js';
 import { HybridSearch } from './workspace/hybridSearch.js';
 import { initializeDatabase } from './database/download.js';
 import { initializeConfig, getConfigManager } from './utils/configManager.js';
-import { SERVER_MODE, LOCAL_TOOLS } from './server/serverMode.js';
+import { SERVER_MODE, LOCAL_TOOLS, isToolAllowedInMode } from './server/serverMode.js';
 import { TOOL_ANNOTATIONS } from './server/toolAnnotations.js';
 import { apiKeyAuth } from './middleware/apiKeyAuth.js';
 import { setInitializeParams } from './utils/stdioSessionInfo.js';
@@ -770,11 +770,9 @@ async function main() {
       const filteredCatalog = toolCatalog
         .map(cat => ({
           ...cat,
-          tools: cat.tools.filter(t => {
-            if (SERVER_MODE === 'read-only') return !LOCAL_TOOLS.has(t.name);
-            if (SERVER_MODE === 'write-only') return LOCAL_TOOLS.has(t.name);
-            return true;
-          }),
+          // Same predicate as the ListTools filter and runtime gate, so the
+          // startup banner matches what the server actually exposes.
+          tools: cat.tools.filter(t => isToolAllowedInMode(SERVER_MODE, t.name)),
         }))
         .filter(cat => cat.tools.length > 0);
 

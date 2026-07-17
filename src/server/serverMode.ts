@@ -68,3 +68,14 @@ export const SERVER_MODE: ServerMode = (() => {
   if (raw === 'write-only' || raw === 'writeonly') return 'write-only';
   return 'full';
 })();
+
+/**
+ * Single source of truth for whether a tool is callable in a given server mode.
+ * Used by BOTH the ListTools filter (mcpServer) and the runtime call gate
+ * (toolHandler) so the advertised tool list and call-time enforcement can
+ * never drift apart. ALWAYS_TOOLS bypass the LOCAL_TOOLS partition in every mode.
+ */
+export function isToolAllowedInMode(mode: ServerMode, toolName: string): boolean {
+  if (mode === 'full' || ALWAYS_TOOLS.has(toolName)) return true;
+  return mode === 'read-only' ? !LOCAL_TOOLS.has(toolName) : LOCAL_TOOLS.has(toolName);
+}

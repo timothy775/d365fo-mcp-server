@@ -14,7 +14,7 @@ import { registerToolHandler } from '../tools/toolHandler.js';
 import { registerResources } from '../resources/index.js';
 import { registerCodeReviewPrompt } from '../prompts/codeReview.js';
 import type { XppServerContext } from '../types/context.js';
-import { SERVER_MODE, LOCAL_TOOLS, ALWAYS_TOOLS } from './serverMode.js';
+import { SERVER_MODE, LOCAL_TOOLS, isToolAllowedInMode } from './serverMode.js';
 import { TOOL_ANNOTATIONS } from './toolAnnotations.js';
 import { getConfigManager } from '../utils/configManager.js';
 
@@ -201,12 +201,13 @@ export function createXppMcpServer(context: XppServerContext): Server {
     })) as typeof allTools.tools;
 
     // Apply server mode filter. ALWAYS_TOOLS bypass the partition and stay
-    // published in every mode.
+    // published in every mode. isToolAllowedInMode is shared with the runtime
+    // gate in toolHandler so the list and the call-time enforcement can't drift.
     if (SERVER_MODE === 'read-only') {
-      allTools.tools = allTools.tools.filter(t => !LOCAL_TOOLS.has(t.name) || ALWAYS_TOOLS.has(t.name));
+      allTools.tools = allTools.tools.filter(t => isToolAllowedInMode(SERVER_MODE, t.name));
       console.error(`[MCP Server] Tool list filtered for read-only mode: ${allTools.tools.length} tools (local tools excluded)`);
     } else if (SERVER_MODE === 'write-only') {
-      allTools.tools = allTools.tools.filter(t => LOCAL_TOOLS.has(t.name) || ALWAYS_TOOLS.has(t.name));
+      allTools.tools = allTools.tools.filter(t => isToolAllowedInMode(SERVER_MODE, t.name));
       console.error(`[MCP Server] Tool list filtered for write-only mode: ${allTools.tools.length} tools (${Array.from(LOCAL_TOOLS).join(', ')})`);
     } else {
       console.error(`[MCP Server] Tool list in full mode: ${allTools.tools.length} tools (no filtering)`);
