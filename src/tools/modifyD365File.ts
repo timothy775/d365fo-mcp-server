@@ -8,6 +8,8 @@ import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { XppServerContext } from '../types/context.js';
 import * as fs from 'fs/promises';
+import { execFile } from 'child_process';
+import util from 'util';
 
 import path from 'path';
 import { parseStringPromise } from 'xml2js';
@@ -819,7 +821,7 @@ const ModifyD365FileArgsSchema = z.object({
   propertyValue: z.string().optional().describe('New property value'),
   
   // Options
-  createBackup: z.boolean().optional().default(false).describe('Create a .bak backup of the file before modifying it (default: false). Changes can also be reverted with undo_last_modification (git checkout) without a backup. Set true when the file is not under source control.'),
+  createBackup: z.boolean().optional().default(false).describe('Create a .bak backup of the file before modifying it (default: false). Changes can also be reverted with undo_last_modification (git checkout) without a backup. When the file is NOT inside a git repository, a backup is created automatically even with false, since undo_last_modification would not work there.'),
   modelName: z.string().optional().describe('Model name (auto-detected if not provided). Pass this if the file was just created and is not yet indexed.'),
   packageName: z.string().optional().describe('Package name. Auto-resolved if omitted.'),
   packagePath: z.string().optional().describe(
@@ -1121,10 +1123,11 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
       throw new Error(`Cannot read file: ${filePath}${hint}`);
     }
 
-    // 3. Create backup of the actual XML file
-    if (createBackup) {
-      await createFileBackup(actualFilePath);
-    }
+    // 3. Create backup of the actual XML file. When the target is NOT inside a
+    //    git work tree, the documented undo path (undo_last_modification →
+    //    git checkout) cannot revert the change — force a backup even with
+    //    createBackup=false so a bad modify is never unrecoverable.
+    const backupNote = await ensureRecoverableModification(actualFilePath, createBackup);
 
     // 3b. Derive the authoritative object name from the resolved file path.
     //     The caller may pass objectName="RentEquipment" while the file on disk
@@ -1870,7 +1873,7 @@ export async function modifyD365FileTool(request: CallToolRequest, context: XppS
           text:
             `✅ ${operation} on ${objectType} "${objectName}" — applied via IMetadataProvider.Update()\n\n` +
             `**File:** ${actualFilePath}${addControlNote}${generationNote}${bridgeValidation}${projectMessage}\n` +
-            `🔧 API: ${bridgeResult.message}${xppLintNote}\n\n` +
+            `🔧 API: ${bridgeResult.message}${xppLintNote}${backupNote}\n\n` +
             `**Next steps:**\n- Review changes in Visual Studio\n- Build the model to validate`,
         },
       ],
@@ -2186,8 +2189,9 @@ export async function findD365FileOnDisk(
  * Create file backup and verify it was written successfully.
  * Throws if the source file is missing or the copy fails, so callers
  * always know whether a valid backup exists before overwriting.
+ * Returns the backup file path.
  */
-async function createFileBackup(filePath: string): Promise<void> {
+async function createFileBackup(filePath: string): Promise<string> {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
   const backupPath = `${filePath}.backup-${timestamp}`;
   try {
@@ -2202,6 +2206,63 @@ async function createFileBackup(filePath: string): Promise<void> {
       `Failed to create backup at "${backupPath}": ${error instanceof Error ? error.message : String(error)}`
     );
   }
+  return backupPath;
+}
+
+const execFileAsync = util.promisify(execFile);
+
+// Directory → inside-git-work-tree result, cached for the process lifetime so
+// repeated modifies don't re-spawn git for the same metadata folder.
+const gitWorkTreeCache = new Map<string, boolean>();
+
+/**
+ * Cheap check whether a file lives inside a git work tree — i.e. whether
+ * undo_last_modification (git checkout) could revert a change to it.
+ * git not installed, timeout, or any other error → treated as "not a repo".
+ */
+async function isInsideGitWorkTree(filePath: string): Promise<boolean> {
+  const dir = path.dirname(filePath);
+  const cached = gitWorkTreeCache.get(dir);
+  if (cached !== undefined) return cached;
+  let inside = false;
+  try {
+    const { stdout } = await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], {
+      cwd: dir,
+      timeout: 5_000,
+      windowsHide: true,
+    });
+    inside = stdout.trim() === 'true';
+  } catch {
+    inside = false;
+  }
+  gitWorkTreeCache.set(dir, inside);
+  return inside;
+}
+
+/**
+ * Backup guard for modify operations. Honors an explicit createBackup=true;
+ * with createBackup=false it force-enables the backup when the target is not
+ * inside a git work tree, because the documented undo path
+ * (undo_last_modification → git checkout) only works inside a repo.
+ * Returns a note to append to the success response ('' when no forced backup
+ * was needed). Exported for unit tests.
+ */
+export async function ensureRecoverableModification(
+  actualFilePath: string,
+  createBackup: boolean,
+): Promise<string> {
+  if (createBackup) {
+    await createFileBackup(actualFilePath);
+    return '';
+  }
+  if (await isInsideGitWorkTree(actualFilePath)) {
+    return '';
+  }
+  const backupPath = await createFileBackup(actualFilePath);
+  return (
+    `\n\nℹ️ Target is not under git — created backup ${backupPath} automatically ` +
+    `(undo_last_modification would not work here).`
+  );
 }
 
 // ─── Form parent-control auto-resolution ────────────────────────────────────
