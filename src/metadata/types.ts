@@ -141,6 +141,10 @@ export interface XppSymbol {
       | 'menu-item-display' | 'menu-item-action' | 'menu-item-output'
       | 'table-extension' | 'class-extension' | 'form-extension'
       | 'enum-extension' | 'edt-extension' | 'data-entity-extension'
+      | 'view-extension' | 'query-extension' | 'map-extension' | 'menu-extension'
+      | 'security-duty-extension' | 'security-role-extension'
+      | 'menu-item-display-extension' | 'menu-item-action-extension'
+      | 'menu-item-output-extension'
       | 'service' | 'service-group'
       | 'map' | 'configuration-key' | 'license-code' | 'security-policy' | 'macro';
   parentName?: string;

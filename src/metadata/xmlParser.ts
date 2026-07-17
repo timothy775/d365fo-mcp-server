@@ -920,6 +920,15 @@ export class XppMetadataParser {
         'enum-extension':        'AxEnumExtension',
         'edt-extension':         'AxEdtExtension',
         'data-entity-extension': 'AxDataEntityViewExtension',
+        'view-extension':        'AxViewExtension',
+        'query-extension':       'AxQuerySimpleExtension',
+        'map-extension':         'AxMapExtension',
+        'menu-extension':        'AxMenuExtension',
+        'security-duty-extension':     'AxSecurityDutyExtension',
+        'security-role-extension':     'AxSecurityRoleExtension',
+        'menu-item-display-extension': 'AxMenuItemDisplayExtension',
+        'menu-item-action-extension':  'AxMenuItemActionExtension',
+        'menu-item-output-extension':  'AxMenuItemOutputExtension',
       };
       const rootKey = rootKeyMap[extensionType] || Object.keys(parsed || {})[0] || '';
       const root = parsed?.[rootKey];
@@ -950,10 +959,20 @@ export class XppMetadataParser {
         baseObjectName = name.slice(0, name.indexOf('.'));
       }
 
-      // Extract added fields
-      const rawFields = root.Fields?.AxTableField ?? root.Fields?.AxEdtField ?? [];
+      // Extract added fields. Each kind stores them under its own typed tag.
+      const rawFields =
+        root.Fields?.AxTableField ??
+        root.Fields?.AxEdtField ??
+        root.Fields?.AxViewField ??
+        root.Fields?.AxMapField ??
+        root.Fields?.AxQueryExtensionQueryDataSourceField ??
+        [];
       const fieldArr = Array.isArray(rawFields) ? rawFields : rawFields ? [rawFields] : [];
-      const addedFields: string[] = fieldArr.map((f: any) => f.Name || '').filter(Boolean);
+      // AxQuerySimpleExtension nests the name one level down, under
+      // <QueryDataSourceField>; every other kind carries <Name> on the field itself.
+      const addedFields: string[] = fieldArr
+        .map((f: any) => f.Name || f.QueryDataSourceField?.Name || '')
+        .filter(Boolean);
 
       // Extract added indexes
       const rawIndexes = root.Indexes?.AxTableIndex ?? [];
