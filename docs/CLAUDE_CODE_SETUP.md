@@ -138,7 +138,7 @@ claude mcp list
 You should see `d365fo-mcp-tools` listed as connected. Then start a Claude Code session from your D365FO solution folder and ask:
 
 ```
-What tables contain the "CustAccount" field?
+Find every table (standard + ISV extensions) that carries the CustAccount field.
 ```
 
 Claude should call the `search` tool from `d365fo-mcp-tools`. If it routes to another tool instead, check:

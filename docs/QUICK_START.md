@@ -159,7 +159,7 @@ VS 2022 searches for `.github\copilot-instructions.md` upward from the solution 
 
 | Test | Prompt | Confirms |
 |------|--------|----------|
-| Search | `What tables contain "CustAccount" field?` | index + connection |
+| Search | `Find every table (standard + ISV) that carries the CustAccount field` | index + connection |
 | Write | `Create a class TestHelper with a static method hello()` | C# bridge |
 | Forms | `Which form pattern should I use for a setup table with 5 fields?` | pattern advisor |
 

@@ -157,10 +157,10 @@ Stdio variant and troubleshooting: **[docs/CLAUDE_CODE_SETUP.md](docs/CLAUDE_COD
 Open the AI chat (Copilot Agent Mode / Claude Code) and ask:
 
 ```
-What tables contain "CustAccount" field?
+I'm tracing a posting issue — find every table (standard + ISV extensions) that carries the CustAccount field, so I can see where the value could get overwritten.
 ```
 
-A `search` tool call returning results from your codebase = you're connected.
+A `search` tool call returning results from **your** metadata — including your ISV models, which no model's training data has seen — means you're connected.
 
 ---
 
