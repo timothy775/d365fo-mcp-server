@@ -99,10 +99,9 @@ async function configureRootEnv(scenario: Scenario): Promise<number> {
   }
 
   const envType = scenario === 'ude' ? 'ude' : await askSelect('Development environment type', [
-    { value: 'auto', label: 'auto', hint: 'detect UDE when XPP configs exist (default)' },
     { value: 'traditional', label: 'traditional', hint: 'classic AOSService VM' },
     { value: 'ude', label: 'ude', hint: 'Unified Developer Experience / Power Platform Tools' },
-  ], 'auto');
+  ]);
   writeEnvValue(paths.rootEnv, 'D365FO_DEV_ENVIRONMENT_TYPE', envType);
 
   if (envType === 'traditional') {
@@ -117,7 +116,7 @@ async function configureRootEnv(scenario: Scenario): Promise<number> {
       required: true,
     }));
   } else {
-    // UDE/auto: pin an XPP config when any exist; otherwise the server
+    // UDE: pin an XPP config when any exist; otherwise the server
     // auto-detects the newest one at runtime.
     const configs = listXppConfigs();
     if (configs.length > 0) {
