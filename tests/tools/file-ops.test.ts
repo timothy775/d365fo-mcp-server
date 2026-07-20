@@ -33,6 +33,9 @@ vi.mock('fs/promises', () => ({
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
   }),
   writeFile: vi.fn(async () => {}),
+  // Forced pre-modify backup when the target is outside a git work tree
+  // (see ensureRecoverableModification) copies the file before the bridge write.
+  copyFile: vi.fn(async () => {}),
   mkdir: vi.fn(async () => {}),
   // Drive/root paths exist; individual files do not (prevents false "file already exists" errors).
   access: vi.fn(async (p: string) => {

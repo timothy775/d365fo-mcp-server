@@ -23,6 +23,32 @@ Get the D365 F&O MCP Server running with GitHub Copilot in 5 steps.
 
 ## Step 2 — Clone and build
 
+### One-line install (recommended)
+
+Paste into PowerShell — the installer takes care of the Node.js and Git prerequisites from Step 1 (installs them if missing), clones the repository, runs `npm install`, and hands off to the setup wizard:
+
+```powershell
+irm https://raw.githubusercontent.com/dynamics365ninja/d365fo-mcp-server/main/install.ps1 | iex
+```
+
+Safe to re-run — an existing installation is updated (`git pull`) instead of re-cloned. Env-var overrides: `$env:D365FO_MCP_DIR` (install directory), `$env:D365FO_MCP_YES = '1'` (non-interactive defaults), `$env:D365FO_MCP_NO_WIZARD = '1'` (clone + install only). If the wizard completed, continue with [Step 3](#step-3--connect-copilot).
+
+### Interactive setup
+
+The first-time setup wizard walks you through everything below — scenario selection, C# bridge build, configuration, index build — and prints the `.mcp.json` block to paste in Step 3. It asks only what your scenario needs, explains every question, and saves the answers to `config/d365fo-mcp.json` (secrets to `config/secrets.json`), so no `.env` editing is involved:
+
+```powershell
+git clone https://github.com/dynamics365ninja/d365fo-mcp-server.git K:\d365fo-mcp-server
+cd K:\d365fo-mcp-server
+npm install
+npm run setup        # first-time setup wizard
+npm run doctor       # health check — verifies Node, build, index, bridge
+```
+
+If the wizard completed, skip the manual steps and continue with [Step 3](#step-3--connect-copilot).
+
+### Manual setup
+
 ```powershell
 git clone https://github.com/dynamics365ninja/d365fo-mcp-server.git K:\d365fo-mcp-server
 cd K:\d365fo-mcp-server
@@ -34,12 +60,14 @@ npm run build
 **Local index** (skip for hybrid — the index lives in Azure):
 
 ```powershell
-copy .env.example .env           # set PACKAGES_PATH, CUSTOM_MODELS, LABEL_LANGUAGES
+npm run setup                    # packages path, custom models, prefix, label languages…
 npm run extract-metadata
 npm run build-database
 ```
 
-> **UDE / Power Platform Tools?** Run `npm run select-config` instead of setting `PACKAGES_PATH` manually.
+> Writing the configuration by hand instead? `config/d365fo-mcp.json` is plain JSON; every key, its default and
+> the environment variable it maps to are listed in [CONFIGURATION.md](CONFIGURATION.md). An existing `.env` is
+> still read as a fallback and is imported the first time the wizard runs.
 
 ---
 
@@ -143,7 +171,7 @@ VS 2022 searches for `.github\copilot-instructions.md` upward from the solution 
 
 | Test | Prompt | Confirms |
 |------|--------|----------|
-| Search | `What tables contain "CustAccount" field?` | index + connection |
+| Search | `Find every table (standard + ISV) that carries the CustAccount field` | index + connection |
 | Write | `Create a class TestHelper with a static method hello()` | C# bridge |
 | Forms | `Which form pattern should I use for a setup table with 5 fields?` | pattern advisor |
 

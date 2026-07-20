@@ -4,35 +4,20 @@
  * instances/rebuild-instance.ps1 minus the git-pull step (that lives in
  * `d365fo-mcp update`).
  */
-import * as fs from 'node:fs';
 import { isWindows, paths } from '../context.js';
-import { missingVars } from '../envFile.js';
 import { runNode } from '../exec.js';
 import { listInstances } from '../instances.js';
-import { instanceTarget, pickTarget, rootTarget, Target } from '../target.js';
-import { askConfirm, askSelect, p } from '../ui.js';
+import { instanceTarget, pickTarget, rootTarget, targetEnv, Target } from '../target.js';
+import { askSelect, p, requireGitCheckout } from '../ui.js';
 import { normalizeXppConfigName } from '../xppConfig.js';
-
-/** Warn about vars added to .env.example since this .env was created. */
-function warnMissingSettings(envFile: string | null, label: string): boolean {
-  if (!envFile || !fs.existsSync(envFile) || !fs.existsSync(paths.envExample)) return false;
-  const missing = missingVars(
-    fs.readFileSync(paths.envExample, 'utf8'),
-    fs.readFileSync(envFile, 'utf8'),
-  );
-  if (missing.length === 0) return false;
-  p.log.warn(`New settings in .env.example not present in ${label}:\n` +
-    missing.map(m => `   ${m.name}=${m.value}`).join('\n'));
-  return true;
-}
 
 /** Run extract + build-database for one target. Returns true on success. */
 export async function rebuildIndex(target: Target): Promise<boolean> {
-  const env = target.envFile ? { ENV_FILE: target.envFile } : undefined;
+  const env = targetEnv(target);
 
-  if (isWindows && target.envFile) {
-    const expanded = normalizeXppConfigName(target.envFile);
-    if (expanded) p.log.info(`Expanded XPP_CONFIG_NAME: ${expanded.from} → ${expanded.to}`);
+  if (isWindows) {
+    const expanded = normalizeXppConfigName(target.store);
+    if (expanded) p.log.info(`Expanded XPP config name: ${expanded.from} → ${expanded.to}`);
   }
 
   p.log.step(`[1/2] Extracting metadata (${target.label})…`);
@@ -53,6 +38,7 @@ export async function rebuildIndex(target: Target): Promise<boolean> {
 
 export async function indexCommand(instanceName: string | undefined, opts: { all?: boolean; yes?: boolean }): Promise<void> {
   p.intro('d365fo-mcp index');
+  if (!requireGitCheckout()) return;
 
   let targets: Target[];
   if (opts.all) {
@@ -77,16 +63,6 @@ export async function indexCommand(instanceName: string | undefined, opts: { all
       : [await pickTarget(undefined, 'Which target?')];
   } else {
     targets = [await pickTarget(instanceName, 'Which target?')];
-  }
-
-  const hasNewSettings = targets
-    .map(t => warnMissingSettings(t.envFile, `${t.label} .env`))
-    .some(Boolean);
-  if (hasNewSettings && !opts.yes) {
-    if (!await askConfirm('Some .env files are missing new settings (see above). Continue anyway?', false)) {
-      p.cancel('Aborted — update the .env files first.');
-      return;
-    }
   }
 
   const failed: string[] = [];

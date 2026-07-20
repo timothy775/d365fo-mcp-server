@@ -6,6 +6,8 @@ Everything a **developer** needs to connect GitHub Copilot (VS 2022 ≥ 17.14 / 
 
 > **Prefer a guided setup?** After `git clone` + `npm install`, run `npm run setup` — the interactive management CLI walks through the scenario choice below, builds the bridge and the index, and prints the `.mcp.json` block. `npm run doctor` verifies an existing installation. Day-to-day: `npx d365fo-mcp start|update|index|instance …` (each command also runs non-interactively with arguments). The PowerShell scripts referenced below keep working as before.
 
+> **Configuration lives in `config/d365fo-mcp.json`**, written by the wizard (secrets in `config/secrets.json`); the generated `.mcp.json` block points the server at it via `D365FO_CONFIG`. Change one thing later with `npx d365fo-mcp config [section]`. Every setting, its default and the environment variable it maps to: [CONFIGURATION.md](CONFIGURATION.md). A `.env` from an older installation is still read as a fallback and is imported the first time `npm run setup` runs.
+
 ---
 
 ## Choosing a scenario
@@ -93,14 +95,14 @@ npm run build
       "command": "node",
       "args": ["K:\\d365fo-mcp-server\\dist\\index.js"],
       "env": {
-        "MCP_SERVER_MODE": "write-only",
-        "D365FO_SOLUTIONS_PATH": "K:\\repos\\MySolution\\projects",
-        "D365FO_WORKSPACE_PATH": "K:\\AosService\\PackagesLocalDirectory\\YourPackage\\YourModel"
+        "D365FO_CONFIG": "K:\\d365fo-mcp-server\\config\\d365fo-mcp.json"
       }
     }
   }
 }
 ```
+
+`D365FO_CONFIG` points at the file `npm run setup` wrote — it already holds `server.mode: write-only`, the workspace and the solutions path for this companion. Add a variable to the `env` block only to override the file for that one server entry.
 
 The local companion also exposes the bridge-backed reader `get_object_info` (and `get_method`), so freshly created objects are immediately readable without waiting for an Azure index refresh.
 
@@ -112,8 +114,8 @@ Everything on your VM, served over `http://localhost:8080`.
 
 ```powershell
 # after clone + build (see B)
-copy .env.example .env     # set PACKAGES_PATH, CUSTOM_MODELS
-npm run extract-metadata   # custom models: minutes; EXTRACT_MODE=all: 1–2 h
+npm run setup              # packages path, custom models, prefix, port
+npm run extract-metadata   # custom models: minutes; full index: 1–2 h
 npm run build-database
 npm start                  # verify: http://localhost:8080/health
 ```
@@ -139,8 +141,7 @@ The server reads your XPP config from `%LOCALAPPDATA%\Microsoft\Dynamics365\XPPC
       "command": "node",
       "args": ["K:\\d365fo-mcp-server\\dist\\index.js"],
       "env": {
-        "D365FO_MODEL_NAME": "YourModelName",
-        "D365FO_DEV_ENVIRONMENT_TYPE": "ude"
+        "D365FO_CONFIG": "K:\\d365fo-mcp-server\\config\\d365fo-mcp.json"
       }
     }
   }
@@ -164,29 +165,50 @@ VS spawns the server as a subprocess — no HTTP, no manual start. Build the ind
       "command": "node",
       "args": ["C:\\d365fo-mcp-server\\dist\\index.js"],
       "env": {
-        "DB_PATH": "C:\\d365fo-mcp-server\\data\\xpp-metadata.db",
-        "LABELS_DB_PATH": "C:\\d365fo-mcp-server\\data\\xpp-metadata-labels.db",
-        "D365FO_SOLUTIONS_PATH": "K:\\repos\\MySolution\\projects"
+        "D365FO_CONFIG": "C:\\d365fo-mcp-server\\config\\d365fo-mcp.json"
       }
     }
   }
 }
 ```
 
-`D365FO_SOLUTIONS_PATH` is scanned for `.rnrproj` files at startup; the MCP roots protocol delivers the open workspace automatically. Switch projects without restart via `get_workspace_info(projectPath=...)`. Details: [WORKSPACE_DETECTION.md](WORKSPACE_DETECTION.md)
+The database paths and `workspace.solutionsPath` come from the config file; the `env` block only has to say which config to load. `workspace.solutionsPath` is scanned for `.rnrproj` files at startup; the MCP roots protocol delivers the open workspace automatically. Switch projects without restart via `get_workspace_info(projectPath=...)`. Details: [WORKSPACE_DETECTION.md](WORKSPACE_DETECTION.md)
 
 ## Scenario F — Multiple instances
 
-One machine, several D365FO clients — each instance gets its own `.env`, database, and port:
+One machine, several D365FO clients — each instance gets its own config file, database, and port:
 
 ```powershell
-.\instances\add-instance.ps1            # interactive: name + port → instances\<name>\{.env,data,metadata}
-# edit instances\<name>\.env: XPP_CONFIG_NAME, EXTENSION_PREFIX, D365FO_MODEL_NAME
-.\instances\rebuild-instance.ps1 clientA   # extract + build index for the instance (--all for all)
-.\instances\run-instance.ps1 clientA       # start on its port
+npx d365fo-mcp instance add             # name + port, then the same questions as `setup`,
+                                        # → instances\<name>\{d365fo-mcp.json,data,metadata}
+npx d365fo-mcp instance rebuild clientA # first build: extract + build index (--all for all instances)
+npx d365fo-mcp instance run clientA     # start on its port
 ```
 
-Or the CLI equivalents: `npx d365fo-mcp instance add|rebuild|run|upgrade [name]` (interactive when the name is omitted; `instance upgrade` repoints an instance after a UDE version upgrade).
+`instance upgrade <name>` repoints an instance at a new XPP config after a UDE version upgrade and rebuilds it. Each command is interactive when the name is omitted. To run an instance manually, point the server at its config: `D365FO_CONFIG=instances\clientA\d365fo-mcp.json node dist\index.js`.
+
+Provisioning instances from a script instead of interactively? Copy `instances\d365fo-mcp.template.json` to `instances\<name>\d365fo-mcp.json` and fill in the blanks. The `instances\*.ps1` scripts remain for installations still configured through per-instance `.env` files.
+
+### Keeping instances in sync
+
+Updating the server code and reindexing an instance's database are **separate** steps, at different scopes:
+
+- **Server binaries are repo-global.** All instances run the same `dist/`, so update it once — never per instance:
+  ```powershell
+  git pull; npm install; npm run build      # once; then restart the instances
+  ```
+- **Databases are per-instance.** `rebuild-instance.ps1` runs a full reindex from the current source. Only reindex when it's actually needed:
+
+  | What changed | Command |
+  |---|---|
+  | First build of an instance | `rebuild-instance.ps1 <name>` |
+  | **Microsoft base** upgraded (UDE version) | `upgrade-instance.ps1 <name>` |
+  | Pull changed the **parser / DB schema** | `rebuild-instance.ps1 --all` |
+  | Runtime-only code change | *(just `npm run build` + restart — no reindex)* |
+
+  Add `--all` to rebuild every instance.
+
+> `rebuild-instance.ps1` deliberately does **not** `git pull` or build binaries: that is a repo-wide action, and doing it while rebuilding a single instance would leave the others running new binaries against an old-schema database.
 
 Point a per-solution `.mcp.json` at the right port:
 
@@ -198,7 +220,7 @@ Point a per-solution `.mcp.json` at the right port:
 }
 ```
 
-> `rebuild-instance.ps1` diffs each instance `.env` against `.env.example` and warns about new keys — upgrades are safe.
+> `npx d365fo-mcp doctor` checks every instance after an upgrade: index size, a pinned XPP config that no longer resolves, and any legacy `.env` that contradicts the instance config.
 
 ---
 

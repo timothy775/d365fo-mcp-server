@@ -40,7 +40,6 @@ import type {
   BridgeRefreshResult,
   BridgeWriteResult,
   BridgeSmartTableResult,
-  BridgeDeleteResult,
   BridgeBatchOperationRequest,
   BridgeBatchOperationResult,
   BridgeCapabilities,
@@ -823,12 +822,7 @@ export class BridgeClient extends EventEmitter {
     return this.call<BridgeWriteResult>('addMenuItemToMenu', { objectName: menuName, menuItemToAdd, menuItemToAddType: menuItemToAddType ?? 'display' });
   }
 
-  // Delete, Batch, Capabilities, Pattern Discovery
-
-  /** Delete a D365FO object by removing its file from disk */
-  async deleteObject(objectType: string, objectName: string): Promise<BridgeDeleteResult> {
-    return this.call<BridgeDeleteResult>('deleteObject', { objectType, objectName });
-  }
+  // Batch, Capabilities, Pattern Discovery
 
   /** Execute multiple write operations on a single object in one call */
   async batchModify(
@@ -937,8 +931,10 @@ export async function createBridgeClient(options: {
 }
 
 function detectPackagesPath(): string | null {
-  // Canonical env vars take priority over well-known path probes. D365FO_PACKAGE_PATH is read by
-  // configManager and exposed via .mcp.json env{} blocks; PACKAGES_PATH is the legacy .env.example name.
+  // Canonical env vars take priority over well-known path probes. D365FO_PACKAGE_PATH can be set
+  // in .env (traditional mode, loaded by dotenv at startup) or in the .mcp.json env{} block
+  // (VS passes it to the subprocess). Both sources land in process.env equivalently.
+  // PACKAGES_PATH is the legacy .env.example name.
   const candidates = [
     process.env.D365FO_PACKAGE_PATH ?? '',
     process.env.PACKAGES_PATH ?? '',

@@ -133,7 +133,8 @@ describe('get_xpp_knowledge', () => {
     const result = await xppKnowledgeTool(req({ topic: 'ssrs report' }));
     const text = getText(result);
     expect(text).toContain('SSRS');
-    expect(text).toContain('SRSReportDataProviderBase');
+    // AOT casing, as the knowledge audit pins it (Srs…, not SRS…).
+    expect(text).toContain('SrsReportDataProviderBase');
   });
 
   it('handles security query', async () => {

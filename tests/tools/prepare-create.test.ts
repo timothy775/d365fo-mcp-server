@@ -26,7 +26,11 @@ const buildContext = (opts: {
     prepare: vi.fn((sql: string) => ({
       all: vi.fn((..._params: unknown[]) => {
         if (sql.includes("type = 'edt'")) return opts.edts ?? [];
-        if (sql.includes('name IN (?, ?)')) return opts.existingNames ?? [];
+        // Collision check goes through the nocase symbol lookup (exact probe
+        // + FTS fallback, both filtered on `parent_name IS NULL`).
+        if (sql.includes('parent_name IS NULL')) {
+          return (opts.existingNames ?? []).map(r => ({ ...r, extends_class: null, file_path: null }));
+        }
         return [];
       }),
       get: vi.fn(() => undefined),

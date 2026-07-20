@@ -19,7 +19,7 @@ import { WorkspaceScanner } from './workspace/workspaceScanner.js';
 import { HybridSearch } from './workspace/hybridSearch.js';
 import { initializeDatabase } from './database/download.js';
 import { initializeConfig, getConfigManager } from './utils/configManager.js';
-import { SERVER_MODE, LOCAL_TOOLS } from './server/serverMode.js';
+import { SERVER_MODE, LOCAL_TOOLS, isToolAllowedInMode } from './server/serverMode.js';
 import { TOOL_ANNOTATIONS } from './server/toolAnnotations.js';
 import { apiKeyAuth } from './middleware/apiKeyAuth.js';
 import { setInitializeParams } from './utils/stdioSessionInfo.js';
@@ -219,8 +219,8 @@ async function initializeServices() {
     }
 
     // Initialize symbol index and parser (DB path is shown in the startup header).
-    // The open + count is synchronous and can block for a while on a large DB,
-    // so announce it first — otherwise the output looks frozen during the load.
+    // The open is synchronous and can block briefly on a large DB, so announce
+    // it first — otherwise the output looks frozen during the load.
     log.step('Loading symbols' + glyph.ellipsis);
     serverState.statusMessage = 'Loading metadata database...';
     const dbLoadStart = Date.now();
@@ -232,11 +232,14 @@ async function initializeServices() {
     await new Promise<void>(r => setImmediate(r));
 
     let symbolIndex: XppSymbolIndex;
-    let symbolCount = 0;
+    let dbHasSymbols = false;
 
     try {
       symbolIndex = new XppSymbolIndex(DB_PATH, LABELS_DB_PATH);
-      symbolCount = symbolIndex.getSymbolCount();
+      // Cheap O(1) probe — NOT getSymbolCount(): a full COUNT scan of a 2 GB DB
+      // blocks the event loop for 30-60 s, which starves the MCP handshake and
+      // makes clients (VS Code Copilot) time out and kill the server.
+      dbHasSymbols = symbolIndex.hasAnySymbols();
     } catch (error: any) {
       console.error(statusLine('err', 'Failed to open database:'), error);
 
@@ -252,7 +255,7 @@ async function initializeServices() {
 
         // Try again with fresh database
         symbolIndex = new XppSymbolIndex(DB_PATH, LABELS_DB_PATH);
-        symbolCount = symbolIndex.getSymbolCount();
+        dbHasSymbols = symbolIndex.hasAnySymbols();
         log.warn('Symbol index is now empty. To restore, run: npm run index-metadata');
       } else {
         throw error;
@@ -262,7 +265,7 @@ async function initializeServices() {
     const parser = new XppMetadataParser();
 
     // Check if database needs indexing
-    if (symbolCount === 0) {
+    if (!dbHasSymbols) {
       log.warn('No symbols found in database — run `npm run index-metadata` first');
       log.detail('or set METADATA_PATH and the server will index on startup');
 
@@ -275,20 +278,26 @@ async function initializeServices() {
         const modelNames = modelNamesStr.split(',').map(m => m.trim()).filter(Boolean);
         log.detail(`model names: ${modelNames.join(', ')}`);
 
-        for (const modelName of modelNames) {
-          log.detail(`indexing ${modelName}` + glyph.ellipsis);
-          await symbolIndex.indexMetadataDirectory(METADATA_PATH, modelName);
-        }
+        // Single pass over all requested models — the FTS index is rebuilt once at the
+        // end of the call, so looping per model would repeat a full-table rebuild.
+        log.detail(`indexing ${modelNames.join(', ')}` + glyph.ellipsis);
+        await symbolIndex.indexMetadataDirectory(METADATA_PATH, modelNames);
 
         log.ok(`Indexed ${symbolIndex.getSymbolCount().toLocaleString('en-US')} symbols from ${modelNames.length} model(s)`);
       } catch {
         log.warn('Metadata path not accessible — starting with empty index');
       }
     } else {
-      const b = symbolIndex.getSymbolCountByType();
-      const n = (x: number) => (x || 0).toLocaleString('en-US');
-      log.ok(`Loaded ${symbolCount.toLocaleString('en-US')} symbols in ${((Date.now() - dbLoadStart) / 1000).toFixed(1)}s`);
-      log.detail(`${n(b.class)} classes ${glyph.dot} ${n(b.table)} tables ${glyph.dot} ${n(b.form)} forms ${glyph.dot} ${n(b.query)} queries ${glyph.dot} ${n(b.view)} views`);
+      log.ok(`Database opened in ${((Date.now() - dbLoadStart) / 1000).toFixed(1)}s ${glyph.dot} counting symbols in background`);
+      // The count scan runs in a worker thread (getSymbolCounts) so it never
+      // blocks MCP requests; the breakdown is logged when it lands.
+      void symbolIndex.getSymbolCounts().then(({ total, byType: b }) => {
+        const n = (x: number) => (x || 0).toLocaleString('en-US');
+        log.ok(`Counted ${total.toLocaleString('en-US')} symbols in ${((Date.now() - dbLoadStart) / 1000).toFixed(1)}s`);
+        log.detail(`${n(b.class)} classes ${glyph.dot} ${n(b.table)} tables ${glyph.dot} ${n(b.form)} forms ${glyph.dot} ${n(b.query)} queries ${glyph.dot} ${n(b.view)} views`);
+      }).catch(err => {
+        console.error(statusLine('warn', 'Symbol count failed:'), err);
+      });
     }
 
     serverState.symbolIndex = symbolIndex;
@@ -654,7 +663,8 @@ async function main() {
         service: 'd365fo-mcp-server',
         version: '1.0.0',
         message: serverState.statusMessage,
-        symbols: serverState.symbolIndex?.getSymbolCount() || 0,
+        // Cached-only: a health probe must never trigger a 30-60 s COUNT scan.
+        symbols: serverState.symbolIndex?.getCachedSymbolCounts()?.total || 0,
       });
     });
 
@@ -760,11 +770,9 @@ async function main() {
       const filteredCatalog = toolCatalog
         .map(cat => ({
           ...cat,
-          tools: cat.tools.filter(t => {
-            if (SERVER_MODE === 'read-only') return !LOCAL_TOOLS.has(t.name);
-            if (SERVER_MODE === 'write-only') return LOCAL_TOOLS.has(t.name);
-            return true;
-          }),
+          // Same predicate as the ListTools filter and runtime gate, so the
+          // startup banner matches what the server actually exposes.
+          tools: cat.tools.filter(t => isToolAllowedInMode(SERVER_MODE, t.name)),
         }))
         .filter(cat => cat.tools.length > 0);
 

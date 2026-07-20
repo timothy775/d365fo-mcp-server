@@ -123,6 +123,19 @@ export const generateObjectTool = {
             required: ['name'],
           },
         },
+        additionalDatasets: {
+          type: 'array',
+          description: '[scaffold:report] Multi-dataset report: each entry adds a TempDB TmpTable + a get<Table>() DP method. name = suffix ("Header" → <Report>HeaderTmp).',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              fieldsHint: { type: 'string' },
+              fields: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
+            },
+            required: ['name'],
+          },
+        },
         generateController: { type: 'boolean', description: '[scaffold:report] Generate Controller class (default: true).' },
         designStyle: { type: 'string', description: '[scaffold:report] RDL design pattern: "SimpleList" (default) or "GroupedWithTotals".' },
         copyFrom: { type: 'string', description: '[scaffold] Copy structure from an existing object (forms: prefer cloneFrom).' },

@@ -116,11 +116,11 @@ Claude Code's Tool Search feature defers MCP tool schemas to save context. When 
 
 ## Step 3 — Place `CLAUDE.md`
 
-Copy `CLAUDE.template.md` from the repo root to the parent folder of your D365FO solutions, renaming it to `CLAUDE.md`. Claude Code reads it automatically from the working directory upward, so one copy covers all solutions underneath.
+Copy `.github/copilot-instructions.md` from the repo to the parent folder of your D365FO solutions, renaming it to `CLAUDE.md`. Claude Code reads it automatically from the working directory upward, so one copy covers all solutions underneath. (The same file serves both clients — it is the static pointer used until the MCP `xpp_system_instructions` prompt is loaded.)
 
 ```powershell
 # Example: place in the parent of all your D365FO solution folders, renamed to CLAUDE.md
-Copy-Item -Path "K:\d365fo-mcp-server\CLAUDE.template.md" -Destination "C:\source\repos\CLAUDE.md"
+Copy-Item -Path "K:\d365fo-mcp-server\.github\copilot-instructions.md" -Destination "C:\source\repos\CLAUDE.md"
 ```
 
 `CLAUDE.md` reinforces the tool priority in plain language — telling Claude to use `d365fo-mcp-tools` for all X++ work regardless of what other tools are connected. `alwaysLoad` handles it technically; `CLAUDE.md` handles it instructionally.
@@ -138,7 +138,7 @@ claude mcp list
 You should see `d365fo-mcp-tools` listed as connected. Then start a Claude Code session from your D365FO solution folder and ask:
 
 ```
-What tables contain the "CustAccount" field?
+Find every table (standard + ISV extensions) that carries the CustAccount field.
 ```
 
 Claude should call the `search` tool from `d365fo-mcp-tools`. If it routes to another tool instead, check:

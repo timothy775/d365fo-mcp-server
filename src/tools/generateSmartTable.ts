@@ -15,6 +15,7 @@ import { resolveObjectPrefix, applyObjectPrefix, getObjectSuffix, applyObjectSuf
 import { ProjectFileManager } from './createD365File.js';
 import { extractModelFromProject, findProjectInSolution } from '../utils/projectUtils.js';
 import { normalizeD365Xml } from '../utils/d365XmlNormalizer.js';
+import { lookupSymbolNocase } from '../utils/symbolLookup.js';
 
 interface GenerateSmartTableArgs {
   name: string;
@@ -1202,10 +1203,9 @@ export function heuristicEdtBaseType(edtName: string): string | undefined {
  */
 export function isEnumName(name: string, db: any): boolean {
   try {
-    const row = db.prepare(
-      `SELECT 1 FROM symbols WHERE name = ? COLLATE NOCASE AND type IN ('enum', 'enum-extension') LIMIT 1`
-    ).get(name);
-    return !!row;
+    // Index-safe nocase lookup — the former `name = ? COLLATE NOCASE` shape
+    // could not use idx_name_type. Enum rows are always top-level.
+    return lookupSymbolNocase(db, name, ['enum', 'enum-extension']) !== undefined;
   } catch {
     return false;
   }
@@ -1328,9 +1328,19 @@ function edtNameConfidence(field: string, edt: string): number {
  */
 export function resolveBestEdt(fieldName: string, db: any): string {
   try {
-    const exact = db.prepare(
-      `SELECT edt_name FROM edt_metadata WHERE edt_name = ? COLLATE NOCASE LIMIT 1`
-    ).get(fieldName) as { edt_name: string } | undefined;
+    // Exact-case probe on idx_edt_metadata_name; a differently-cased name is
+    // canonicalized through the symbols index (edt_metadata has no FTS) — the
+    // former `= ? COLLATE NOCASE` shape scanned the whole table.
+    const edtExactStmt = db.prepare(
+      `SELECT edt_name FROM edt_metadata WHERE edt_name = ? LIMIT 1`
+    );
+    let exact = edtExactStmt.get(fieldName) as { edt_name: string } | undefined;
+    if (!exact) {
+      const canonical = lookupSymbolNocase(db, fieldName, ['edt'])?.name;
+      if (canonical && canonical !== fieldName) {
+        exact = edtExactStmt.get(canonical) as { edt_name: string } | undefined;
+      }
+    }
     if (exact) return exact.edt_name;
 
     // Generic single-word fields don't accept fuzzy matches — a prefixed EDT
