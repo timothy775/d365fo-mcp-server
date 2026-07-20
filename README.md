@@ -85,7 +85,7 @@ Full walkthrough with all scenarios: **[docs/QUICK_START.md](docs/QUICK_START.md
 
 ### Interactive setup (recommended)
 
-After cloning and `npm install`, the management CLI walks you through everything else — scenario selection, C# bridge build, `.env` configuration, index build — and prints the `.mcp.json` block to paste:
+After cloning and `npm install`, the management CLI walks you through everything else — scenario selection, C# bridge build, configuration, index build — and prints the `.mcp.json` block to paste. Every answer is explained as it is asked and stored in `config/d365fo-mcp.json`; there is no `.env` to fill in (see **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** for the full setting reference):
 
 ```powershell
 git clone https://github.com/dynamics365ninja/d365fo-mcp-server.git K:\d365fo-mcp-server
@@ -95,7 +95,7 @@ npm run setup        # first-time setup wizard
 npm run doctor       # health check — verifies Node, build, index, bridge
 ```
 
-Day-to-day management runs through the same CLI (`npx d365fo-mcp` or `npm run cli --`): `start`, `update`, `index`, and `instance add/list/run/rebuild/upgrade` for multi-instance setups. Every command works non-interactively with arguments, or asks with predefined choices when run bare.
+Day-to-day management runs through the same CLI (`npx d365fo-mcp` or `npm run cli --`): `start`, `update`, `index`, `config` (change one area of the settings without re-running the wizard), and `instance add/list/run/rebuild/upgrade` for multi-instance setups. Every command works non-interactively with arguments, or asks with predefined choices when run bare.
 
 ### Manual setup
 
@@ -108,12 +108,14 @@ cd bridge\D365MetadataBridge; dotnet build -c Release; cd ..\..   # C# bridge �
 npm run build
 
 # Local only — build the metadata index (skip for hybrid)
-copy .env.example .env            # set PACKAGES_PATH, CUSTOM_MODELS
+npm run setup                     # writes config/d365fo-mcp.json (packages path, models, prefix…)
 npm run extract-metadata
 npm run build-database
 ```
 
-> **UDE / Power Platform Tools?** Run `npm run select-config` instead of editing `PACKAGES_PATH`.
+> Prefer to write the configuration yourself? `config/d365fo-mcp.json` is plain JSON — every key, default and
+> matching environment variable is listed in [docs/CONFIGURATION.md](docs/CONFIGURATION.md). A pre-existing
+> `.env` keeps working and is imported by the wizard.
 
 ### Connect GitHub Copilot
 

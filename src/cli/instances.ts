@@ -1,16 +1,22 @@
 /**
  * Multi-instance helpers — TypeScript counterpart of instances/*.ps1.
- * An instance is any directory under instances/ containing a .env file.
+ * An instance is any directory under instances/ holding a d365fo-mcp.json
+ * (or a legacy .env from before the setup wizard wrote JSON).
  */
 import * as fs from 'node:fs';
 import { join } from 'node:path';
+import { settingByPath } from '../config/settings.js';
 import { paths } from './context.js';
-import { readEnvValue } from './envFile.js';
+import { openInstanceStore, readSetting, saveStore, writeSetting } from './settingsStore.js';
+
+const portSetting = settingByPath('server.port')!;
 
 export interface Instance {
   name: string;
   dir: string;
+  /** Legacy .env path — may not exist. */
   envFile: string;
+  configFile: string;
   port: number | null;
 }
 
@@ -20,14 +26,12 @@ export function listInstances(): Instance[] {
     .filter(e => e.isDirectory())
     .map(e => {
       const dir = join(paths.instancesDir, e.name);
-      const envFile = join(dir, '.env');
-      return { name: e.name, dir, envFile };
+      return { name: e.name, dir, envFile: join(dir, '.env'), configFile: join(dir, 'd365fo-mcp.json') };
     })
-    .filter(i => fs.existsSync(i.envFile))
+    .filter(i => fs.existsSync(i.configFile) || fs.existsSync(i.envFile))
     .map(i => {
-      const raw = readEnvValue(i.envFile, 'PORT');
-      const port = raw && /^\d+$/.test(raw) ? parseInt(raw, 10) : null;
-      return { ...i, port };
+      const value = readSetting(openInstanceStore(i.dir), portSetting);
+      return { ...i, port: typeof value === 'number' ? value : null };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -43,22 +47,28 @@ export function suggestPort(instances: Instance[]): number {
 }
 
 /**
- * Create instances/<name>/{.env,data,metadata} from the .env.template
- * (with __PORT__ substituted). Throws when the instance already exists
- * or the template is missing.
+ * Create instances/<name>/{d365fo-mcp.json,data,metadata} with the port and the
+ * instance-local index paths pre-filled; the remaining settings are asked for
+ * by the caller. Throws when the instance already exists.
  */
 export function createInstance(name: string, port: number): Instance {
-  if (!fs.existsSync(paths.instanceTemplate)) {
-    throw new Error(`Template not found: ${paths.instanceTemplate}`);
-  }
   const dir = join(paths.instancesDir, name);
   const envFile = join(dir, '.env');
-  if (fs.existsSync(envFile)) {
+  const configFile = join(dir, 'd365fo-mcp.json');
+  if (fs.existsSync(configFile) || fs.existsSync(envFile)) {
     throw new Error(`Instance '${name}' already exists.`);
   }
   fs.mkdirSync(join(dir, 'data'), { recursive: true });
   fs.mkdirSync(join(dir, 'metadata'), { recursive: true });
-  const content = fs.readFileSync(paths.instanceTemplate, 'utf8').replaceAll('__PORT__', String(port));
-  fs.writeFileSync(envFile, content);
-  return { name, dir, envFile, port };
+
+  // Relative paths resolve from the config file's directory, so an instance
+  // folder can be moved or renamed without touching its configuration.
+  const store = openInstanceStore(dir);
+  writeSetting(store, portSetting, port);
+  writeSetting(store, settingByPath('index.dbPath')!, './data/xpp-metadata.db');
+  writeSetting(store, settingByPath('index.labelsDbPath')!, './data/xpp-metadata-labels.db');
+  writeSetting(store, settingByPath('index.metadataPath')!, './metadata');
+  saveStore(store);
+
+  return { name, dir, envFile, configFile, port };
 }

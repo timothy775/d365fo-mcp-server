@@ -25,7 +25,7 @@ Get the D365 F&O MCP Server running with GitHub Copilot in 5 steps.
 
 ### Interactive setup (recommended)
 
-The first-time setup wizard walks you through everything below — scenario selection, C# bridge build, `.env` configuration, index build — and prints the `.mcp.json` block to paste in Step 3:
+The first-time setup wizard walks you through everything below — scenario selection, C# bridge build, configuration, index build — and prints the `.mcp.json` block to paste in Step 3. It asks only what your scenario needs, explains every question, and saves the answers to `config/d365fo-mcp.json` (secrets to `config/secrets.json`), so no `.env` editing is involved:
 
 ```powershell
 git clone https://github.com/dynamics365ninja/d365fo-mcp-server.git K:\d365fo-mcp-server
@@ -50,12 +50,14 @@ npm run build
 **Local index** (skip for hybrid — the index lives in Azure):
 
 ```powershell
-copy .env.example .env           # set PACKAGES_PATH, CUSTOM_MODELS, LABEL_LANGUAGES
+npm run setup                    # packages path, custom models, prefix, label languages…
 npm run extract-metadata
 npm run build-database
 ```
 
-> **UDE / Power Platform Tools?** Run `npm run select-config` instead of setting `PACKAGES_PATH` manually.
+> Writing the configuration by hand instead? `config/d365fo-mcp.json` is plain JSON; every key, its default and
+> the environment variable it maps to are listed in [CONFIGURATION.md](CONFIGURATION.md). An existing `.env` is
+> still read as a fallback and is imported the first time the wizard runs.
 
 ---
 
