@@ -11,6 +11,7 @@ import { fileURLToPath } from 'url';
 import { XppMetadataParser, buildClassExtensionRecord } from '../src/metadata/xmlParser.js';
 import type { XppClassInfo } from '../src/metadata/types.js';
 import { isCustomModel as checkIsCustomModel, getCustomModels } from '../src/utils/modelClassifier.js';
+import { writeExtractManifest } from '../src/utils/extractManifest.js';
 import { XppConfigProvider } from '../src/utils/xppConfigProvider.js';
 import { box, kv, sectionTitle, statusLine, spread, c, glyph, log, shortPath, supportsUnicode, sanitize } from '../src/utils/terminalUi.js';
 
@@ -595,6 +596,25 @@ async function extractMetadata() {
     log.detail(
       `done in ${formatDuration(modelDuration)} ${glyph.dot} progress ${formatPercent(processedModels, totalModels)} (${formatCount(processedModels)}/${formatCount(totalModels)} models), ${formatPercent(stats.totalFiles, totalExpectedFiles)} (${formatCount(stats.totalFiles)}/${formatCount(totalExpectedFiles)} files) ${glyph.dot} avg ${formatDuration(avgModelDuration)}/model, ${formatDuration(avgFileDuration)}/file`
     );
+  }
+
+  // Record which models this run classified as custom, so build-database can scope a
+  // `custom` rebuild to exactly these without a hand-maintained CUSTOM_MODELS list. On UDE
+  // the classification is path-based (customRoot) and cannot be reproduced by build-database,
+  // which runs as a separate process.
+  const detectedCustomModels = [
+    ...new Set(modelWorkItems.filter(i => i.isCustom).map(i => i.modelName)),
+  ];
+  try {
+    writeExtractManifest(OUTPUT_PATH, {
+      generatedAt: new Date().toISOString(),
+      extractMode: EXTRACT_MODE,
+      environment: customRoot ? 'ude' : 'traditional',
+      customModels: detectedCustomModels,
+    });
+    log.detail(`Wrote extract manifest (${detectedCustomModels.length} custom model(s) recorded)`);
+  } catch (error) {
+    log.warn(`Could not write extract manifest (non-fatal): ${error instanceof Error ? error.message : error}`);
   }
 
   const totalDuration = Date.now() - extractionStart;
