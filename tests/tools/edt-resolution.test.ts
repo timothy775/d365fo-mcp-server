@@ -243,12 +243,17 @@ describe('resolveEdtEnumType (recover the enum name behind an Enum-based EDT)', 
 
 describe('isEnumName (enum vs EDT detection)', () => {
   function enumDb(enums: string[]) {
+    // The nocase symbol lookup (utils/symbolLookup) probes via .all().
     return {
       prepare(_sql: string) {
         return {
-          get(arg: string) {
-            return enums.some(e => e.toLowerCase() === String(arg).toLowerCase()) ? { 1: 1 } : undefined;
+          all(...args: unknown[]) {
+            const hit = enums.find(e => e.toLowerCase() === String(args[0]).toLowerCase());
+            return hit
+              ? [{ name: hit, type: 'enum', model: 'Test', extends_class: null, file_path: null }]
+              : [];
           },
+          get() { return undefined; },
         };
       },
     };

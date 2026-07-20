@@ -6,24 +6,48 @@
 import * as fs from 'node:fs';
 import { paths, repoRoot } from './context.js';
 import { Instance, listInstances } from './instances.js';
+import { openInstanceStore, openStore, type SettingsStore } from './settingsStore.js';
 import { askSelect } from './ui.js';
 
 export interface Target {
   /** 'root' or the instance name */
   name: string;
   label: string;
-  /** null → root default config (loadEnv falls back to repo .env) */
+  /** Legacy .env, when one exists — still read as a fallback by the server. */
   envFile: string | null;
+  /** Structured configuration (config/d365fo-mcp.json or instances/<name>/d365fo-mcp.json). */
+  store: SettingsStore;
   port: number | null;
   instance?: Instance;
 }
 
+/** Environment for a child process so it loads this target's configuration. */
+export function targetEnv(target: Target): Record<string, string> | undefined {
+  const env: Record<string, string> = {};
+  if (target.envFile) env.ENV_FILE = target.envFile;
+  if (fs.existsSync(target.store.configPath)) env.D365FO_CONFIG = target.store.configPath;
+  return Object.keys(env).length > 0 ? env : undefined;
+}
+
 export function rootTarget(): Target {
-  return { name: 'root', label: 'root server (.env)', envFile: fs.existsSync(paths.rootEnv) ? paths.rootEnv : null, port: null };
+  return {
+    name: 'root',
+    label: 'root server',
+    envFile: fs.existsSync(paths.rootEnv) ? paths.rootEnv : null,
+    store: openStore(repoRoot, paths.rootEnv),
+    port: null,
+  };
 }
 
 export function instanceTarget(inst: Instance): Target {
-  return { name: inst.name, label: `instance '${inst.name}'`, envFile: inst.envFile, port: inst.port, instance: inst };
+  return {
+    name: inst.name,
+    label: `instance '${inst.name}'`,
+    envFile: fs.existsSync(inst.envFile) ? inst.envFile : null,
+    store: openInstanceStore(inst.dir),
+    port: inst.port,
+    instance: inst,
+  };
 }
 
 /**

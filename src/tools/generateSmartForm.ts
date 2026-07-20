@@ -22,6 +22,7 @@ import { cloneFormXml } from '../utils/formCloner.js';
 import { methodStubsForPattern, injectMethodStubs } from '../knowledge/formPatterns/methodStubs.js';
 import { findBaseFormXml } from './modifyD365File.js';
 import { getFieldControlMap, type FieldControlMap } from '../utils/fieldControlTypes.js';
+import { lookupSymbolNocase } from '../utils/symbolLookup.js';
 
 interface GenerateSmartFormArgs {
   name: string;
@@ -310,10 +311,12 @@ export async function handleGenerateSmartForm(
     let dataSourceResolved = dataSource;
     try {
       const db = symbolIndex.getReadDb();
-      const directHit = db.prepare(
-        `SELECT name FROM symbols WHERE type = 'table' AND name = ? COLLATE NOCASE LIMIT 1`,
-      ).get(dataSource) as { name: string } | undefined;
-      if (!directHit) {
+      // Index-safe nocase lookup; also canonicalizes the casing so the field
+      // probes below stay BINARY on idx_parent_type_name.
+      const directHit = lookupSymbolNocase(db, dataSource, ['table']);
+      if (directHit) {
+        dataSourceResolved = directHit.name;
+      } else {
         const add = (n: string | undefined) => {
           const v = (n ?? '').trim();
           if (v && !candidates.some((c: string) => c.toLowerCase() === v.toLowerCase())) candidates.push(v);
@@ -323,9 +326,7 @@ export async function handleGenerateSmartForm(
         add(dataSource.replace(/Tables?$/i, 'Table'));
         add(dataSource.replace(/Table$/i, ''));
         const matched = candidates
-          .map(c => db.prepare(
-            `SELECT name FROM symbols WHERE type = 'table' AND name = ? COLLATE NOCASE LIMIT 1`,
-          ).get(c) as { name: string } | undefined)
+          .map(c => lookupSymbolNocase(db, c, ['table']))
           .find(r => r)?.name;
         if (matched) {
           console.log(`[generateSmartForm] dataSource "${dataSource}" → "${matched}" (auto-corrected)`);
@@ -380,11 +381,14 @@ export async function handleGenerateSmartForm(
 
   // Table fields minus system fields, capped for a sensible grid width.
   const collectGridFields = (db: any, table: string): string[] => {
+    // Canonicalize first — `parent_name = ? COLLATE NOCASE` cannot use
+    // idx_parent_type_name and scans all 360k field rows (180 s cold).
+    const canonical = lookupSymbolNocase(db, table)?.name ?? table;
     const dbFields = db.prepare(`
       SELECT name FROM symbols
-      WHERE type = 'field' AND parent_name = ? COLLATE NOCASE
+      WHERE type = 'field' AND parent_name = ?
       ORDER BY name
-    `).all(table) as Array<{ name: string }>;
+    `).all(canonical) as Array<{ name: string }>;
     return dbFields
       .map((f) => f.name)
       .filter((n) => !['RecId', 'RecVersion', 'DataAreaId', 'Partition'].includes(n))
@@ -434,11 +438,11 @@ export async function handleGenerateSmartForm(
     // header table, auto-correct to the first that exists, hard-fail only if none resolve.
     try {
       const db = symbolIndex.getReadDb();
-      const exists = db.prepare(
-        `SELECT name FROM symbols WHERE type = 'table' AND name = ? COLLATE NOCASE LIMIT 1`,
-      );
-      const direct = exists.get(linesTableResolved) as { name: string } | undefined;
-      if (!direct) {
+      const exists = (n: string) => lookupSymbolNocase(db, n, ['table']);
+      const direct = exists(linesTableResolved);
+      if (direct) {
+        linesTableResolved = direct.name; // canonical casing for BINARY field probes
+      } else {
         const candidates: string[] = [];
         const add = (n?: string | null) => {
           const v = (n ?? '').trim();
@@ -459,7 +463,7 @@ export async function handleGenerateSmartForm(
 
         let matched: string | undefined;
         for (const cand of candidates) {
-          const hit = exists.get(cand) as { name: string } | undefined;
+          const hit = exists(cand);
           if (hit) { matched = hit.name; break; }
         }
 
@@ -648,8 +652,10 @@ export async function handleGenerateSmartForm(
     }
 
     const db = symbolIndex.getReadDb();
+    // BINARY parent probe on idx_parent_type_name; mapping targets are
+    // canonicalized in the callback below (NOCASE here scanned all field rows).
     const fieldStmt = db.prepare(`
-      SELECT name FROM symbols WHERE type = 'field' AND parent_name = ? COLLATE NOCASE
+      SELECT name FROM symbols WHERE type = 'field' AND parent_name = ?
     `);
     // ── PRE-CLONE FIELD-OVERLAP CHECK ──────────────────────────────────────
     // Before cloning, verify the source and target tables are structurally
@@ -667,7 +673,8 @@ export async function handleGenerateSmartForm(
       const { unknownTargets, poorOverlap } = checkTableMappingCoverage(
         tableMapping as Record<string, string>,
         (table: string) => {
-          const rows = fieldStmt.all(table) as Array<{ name: string }>;
+          const canonical = lookupSymbolNocase(db, table)?.name ?? table;
+          const rows = fieldStmt.all(canonical) as Array<{ name: string }>;
           return rows.length > 0 ? rows.map((r) => r.name) : null;
         },
       );
@@ -947,15 +954,12 @@ export async function handleGenerateSmartForm(
   // "not found".
   try {
     const db = symbolIndex.getReadDb();
-    const tableRow = db.prepare(
-      `SELECT file_path FROM symbols WHERE type = 'table' AND name = ? COLLATE NOCASE LIMIT 1`,
-    );
     const seenTables = new Set<string>();
     for (const m of xml.matchAll(/<Table>([^<]+)<\/Table>/g)) {
       const table = m[1].trim();
       if (!table || seenTables.has(table.toLowerCase())) continue;
       seenTables.add(table.toLowerCase());
-      const row = tableRow.get(table) as { file_path?: string } | undefined;
+      const row = lookupSymbolNocase(db, table, ['table']);
       const stale = row?.file_path && !fs.existsSync(row.file_path);
       if (row && !stale) continue;
       const stem = table.replace(/s$/i, '');

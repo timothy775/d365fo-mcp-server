@@ -46,6 +46,9 @@ vi.mock('fs/promises', () => ({
   access: vi.fn(async () => {}),
   stat: vi.fn(async () => ({ isFile: () => true, isDirectory: () => false })),
   readdir: vi.fn(async () => []),
+  // modify_d365fo_file forces a backup for edits outside git (0432c5d) —
+  // without this the tool fails before it ever reaches the bridge.
+  copyFile: vi.fn(async () => {}),
 }));
 
 vi.mock('../../src/utils/configManager', () => ({

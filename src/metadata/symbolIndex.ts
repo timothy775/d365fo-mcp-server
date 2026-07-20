@@ -4,6 +4,7 @@
  */
 
 import Database from 'better-sqlite3';
+import { Worker } from 'node:worker_threads';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { XppSymbol } from './types.js';
@@ -17,6 +18,12 @@ import { c, log } from '../utils/terminalUi.js';
 const isCI = (): boolean => {
   return !!(process.env.CI || process.env.TF_BUILD || process.env.GITHUB_ACTIONS);
 };
+
+/** Total + per-type symbol counts (both come from one GROUP BY scan). */
+export interface SymbolCounts {
+  total: number;
+  byType: Record<string, number>;
+}
 
 export class XppSymbolIndex {
   public db: Database.Database; // Public for direct pragma access in build scripts
@@ -34,11 +41,17 @@ export class XppSymbolIndex {
   private readPool: Database.Database[] = [];
   private labelsReadPool: Database.Database[] = [];
   private readPoolRR = 0;
+  // Symbol-count scans are expensive (full index scan of 1M+ rows, 30-60 s
+  // cold) — memoize the result and compute it off-thread (see getSymbolCounts).
+  private dbPath: string;
+  private symbolCountsCache: SymbolCounts | null = null;
+  private symbolCountsPromise: Promise<SymbolCounts> | null = null;
   // Per-connection prepared-statement cache.  Prepared statements are bound to
   // their originating connection and cannot be shared across connections.
   private perConnStmtCache = new WeakMap<Database.Database, Map<string, Database.Statement>>();
 
   constructor(dbPath: string, labelsDbPath?: string) {
+    this.dbPath = dbPath;
     // Ensure database directory exists
     const dbDir = path.dirname(dbPath);
     if (!fs.existsSync(dbDir)) {
@@ -745,6 +758,7 @@ export class XppSymbolIndex {
    * Add a symbol to the index with enhanced metadata
    */
   addSymbol(symbol: XppSymbol): void {
+    this.invalidateSymbolCounts();
     let stmt = this.stmtCache.get('addSymbol');
     if (!stmt) {
       stmt = this.db.prepare(`
@@ -788,29 +802,63 @@ export class XppSymbolIndex {
   }
 
   /**
+   * All stored forms a file path may take in the index. Full builds store the
+   * JSON's sourcePath: CI-extracted custom models normalize it to a
+   * PackagesLocalDirectory-relative forward-slash path (see normalizeSourcePath
+   * in scripts/extract-metadata.ts), while locally built DBs keep the absolute
+   * Windows path with backslashes. Matching every form keeps stale-row cleanup
+   * working regardless of which build produced the DB.
+   */
+  private filePathForms(filePath: string): string[] {
+    const forms = new Set<string>([
+      filePath,
+      filePath.replace(/\//g, '\\'),
+      filePath.replace(/\\/g, '/'),
+    ]);
+    const m = /[/\\]PackagesLocalDirectory[/\\](.+)$/.exec(filePath);
+    if (m) {
+      const tail = m[1].replace(/\\/g, '/');
+      forms.add(tail);
+      forms.add(tail.replace(/\//g, '\\'));
+    }
+    return [...forms];
+  }
+
+  /**
    * Remove all symbols for a given file path from both the main table and FTS index.
+   * Matches every stored path form (see filePathForms) so stale rows are removed
+   * even when the DB stores a different path form than the caller passed.
    * Returns the names of top-level objects that were removed (for cache invalidation).
    */
   removeSymbolsByFile(filePath: string): { deletedCount: number; objectNames: string[] } {
+    const forms = this.filePathForms(filePath);
+    const placeholders = forms.map(() => '?').join(', ');
+
     // Collect object names BEFORE deletion (for cache invalidation)
     const rows = this.db.prepare(
-      `SELECT DISTINCT name FROM symbols WHERE file_path = ? AND parent_name IS NULL`
-    ).all(filePath) as Array<{ name: string }>;
+      `SELECT DISTINCT name FROM symbols WHERE file_path IN (${placeholders}) AND parent_name IS NULL`
+    ).all(...forms) as Array<{ name: string }>;
     const objectNames = rows.map(r => r.name);
 
     // The FTS trigger (symbols_fts AFTER DELETE) handles FTS cleanup automatically
-    const result = this.db.prepare(`DELETE FROM symbols WHERE file_path = ?`).run(filePath);
+    const result = this.db.prepare(`DELETE FROM symbols WHERE file_path IN (${placeholders})`).run(...forms);
+    this.invalidateSymbolCounts();
     return { deletedCount: result.changes, objectNames };
   }
 
   /**
    * Remove all labels for a given file path from the labels DB.
+   * Matches every stored path form (see filePathForms), like removeSymbolsByFile.
    * Also cleans up the labels FTS index.
    * Returns the count of deleted label rows.
    */
   removeLabelsByFile(filePath: string): number {
+    const forms = this.filePathForms(filePath);
+    const placeholders = forms.map(() => '?').join(', ');
     // The labels_ad trigger handles FTS cleanup for en-US rows
-    const result = this.labelsDb.prepare(`DELETE FROM labels WHERE file_path = ?`).run(filePath);
+    const result = this.labelsDb.prepare(
+      `DELETE FROM labels WHERE file_path IN (${placeholders})`
+    ).run(...forms);
     return result.changes;
   }
 
@@ -851,11 +899,15 @@ export class XppSymbolIndex {
     
     // Strip FTS5 special characters – keep alphanumeric, underscore and spaces
     const cleaned = trimmed.replace(/[^\w\s]/g, ' ').trim();
-    const tokens = cleaned
+    const allTokens = cleaned
       .split(/\s+/)
-      .filter(t => t.length > 0)
       .map(t => t.toLowerCase())
-      .filter(t => !stopWords.has(t) && t.length > 1); // Filter stop words and single chars
+      .filter(t => t.length > 1); // Filter single chars
+    // Drop stop words only while a real token remains — a query may legitimately
+    // BE a stop word (e.g. a method literally named "find"), and falling through
+    // to the phrase-search fallback would behave differently for it.
+    const withoutStopWords = allTokens.filter(t => !stopWords.has(t));
+    const tokens = withoutStopWords.length > 0 ? withoutStopWords : allTokens;
     
     // If no tokens remain after filtering, use original query in quotes
     if (tokens.length === 0) {
@@ -971,24 +1023,114 @@ export class XppSymbolIndex {
   }
 
   /**
-   * Get symbol count
+   * Get symbol count.
+   *
+   * WARNING: without a warm cache this is a full index scan — 30-60 s on a
+   * large production DB with a cold file cache, and better-sqlite3 blocks the
+   * event loop for the whole scan. Server request paths must use
+   * getSymbolCounts() (off-thread) or getCachedSymbolCounts() instead; the
+   * synchronous form is for build scripts and post-indexing logging where the
+   * DB is small or already hot.
    */
   getSymbolCount(): number {
+    if (this.symbolCountsCache) return this.symbolCountsCache.total;
     const stmt = this.getReadDb().prepare('SELECT COUNT(*) as count FROM symbols');
     return (stmt.get() as { count: number }).count;
   }
 
   /**
-   * Get symbol count by type
+   * Get symbol count by type. Same event-loop-blocking caveat as getSymbolCount().
    */
   getSymbolCountByType(): Record<string, number> {
-    const stmt = this.getReadDb().prepare(
-      `SELECT type, COUNT(*) as count FROM symbols GROUP BY type`
-    );
-    const rows = stmt.all() as { type: string; count: number }[];
-    const result: Record<string, number> = {};
-    for (const row of rows) result[row.type] = row.count;
-    return result;
+    if (this.symbolCountsCache) return this.symbolCountsCache.byType;
+    return this.computeSymbolCountsSync().byType;
+  }
+
+  /**
+   * Cheap emptiness probe — O(1) regardless of table size. Use this instead of
+   * getSymbolCount() === 0 on startup paths.
+   */
+  hasAnySymbols(): boolean {
+    const row = this.getReadDb()
+      .prepare('SELECT EXISTS(SELECT 1 FROM symbols) as present')
+      .get() as { present: number };
+    return row.present === 1;
+  }
+
+  /**
+   * Memoized counts if already computed this session, else null. Never scans —
+   * safe on any request path (health endpoints, status displays).
+   */
+  getCachedSymbolCounts(): SymbolCounts | null {
+    return this.symbolCountsCache;
+  }
+
+  /**
+   * Total + per-type symbol counts without blocking the event loop.
+   *
+   * The scan runs in a worker thread with its own read-only connection (WAL
+   * allows concurrent readers), so the MCP server keeps answering protocol
+   * requests while it runs. The result is memoized; concurrent callers share
+   * one in-flight computation. Falls back to a synchronous scan when the
+   * worker cannot start (:memory: DBs are per-connection and invisible to
+   * another thread; under tsx/vitest the compiled worker .js does not exist).
+   */
+  async getSymbolCounts(): Promise<SymbolCounts> {
+    if (this.symbolCountsCache) return this.symbolCountsCache;
+    if (this.symbolCountsPromise) return this.symbolCountsPromise;
+
+    const promise = this.computeSymbolCountsInWorker()
+      .catch(() => this.computeSymbolCountsSync())
+      .then(counts => {
+        // Only memoize if no write invalidated the computation while it ran.
+        if (this.symbolCountsPromise === promise) {
+          this.symbolCountsCache = counts;
+        }
+        return counts;
+      });
+    this.symbolCountsPromise = promise;
+    return promise;
+  }
+
+  /** Drop memoized counts — call after any write that changes symbol rows. */
+  private invalidateSymbolCounts(): void {
+    this.symbolCountsCache = null;
+    this.symbolCountsPromise = null;
+  }
+
+  private computeSymbolCountsSync(): SymbolCounts {
+    const rows = this.getReadDb()
+      .prepare(`SELECT type, COUNT(*) as count FROM symbols GROUP BY type`)
+      .all() as { type: string; count: number }[];
+    const byType: Record<string, number> = {};
+    let total = 0;
+    for (const row of rows) {
+      byType[row.type] = row.count;
+      total += row.count;
+    }
+    return { total, byType };
+  }
+
+  private computeSymbolCountsInWorker(): Promise<SymbolCounts> {
+    if (this.dbPath === ':memory:') {
+      return Promise.reject(new Error('in-memory DB is not visible to worker threads'));
+    }
+    return new Promise<SymbolCounts>((resolve, reject) => {
+      const worker = new Worker(new URL('./symbolCountsWorker.js', import.meta.url), {
+        workerData: { dbPath: this.dbPath },
+      });
+      worker.once('message', (msg: { ok: boolean; total?: number; byType?: Record<string, number>; error?: string }) => {
+        if (msg.ok) {
+          resolve({ total: msg.total!, byType: msg.byType! });
+        } else {
+          reject(new Error(msg.error));
+        }
+        void worker.terminate();
+      });
+      worker.once('error', reject);
+      // A promise settles only once — this covers "exited before messaging".
+      worker.once('exit', code => reject(new Error(`counts worker exited with code ${code}`)));
+    });
   }
 
   /**
@@ -1153,19 +1295,34 @@ export class XppSymbolIndex {
   }
 
   /**
-   * Index metadata from a directory
-   * Uses single transaction for all models - fastest approach with 8GB heap
+   * Index metadata from a directory.
+   *
+   * `modelNames` scopes the pass:
+   *   - omitted        → index every model directory found under `metadataPath`
+   *   - a model name   → index just that one model
+   *   - an array       → index exactly those models in a SINGLE pass
+   *
+   * Pass an array rather than calling this once per model: the FTS index is rebuilt from
+   * scratch ONCE at the end of the call (and the FTS triggers dropped/recreated once), both
+   * O(all symbols in the DB), so a per-model loop turns a scoped rebuild into N full-table
+   * rebuilds.
    */
-  async indexMetadataDirectory(metadataPath: string, modelName?: string): Promise<void> {
+  async indexMetadataDirectory(metadataPath: string, modelNames?: string | string[]): Promise<void> {
     const skipFts = process.env.SKIP_FTS === 'true';
     const resumable = process.env.RESUME === 'true';
 
-    const allModels = modelName ? [modelName] : await this.getModelDirectories(metadataPath);
+    const requested = modelNames === undefined
+      ? undefined
+      : (Array.isArray(modelNames) ? modelNames : [modelNames]);
+    const allModels = requested ?? await this.getModelDirectories(metadataPath);
 
-    // Sort largest models first — ensures Foundation (56K files) is indexed before any CI timeout
+    // Sort largest models first — ensures Foundation (56K files) is indexed before any CI timeout.
+    // Skip the size scan only when a single model was requested (nothing to order).
     let models = allModels;
-    if (!modelName) {
+    if (allModels.length > 1) {
+      log.detail(`Scanning ${allModels.length} model(s) to determine build order...`);
       models = this.sortModelsBySize(metadataPath, allModels);
+      log.detail(`Build order determined (largest model first: ${models[0] ?? '—'})`);
     }
 
     // Skip already-indexed models when resuming (RESUME=true)
@@ -1198,6 +1355,14 @@ export class XppSymbolIndex {
       modelIndex++;
       const modelPath = path.join(metadataPath, model);
       const modelStartTime = Date.now();
+      const progressPercent = ((modelIndex / models.length) * 100).toFixed(0);
+
+      // Show which model is being processed RIGHT NOW (before the slow transaction)
+      if (isCI()) {
+        log.detail(`[${progressPercent}%] indexing ${model}...`);
+      } else {
+        process.stdout.write(`\r      ${c.dim(`[${progressPercent}%]`)} ${model.padEnd(40)} ${c.dim('indexing...')}`);
+      }
 
       const tx = this.db.transaction(() => {
         const classesPath = path.join(modelPath, 'classes');
@@ -1263,6 +1428,33 @@ export class XppSymbolIndex {
         const deExtPath = path.join(modelPath, 'data-entity-extensions');
         if (fs.existsSync(deExtPath)) this.indexExtensions(deExtPath, model, 'data-entity-extension');
 
+        const viewExtPath = path.join(modelPath, 'view-extensions');
+        if (fs.existsSync(viewExtPath)) this.indexExtensions(viewExtPath, model, 'view-extension');
+
+        const queryExtPath = path.join(modelPath, 'query-extensions');
+        if (fs.existsSync(queryExtPath)) this.indexExtensions(queryExtPath, model, 'query-extension');
+
+        const mapExtPath = path.join(modelPath, 'map-extensions');
+        if (fs.existsSync(mapExtPath)) this.indexExtensions(mapExtPath, model, 'map-extension');
+
+        const menuExtPath = path.join(modelPath, 'menu-extensions');
+        if (fs.existsSync(menuExtPath)) this.indexExtensions(menuExtPath, model, 'menu-extension');
+
+        const secDutyExtPath = path.join(modelPath, 'security-duty-extensions');
+        if (fs.existsSync(secDutyExtPath)) this.indexExtensions(secDutyExtPath, model, 'security-duty-extension');
+
+        const secRoleExtPath = path.join(modelPath, 'security-role-extensions');
+        if (fs.existsSync(secRoleExtPath)) this.indexExtensions(secRoleExtPath, model, 'security-role-extension');
+
+        const miDisplayExtPath = path.join(modelPath, 'menu-item-display-extensions');
+        if (fs.existsSync(miDisplayExtPath)) this.indexExtensions(miDisplayExtPath, model, 'menu-item-display-extension');
+
+        const miActionExtPath = path.join(modelPath, 'menu-item-action-extensions');
+        if (fs.existsSync(miActionExtPath)) this.indexExtensions(miActionExtPath, model, 'menu-item-action-extension');
+
+        const miOutputExtPath = path.join(modelPath, 'menu-item-output-extensions');
+        if (fs.existsSync(miOutputExtPath)) this.indexExtensions(miOutputExtPath, model, 'menu-item-output-extension');
+
         // Services + service groups
         const servicesPath = path.join(modelPath, 'services');
         if (fs.existsSync(servicesPath)) this.indexServices(servicesPath, model);
@@ -1296,14 +1488,13 @@ export class XppSymbolIndex {
       tx();
 
       const modelDuration = ((Date.now() - modelStartTime) / 1000).toFixed(1);
-      const progressPercent = ((modelIndex / models.length) * 100).toFixed(0);
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
-      
+
       if (isCI()) {
-        // CI environment: use normal console.log (one line per model)
+        // CI environment: overwrite the "indexing..." line with the completed summary
         log.detail(`[${progressPercent}%] ${model} - ${modelDuration}s (${elapsed}s total)`);
       } else {
-        // Interactive terminal: overwrite same line for compact output
+        // Interactive terminal: overwrite the "indexing..." line with completed summary
         process.stdout.write(`\r      ${c.dim(`[${progressPercent}%]`)} ${model.padEnd(40)} ${c.dim(`${modelDuration}s (${elapsed}s total)`)}`);
       }
     }
@@ -2458,7 +2649,8 @@ export class XppSymbolIndex {
           type IN (
             'class-extension','table-extension','form-extension','enum-extension',
             'edt-extension','view-extension','query-extension','data-entity-extension',
-            'map-extension','menu-extension','security-role-extension','security-duty-extension'
+            'map-extension','menu-extension','security-role-extension','security-duty-extension',
+            'menu-item-display-extension','menu-item-action-extension','menu-item-output-extension'
           )
           OR name LIKE '%_Extension'
           OR name LIKE '%.%Extension'
@@ -2840,6 +3032,7 @@ export class XppSymbolIndex {
    * Clear all symbols
    */
   clear(): void {
+    this.invalidateSymbolCounts();
     this.db.exec('DELETE FROM symbols');
     this.db.exec('DELETE FROM table_relations');
     this.db.exec('DELETE FROM form_datasources');
@@ -2871,6 +3064,7 @@ export class XppSymbolIndex {
     // user-supplied data. The actual model name values flow through SQLite's
     // parameterized binding via .run(...modelNames), so there is no injection risk.
     const placeholders = modelNames.map(() => '?').join(',');
+    this.invalidateSymbolCounts();
 
     // Wrap all deletes in a single transaction so the database never ends up
     // in a partially-cleared state if one statement fails mid-way.
@@ -3204,7 +3398,10 @@ export class XppSymbolIndex {
     // labels_fts only indexes en-US rows. For any other language, skip straight to
     // LIKE-based search — attempting FTS would always produce 0 results and then
     // fall through to LIKE anyway, wasting two round-trips.
-    if (language !== 'en-US') {
+    // Compare case-insensitively: callers pass variants like 'en-us', and a
+    // false mismatch here degrades to a LIKE full scan of the labels table
+    // (200+ s on a production DB, synchronously blocking the event loop).
+    if (language.toLowerCase() !== 'en-us') {
       return this.searchLabelsLike(query, opts);
     }
 
@@ -3225,7 +3422,8 @@ export class XppSymbolIndex {
     let stmt = this.labelsStmtCache.get(stmtKey);
     if (!stmt) {
       let sql = `
-        SELECT l.label_id, l.label_file_id, l.model, l.language, l.text, l.comment, l.file_path,
+        SELECT l.label_id AS labelId, l.label_file_id AS labelFileId, l.model, l.language,
+               l.text, l.comment, l.file_path AS filePath,
                f.rank
         FROM labels_fts f
         JOIN labels l ON l.id = f.rowid
@@ -3267,7 +3465,8 @@ export class XppSymbolIndex {
     let stmt = this.labelsStmtCache.get(stmtKey);
     if (!stmt) {
       let sql = `
-        SELECT label_id, label_file_id, model, language, text, comment, file_path, 0 as rank
+        SELECT label_id AS labelId, label_file_id AS labelFileId, model, language,
+               text, comment, file_path AS filePath, 0 as rank
         FROM labels
         WHERE (text LIKE ? ESCAPE '\\' OR label_id LIKE ? ESCAPE '\\')
           AND LOWER(language) = LOWER(?)`;

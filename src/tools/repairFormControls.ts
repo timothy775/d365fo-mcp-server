@@ -20,6 +20,7 @@ import { resolvePatternExact } from '../knowledge/formPatterns/index.js';
 import { validateFormPatternXml } from '../validation/formPatternValidator.js';
 import { repairFormXml } from '../utils/formControlRepair.js';
 import { type ExpandFormOptions } from '../utils/formControlExpander.js';
+import { lookupSymbolNocase } from '../utils/symbolLookup.js';
 
 const RepairArgsSchema = z.object({
   xml: z.string().optional().describe('Complete AxForm XML to repair. Provide this OR formName/filePath.'),
@@ -111,9 +112,12 @@ export async function repairFormControlsTool(
   if (ds.table) {
     try {
       const db = context.symbolIndex.getReadDb();
+      // Canonicalize first — `parent_name = ? COLLATE NOCASE` cannot use
+      // idx_parent_type_name and scans all 360k field rows (180 s cold).
+      const canonical = lookupSymbolNocase(db, ds.table)?.name ?? ds.table;
       const rows = db
-        .prepare(`SELECT name FROM symbols WHERE type = 'field' AND parent_name = ? COLLATE NOCASE ORDER BY name`)
-        .all(ds.table) as Array<{ name: string }>;
+        .prepare(`SELECT name FROM symbols WHERE type = 'field' AND parent_name = ? ORDER BY name`)
+        .all(canonical) as Array<{ name: string }>;
       gridFields = rows
         .map((r) => r.name)
         .filter((n) => !['RecId', 'RecVersion', 'DataAreaId', 'Partition'].includes(n))

@@ -56,6 +56,7 @@ export interface BridgeTableInfo {
   saveDataPerCompany?: string;
   extends?: string;
   supportInheritance?: string;
+  instanceRelationType?: string;
   model?: string;
   fields: BridgeFieldInfo[];
   indexes: BridgeIndexInfo[];
@@ -494,19 +495,6 @@ export interface BridgeEnumValueParam {
   name: string;
   value: number;
   label?: string;
-}
-
-// ===========================
-// Delete result
-// ===========================
-
-export interface BridgeDeleteResult {
-  success: boolean;
-  objectType: string;
-  objectName: string;
-  model?: string;
-  filePath?: string;
-  error?: string;
 }
 
 // ===========================

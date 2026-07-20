@@ -9,6 +9,7 @@
  *
  *   d365fo-mcp                  interactive menu
  *   d365fo-mcp setup            first-time setup wizard (scenarios A–F)
+ *   d365fo-mcp config [section] change settings after setup
  *   d365fo-mcp doctor           environment & installation health check
  *   d365fo-mcp start [name]     run the root server or an instance
  *   d365fo-mcp update [--yes]   git pull + npm install + build (+ bridge/index)
@@ -16,6 +17,7 @@
  *   d365fo-mcp instance …       add | list | run | rebuild | upgrade
  */
 import { Command } from 'commander';
+import { configCommand } from './commands/config.js';
 import { doctorCommand } from './commands/doctor.js';
 import { indexCommand } from './commands/indexCmd.js';
 import { instanceAddCommand, instanceListCommand, instanceUpgradeCommand } from './commands/instance.js';
@@ -35,6 +37,13 @@ program
 program.command('setup')
   .description('First-time setup wizard (deployment scenarios A–F from docs/SETUP.md)')
   .action(setupCommand);
+
+program.command('config')
+  .argument('[section]', 'environment | workspace | naming | index | server | bridge | behavior | azure')
+  .option('-i, --instance <name>', 'edit an instance instead of the root server')
+  .option('--xpp-config', 'only repick the pinned XPP config (UDE)')
+  .description('Change settings after setup — every question explains itself (docs/CONFIGURATION.md)')
+  .action((section: string | undefined, opts: { instance?: string; xppConfig?: boolean }) => configCommand(section, opts));
 
 program.command('doctor')
   .description('Check the environment and installation; prints a fix for every problem')
@@ -86,6 +95,7 @@ async function mainMenu(): Promise<void> {
   const hasInstances = listInstances().length > 0;
   const action = await askSelect('What do you want to do?', [
     { value: 'setup', label: 'Setup', hint: 'first-time setup wizard' },
+    { value: 'config', label: 'Change settings', hint: 'edit one area of the configuration' },
     { value: 'doctor', label: 'Doctor', hint: 'check environment & installation' },
     { value: 'start', label: 'Start server', hint: hasInstances ? 'root or an instance' : 'root server' },
     { value: 'update', label: 'Update', hint: 'git pull + install + build' },
@@ -98,6 +108,7 @@ async function mainMenu(): Promise<void> {
   ]);
   switch (action) {
     case 'setup': return setupCommand();
+    case 'config': return configCommand(undefined, {});
     case 'doctor': return doctorCommand();
     case 'start': return startCommand(undefined);
     case 'update': return updateCommand({});

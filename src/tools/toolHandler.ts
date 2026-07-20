@@ -2,7 +2,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { XppServerContext } from '../types/context.js';
 import { getConfigManager } from '../utils/configManager.js';
-import { SERVER_MODE, LOCAL_TOOLS } from '../server/serverMode.js';
+import { SERVER_MODE, LOCAL_TOOLS, isToolAllowedInMode } from '../server/serverMode.js';
 import { searchUnifiedTool } from './searchUnified.js';
 import { batchGetInfoTool } from './batchGetInfo.js';
 import { getObjectInfoTool } from './getObjectInfo.js';
@@ -141,21 +141,42 @@ export function registerToolHandler(server: Server, context: XppServerContext): 
     // LOCAL_TOOLS need no DB (filesystem/in-memory config only) and skip the wait.
     if (context.dbReady && !LOCAL_TOOLS.has(toolName)) {
       const t0 = Date.now();
-      await context.dbReady;
+      // Race dbReady against a 55-second timeout so VS Code's ~60 s client
+      // timeout doesn't silently cancel the request. If the DB is still loading
+      // after 55 s, return an informative message instead of hanging forever.
+      const DB_WAIT_TIMEOUT_MS = 55_000;
+      const timeoutPromise = new Promise<'timeout'>(resolve =>
+        setTimeout(() => resolve('timeout'), DB_WAIT_TIMEOUT_MS),
+      );
+      const result = await Promise.race([
+        context.dbReady.then(() => 'ready' as const),
+        timeoutPromise,
+      ]);
+      if (result === 'timeout') {
+        return {
+          content: [{
+            type: 'text',
+            text: `⏳ The MCP server is still loading the X++ symbol database (takes 30–90 s on first start). Please retry the request in a few seconds.`,
+          }],
+          isError: true,
+        };
+      }
       const elapsed = Date.now() - t0;
       if (elapsed > 200) {
         console.error(`[toolHandler] ⏳ ${toolName}: DB was loading, waited ${elapsed} ms`);
       }
     }
 
-    // Enforce server mode: block local tools in read-only (Azure) mode, block search/analysis tools in write-only mode
-    if (SERVER_MODE === 'read-only' && LOCAL_TOOLS.has(toolName)) {
+    // Enforce server mode: block local tools in read-only (Azure) mode, block search/analysis
+    // tools in write-only mode. isToolAllowedInMode is the same predicate the ListTools filter
+    // uses (ALWAYS_TOOLS included), so a tool is refused here iff it is not advertised.
+    if (SERVER_MODE === 'read-only' && !isToolAllowedInMode(SERVER_MODE, toolName)) {
       return {
         content: [{ type: 'text', text: `⚠️ Tool '${toolName}' requires local Windows VM filesystem access and is not available in read-only mode.\n\nThis MCP server is running in read-only mode (Azure deployment).\nTo use file operations and workspace diagnostics, configure a local MCP server with MCP_SERVER_MODE=write-only in your .mcp.json.\n\nSee: https://github.com/dynamics365ninja/d365fo-mcp-server/blob/main/docs/MCP_CONFIG.md` }],
         isError: true,
       };
     }
-    if (SERVER_MODE === 'write-only' && !LOCAL_TOOLS.has(toolName)) {
+    if (SERVER_MODE === 'write-only' && !isToolAllowedInMode(SERVER_MODE, toolName)) {
       return {
         content: [{ type: 'text', text: `⚠️ Tool '${toolName}' is not available in write-only mode.\n\nThis local MCP server only handles file operations. Search and analysis tools are provided by the Azure MCP server.` }],
         isError: true,

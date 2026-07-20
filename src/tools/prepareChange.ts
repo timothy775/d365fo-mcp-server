@@ -23,6 +23,7 @@ import type { XppServerContext } from '../types/context.js';
 import { createProvenanceToken } from '../utils/provenanceStore.js';
 import { tryBridgeCocExtensions } from '../bridge/bridgeAdapter.js';
 import { getConfigManager } from '../utils/configManager.js';
+import { lookupSymbolNocase } from '../utils/symbolLookup.js';
 import { rankContext, renderRankedContext } from '../workspace/contextRanker.js';
 
 // Schema
@@ -54,17 +55,21 @@ export const prepareChangeArgsSchema = z.object({
 
 // Helpers
 
-/** Resolve object type from the symbol index. */
-async function resolveObjectType(
+/** Case-insensitive top-level object lookup — see src/utils/symbolLookup.ts. */
+function lookupObjectNocase(
   objectName: string,
   context: XppServerContext,
-): Promise<string | undefined> {
+): { name: string; type: string; model: string | null } | undefined {
+  return lookupSymbolNocase(context.symbolIndex.getReadDb(), objectName);
+}
+
+/** Resolve an object's canonical name + type from the symbol index. */
+async function resolveObject(
+  objectName: string,
+  context: XppServerContext,
+): Promise<{ name: string; type: string } | undefined> {
   try {
-    const db = context.symbolIndex.getReadDb();
-    const row = db
-      .prepare('SELECT type FROM symbols WHERE name = ? COLLATE NOCASE LIMIT 1')
-      .get(objectName) as { type: string } | undefined;
-    return row?.type;
+    return lookupObjectNocase(objectName, context);
   } catch {
     return undefined;
   }
@@ -78,10 +83,13 @@ async function fetchMethodSignature(
 ): Promise<string> {
   try {
     const db = context.symbolIndex.getReadDb();
+    // parent_name stays BINARY (canonical casing resolved upstream) so the
+    // probe uses idx_parent_type_name; NOCASE applies only to the method name
+    // within that object's few hundred method rows.
     const row = db.prepare(
       `SELECT signature, tags FROM symbols
-       WHERE parentName = ? AND name = ? AND type = 'method'
-       COLLATE NOCASE LIMIT 1`,
+       WHERE parent_name = ? AND type = 'method' AND name = ? COLLATE NOCASE
+       LIMIT 1`,
     ).get(objectName, methodName) as { signature: string; tags: string } | undefined;
     if (row) {
       const lines = [`Signature : ${row.signature ?? '(unavailable)'}`];
@@ -150,8 +158,8 @@ async function fetchEligibility(
     const db = context.symbolIndex.getReadDb();
     const row = db.prepare(
       `SELECT signature, tags FROM symbols
-       WHERE parentName = ? AND name = ? AND type = 'method'
-       COLLATE NOCASE LIMIT 1`,
+       WHERE parent_name = ? AND type = 'method' AND name = ? COLLATE NOCASE
+       LIMIT 1`,
     ).get(objectName, methodName) as { signature: string; tags: string } | undefined;
     if (row) {
       const tags = row.tags ?? '';
@@ -210,10 +218,7 @@ async function fetchNamingValidation(
     issues.push('❌ Name must start with an uppercase letter (PascalCase).');
   }
   try {
-    const db = context.symbolIndex.getReadDb();
-    const existing = db.prepare(
-      `SELECT name, model FROM symbols WHERE name = ? COLLATE NOCASE LIMIT 1`,
-    ).get(proposedName) as { name: string; model: string } | undefined;
+    const existing = lookupObjectNocase(proposedName, context);
     if (existing) {
       issues.push(`⚠️  Name "${existing.name}" already exists in model "${existing.model}".`);
     }
@@ -235,10 +240,14 @@ async function fetchPatterns(
 ): Promise<string> {
   try {
     const db = context.symbolIndex.getReadDb();
+    // INDEXED BY: with `description != ''` alone the planner scans and fetches
+    // every row of the type (77 s cold on a production DB). Forcing
+    // idx_type_name evaluates the LIKE against the index, so only name
+    // matches ever touch the table.
     const rows = db.prepare(
-      `SELECT name, description FROM symbols
-       WHERE type = ? AND description != ''
-       ORDER BY CASE WHEN name LIKE ? THEN 0 ELSE 1 END
+      `SELECT name, description FROM symbols INDEXED BY idx_type_name
+       WHERE type = ? AND name LIKE ? AND description != ''
+       ORDER BY LENGTH(name)
        LIMIT 3`,
     ).all(objectType ?? 'class', `%${objectName}%`) as Array<{ name: string; description: string }>;
     if (rows.length > 0) {
@@ -262,10 +271,13 @@ export async function prepareChangeTool(request: any, context: XppServerContext)
     };
   }
 
-  const { goal, objectName, methodName, objectType: explicitType, proposedName } = parsed.data;
+  const { goal, objectName: rawObjectName, methodName, objectType: explicitType, proposedName } = parsed.data;
 
-  // Resolve object type when not provided
-  const resolvedType = explicitType ?? await resolveObjectType(objectName, context);
+  // Resolve canonical casing + type from the index; downstream lookups use the
+  // canonical name so they can stay on BINARY-collated indexes.
+  const resolved = await resolveObject(rawObjectName, context);
+  const objectName = resolved?.name ?? rawObjectName;
+  const resolvedType = explicitType ?? resolved?.type;
 
   // Run all fact-gathering queries in parallel
   const [sigText, cocText, eligText, patternText, namingText] = await Promise.all([

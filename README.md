@@ -8,6 +8,9 @@
 [![Node.js](https://img.shields.io/badge/node-%3E%3D24.0.0-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0-blue.svg)](https://www.typescriptlang.org/)
 [![Tests](https://img.shields.io/badge/tests-1400%2B-brightgreen.svg)](docs/TESTING.md)
+<!-- coverage-badge:start -->
+[![Core coverage](https://img.shields.io/badge/core_coverage-79.1%25-yellow.svg)](eval/COVERAGE.md) [![Total coverage](https://img.shields.io/badge/total_coverage-48.1%25-lightgrey.svg)](eval/COVERAGE.md)
+<!-- coverage-badge:end -->
 
 *Grounded AI development for Dynamics 365 Finance & Operations — works with GitHub Copilot and Claude Code*
 
@@ -80,9 +83,19 @@ Pick your path:
 
 Full walkthrough with all scenarios: **[docs/QUICK_START.md](docs/QUICK_START.md)**
 
-### Interactive setup (recommended)
+### One-line install (recommended)
 
-After cloning and `npm install`, the management CLI walks you through everything else — scenario selection, C# bridge build, `.env` configuration, index build — and prints the `.mcp.json` block to paste:
+Paste into PowerShell on the D365FO VM — the installer checks (and installs, if missing) Node.js and Git, clones the repository, runs `npm install`, and starts the interactive setup wizard:
+
+```powershell
+irm https://raw.githubusercontent.com/dynamics365ninja/d365fo-mcp-server/main/install.ps1 | iex
+```
+
+Safe to re-run — an existing installation is updated instead of re-cloned. Configure via env vars when needed: `$env:D365FO_MCP_DIR` (install directory), `$env:D365FO_MCP_YES = '1'` (non-interactive), `$env:D365FO_MCP_NO_WIZARD = '1'` (skip the wizard).
+
+### Interactive setup
+
+Already cloned, or prefer to run the steps yourself? After `npm install`, the management CLI walks you through everything else — scenario selection, C# bridge build, configuration, index build — and prints the `.mcp.json` block to paste. Every answer is explained as it is asked and stored in `config/d365fo-mcp.json`; there is no `.env` to fill in (see **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** for the full setting reference):
 
 ```powershell
 git clone https://github.com/dynamics365ninja/d365fo-mcp-server.git K:\d365fo-mcp-server
@@ -92,7 +105,7 @@ npm run setup        # first-time setup wizard
 npm run doctor       # health check — verifies Node, build, index, bridge
 ```
 
-Day-to-day management runs through the same CLI (`npx d365fo-mcp` or `npm run cli --`): `start`, `update`, `index`, and `instance add/list/run/rebuild/upgrade` for multi-instance setups. Every command works non-interactively with arguments, or asks with predefined choices when run bare.
+Day-to-day management runs through the same CLI (`npx d365fo-mcp` or `npm run cli --`): `start`, `update`, `index`, `config` (change one area of the settings without re-running the wizard), and `instance add/list/run/rebuild/upgrade` for multi-instance setups. Every command works non-interactively with arguments, or asks with predefined choices when run bare.
 
 ### Manual setup
 
@@ -105,12 +118,14 @@ cd bridge\D365MetadataBridge; dotnet build -c Release; cd ..\..   # C# bridge �
 npm run build
 
 # Local only — build the metadata index (skip for hybrid)
-copy .env.example .env            # set PACKAGES_PATH, CUSTOM_MODELS
+npm run setup                     # writes config/d365fo-mcp.json (packages path, models, prefix…)
 npm run extract-metadata
 npm run build-database
 ```
 
-> **UDE / Power Platform Tools?** Run `npm run select-config` instead of editing `PACKAGES_PATH`.
+> Prefer to write the configuration yourself? `config/d365fo-mcp.json` is plain JSON — every key, default and
+> matching environment variable is listed in [docs/CONFIGURATION.md](docs/CONFIGURATION.md). A pre-existing
+> `.env` keeps working and is imported by the wizard.
 
 ### Connect GitHub Copilot
 
@@ -147,7 +162,7 @@ All options: **[docs/MCP_CONFIG.md](docs/MCP_CONFIG.md)**
 
 ```powershell
 claude mcp add-json --scope user d365fo-mcp-tools '{"type":"http","url":"https://your-server.azurewebsites.net/mcp/","alwaysLoad":true}'
-Copy-Item "K:\d365fo-mcp-server\CLAUDE.template.md" "C:\source\repos\CLAUDE.md"
+Copy-Item "K:\d365fo-mcp-server\.github\copilot-instructions.md" "C:\source\repos\CLAUDE.md"
 ```
 
 Stdio variant and troubleshooting: **[docs/CLAUDE_CODE_SETUP.md](docs/CLAUDE_CODE_SETUP.md)**
@@ -157,10 +172,10 @@ Stdio variant and troubleshooting: **[docs/CLAUDE_CODE_SETUP.md](docs/CLAUDE_COD
 Open the AI chat (Copilot Agent Mode / Claude Code) and ask:
 
 ```
-What tables contain "CustAccount" field?
+I'm tracing a posting issue — find every table (standard + ISV extensions) that carries the CustAccount field, so I can see where the value could get overwritten.
 ```
 
-A `search` tool call returning results from your codebase = you're connected.
+A `search` tool call returning results from **your** metadata — including your ISV models, which no model's training data has seen — means you're connected.
 
 ---
 
@@ -183,7 +198,7 @@ Deployment guide: [docs/SETUP_AZURE.md](docs/SETUP_AZURE.md) · CI/CD automation
 | [Claude Code setup](docs/CLAUDE_CODE_SETUP.md) | [Architecture](docs/ARCHITECTURE.md) | [Testing](docs/TESTING.md) |
 | [Usage examples](docs/USAGE_EXAMPLES.md) — real tool chains | [C# Bridge](docs/BRIDGE.md) | [Custom / ISV models](docs/CUSTOM_EXTENSIONS.md) |
 | | [Workspace detection](docs/WORKSPACE_DETECTION.md) | [SQLite vs Bridge](docs/SQLITE_DEPENDENCY.md) |
-| | [Backlog](docs/BACKLOG.md) — deferred work & ideas | |
+| | [Backlog](docs/BACKLOG.md) — deferred work & ideas | [Coverage](eval/COVERAGE.md) — what the badge counts |
 
 ## License
 

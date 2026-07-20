@@ -1380,7 +1380,7 @@ namespace D365MetadataBridge.Services
                         ?? throw new ArgumentException($"Table '{objectName}' not found");
                     var msi = GetModelSaveInfoForObject(_provider.Tables, objectName);
                     if (!SetAxTableProperty(obj, propertyPath, propertyValue))
-                        throw new ArgumentException($"Unknown AxTable property '{propertyPath}' — nothing was written. Supported: label, developerDocumentation, tableGroup, cacheLookup, clusteredIndex, primaryIndex, replacementKey, saveDataPerCompany, tableType, supportInheritance, extends, titleField1, titleField2.");
+                        throw new ArgumentException($"Unknown AxTable property '{propertyPath}' — nothing was written. Supported: label, developerDocumentation, tableGroup, cacheLookup, clusteredIndex, primaryIndex, replacementKey, saveDataPerCompany, tableType, supportInheritance, instanceRelationType, extends, titleField1, titleField2.");
                     ((IMetaTableProvider)_provider.Tables).Update(obj, msi);
                     return new { success = true, operation = "modify-property", objectType, objectName, propertyPath, propertyValue, api = "Update" };
                 }
@@ -2479,6 +2479,13 @@ namespace D365MetadataBridge.Services
                 case "supportinheritance":
                     tbl.SupportInheritance = ParseNoYes(value);
                     break;
+                case "instancerelationtype":
+                    // Table-inheritance discriminator: the value is the NAME of the
+                    // base table's int64 discriminator field (e.g. DirPartyTable sets
+                    // this to its own "InstanceRelationType" field). Requires
+                    // SupportInheritance=Yes on the same table.
+                    tbl.InstanceRelationType = value;
+                    break;
                 case "extends": tbl.Extends = value; break;
                 case "titlefield1": tbl.TitleField1 = value; break;
                 case "titlefield2": tbl.TitleField2 = value; break;
@@ -3415,13 +3422,17 @@ namespace D365MetadataBridge.Services
 
             // Strategy 3: infer model from on-disk file path
             //   Files live at {packagesPath}/{ModelName}/{ModelName}/Ax{Type}/{Name}.xml
-            //   We scan common AOT folders for the object name.
+            //   We scan common AOT folders for the object name. A union scan, not a
+            //   type mapping: every folder is tried, so AxClass already covers class
+            //   extensions ([ExtensionOf(...)] AxClass files) and an AxClassExtension
+            //   entry would only ever be a probe that cannot match — no package has
+            //   that folder (#693).
             string[] aotFolders = { "AxClass", "AxTable", "AxForm", "AxEnum", "AxEdt",
                                     "AxQuery", "AxView", "AxDataEntityView", "AxReport",
                                     "AxMenu", "AxMenuItemDisplay", "AxMenuItemAction", "AxMenuItemOutput",
                                     "AxSecurityPrivilege", "AxSecurityDuty", "AxSecurityRole",
-                                    "AxTableExtension", "AxFormExtension", "AxClassExtension",
-                                    "AxEnumExtension" };
+                                    "AxTableExtension", "AxFormExtension", "AxEnumExtension",
+                                    "AxEdtExtension", "AxDataEntityViewExtension" };
             try
             {
                 foreach (var packageDir in Directory.GetDirectories(_packagesPath))

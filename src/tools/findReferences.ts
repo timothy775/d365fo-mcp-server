@@ -12,9 +12,9 @@ import { tryBridgeReferences } from '../bridge/bridgeAdapter.js';
 
 const FindReferencesArgsSchema = z.object({
   // "name" is accepted as an alias for "targetName"
-  targetName: z.string().optional().describe('Name of the target. For a precise, type-scoped method where-used, qualify it as "Owner.method" (e.g. "SalesTable.initFromSalesQuotationTable") or pass an AOT path ("/Tables/SalesTable/Methods/initFromSalesQuotationTable"). A bare method name matches that name on every type.'),
+  targetName: z.string().optional().describe('Name of the target. For a precise, type-scoped method where-used, qualify it as "Owner.method" (e.g. "SalesTable.initFromSalesQuotationTable") or pass an AOT path ("/Tables/SalesTable/Methods/initFromSalesQuotationTable"). A bare method name matches that name on every type. For a label, pass the label id ("@WAX2194" or "@LabelFile:LabelId").'),
   name: z.string().optional().describe('Alias for targetName.'),
-  targetType: z.enum(['method', 'class', 'table', 'field', 'enum', 'all']).optional().describe('Type of the target to search for'),
+  targetType: z.enum(['method', 'class', 'table', 'field', 'enum', 'edt', 'form', 'query', 'view', 'report', 'label', 'all']).optional().describe('Type of the target to search for'),
   ownerName: z.string().optional().describe('Declaring table/class/form that owns the method, when targetName is just the bare method name. Used to scope the where-used to a single type (matches Visual Studio xref).'),
   scope: z.enum(['all', 'workspace', 'standard', 'custom']).optional().default('all').describe('Search scope'),
   limit: z.number().optional().default(50).describe('Maximum results to return'),
@@ -37,6 +37,22 @@ const TYPE_TO_XREF_CONTAINER: Record<string, string> = {
   map: 'Maps',
   'data-entity': 'DataEntityViews',
 };
+
+/**
+ * Detect and normalize a label where-used target. Labels live in the xref DB
+ * under "/Labels/@<ref>", where <ref> is either the old concatenated form
+ * ("@WAX2194") or the newer "@LabelFile:LabelId" form
+ * ("@ApplicationPlatform:AbortButtonText"). Both forms are stored verbatim in
+ * the xref Names table, so we match exactly and never convert between them.
+ * Returns the "/Labels/@…" path, or null when the target isn't a label.
+ */
+export function resolveLabelTarget(targetName: string, targetType?: string): string | null {
+  const t = targetName.trim();
+  if (/^\/Labels\//i.test(t)) return t;                          // already an xref label path
+  if (t.startsWith('@')) return `/Labels/${t}`;                  // "@WAX2194" / "@ApplicationPlatform:Foo"
+  if (targetType === 'label') return `/Labels/@${t}`;            // bare id + explicit targetType
+  return null;
+}
 
 /**
  * Resolve which xref containers an owner name exists as (Tables/Classes/…).
@@ -84,6 +100,37 @@ export async function findReferencesTool(request: CallToolRequest, context: XppS
     const { symbolIndex } = context;
     const { targetType, scope, limit, includeContext, ownerName } = args;
     const targetName = (args.targetName ?? args.name)!; // accept "name" alias
+
+    // LABEL where-used — route to the xref bridge with a "/Labels/@…" path.
+    // Every referencing object type (tables, forms, EDTs, enums, reports, menu
+    // items, security objects, views, maps, …) comes back — most label uses are
+    // declarative metadata (captions, field/EDT labels), not X++ code.
+    const labelPath = resolveLabelTarget(targetName, targetType);
+    if (labelPath) {
+      const outcome = await tryBridgeReferences(context.bridge, labelPath, limit, targetName, 'label');
+      if (outcome.status === 'ok') return outcome.result;
+      if (outcome.status === 'empty') {
+        return { content: [{ type: 'text', text:
+          `# References to label \`${targetName}\`\n\n**Total References Found:** 0\n` +
+          `_Source: C# bridge (DYNAMICSXREFDB)_\n\n` +
+          `No references found. Verify the label id is written exactly as stored — ` +
+          `\`@WAX2194\` (old format) or \`@LabelFile:LabelId\` (new format, e.g. \`@ApplicationPlatform:AbortButtonText\`). ` +
+          `Use labels(action="search") to find the exact id from label text.\n` }] };
+      }
+      // error / unavailable — label where-used needs the xref DB. The name-only
+      // FTS scan can't see declarative metadata references, so don't fake a
+      // partial answer by falling through to it.
+      const why = outcome.status === 'unavailable'
+        ? 'The cross-reference bridge is not available in this server mode.'
+        : 'The cross-reference query failed — check the bridge log.';
+      return { content: [{ type: 'text', text:
+        `# References to label \`${targetName}\`\n\n` +
+        `⚠️ Label where-used requires the cross-reference database (DYNAMICSXREFDB), available when ` +
+        `the server runs in full mode with a UDE/local xref DB configured. ${why}\n\n` +
+        `Unlike code symbols, label references live mostly in declarative metadata (form captions, ` +
+        `field/EDT labels, menu-item captions, …) that is not in the text index — so there is no ` +
+        `reliable fallback.\n` }], isError: outcome.status === 'error' };
+    }
 
     // Target shape: AOT path ("/Tables/SalesTable/Methods/initFromSalesQuotationTable"),
     // owner-qualified ("SalesTable.initFromSalesQuotationTable"), or bare name.

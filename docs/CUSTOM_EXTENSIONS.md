@@ -5,7 +5,7 @@ This guide explains how to configure, extract, and index your custom X++ models 
 ## What this covers
 
 - How to tell the server which models are "yours" (vs. standard Microsoft models)
-- How to extract only custom models (fast, a few minutes) vs. everything (slow, 1–2 h)
+- How to extract only custom models (fast, a few minutes) vs. everything (a full rebuild)
 - How the `search(scope="extensions")` mode filters to your code only
 - Multi-instance setups where each client has its own custom models
 
@@ -33,6 +33,8 @@ EXTRACT_MODE=custom
 ```
 
 **How custom model detection works:** Everything listed in `CUSTOM_MODELS` is treated as your code. All other models are automatically classified as Microsoft standard. The server never requires you to maintain a static list of Microsoft model names — the list auto-adapts to new D365FO versions.
+
+**What to put in `CUSTOM_MODELS`:** list **every** non-Microsoft model you have source for — both the models you author into **and** any source-ISV models you only extend (never modify) — not just the ones you actively change. The classification drives `search(scope="extensions")`, workspace context ranking, form-pattern mining (ISV objects must stay out of the mined *standard* pattern catalog), and the Azure custom-build pipeline — all of which want ISV code classified as custom. Binary-only ISV models (shipped as compiled DLLs with no object XML) are never indexed, so there is no need to list them.
 
 ### UDE (Unified Developer Experience / Power Platform Tools)
 
@@ -68,7 +70,9 @@ npm run extract-metadata
 npm run build-database
 ```
 
-Takes 1–2 hours (standard Microsoft models are large). Only needed when Microsoft standard model content changes.
+Only needed when Microsoft standard model content changes (e.g. after a D365FO upgrade).
+
+Timing depends heavily on the environment. On a single-label-language instance (~176 models, ~1.2M symbols) a full `all` rebuild is roughly 10–15 minutes end to end. It grows substantially when many label languages are installed, because label indexing re-indexes every Microsoft label across all languages — so a large multi-language installation can take much longer. The dominant cost is label breadth, not X++ model size.
 
 ---
 

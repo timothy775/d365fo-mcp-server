@@ -42,6 +42,9 @@ namespace D365MetadataBridge.Models
         [JsonPropertyName("supportInheritance")]
         public string? SupportInheritance { get; set; }
 
+        [JsonPropertyName("instanceRelationType")]
+        public string? InstanceRelationType { get; set; }
+
         [JsonPropertyName("model")]
         public string? Model { get; set; }
 
@@ -762,30 +765,6 @@ namespace D365MetadataBridge.Models
         public bool Found { get; set; }
     }
 
-    // ========================
-    // Delete result model
-    // ========================
-
-    public class DeleteResultModel
-    {
-        [JsonPropertyName("success")]
-        public bool Success { get; set; }
-
-        [JsonPropertyName("objectType")]
-        public string ObjectType { get; set; } = "";
-
-        [JsonPropertyName("objectName")]
-        public string ObjectName { get; set; } = "";
-
-        [JsonPropertyName("model")]
-        public string? Model { get; set; }
-
-        [JsonPropertyName("filePath")]
-        public string? FilePath { get; set; }
-
-        [JsonPropertyName("error")]
-        public string? Error { get; set; }
-    }
 
     // ========================
     // Batch operation models

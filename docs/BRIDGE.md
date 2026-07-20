@@ -104,7 +104,6 @@ All use the Read → Modify → `IMetaXxxProvider.Update()` pattern.
 
 | Method | Purpose |
 |---|---|
-| `deleteObject` | `IMetaXxxProvider.Delete()` for class, table, enum, edt |
 | `batchModify` | Multiple operations in one call |
 | `getCapabilities` | Reports supported types + operations |
 | `discoverFormPatterns` | Analyzes form design patterns |
@@ -180,7 +179,7 @@ The TypeScript client transparently recovers from transient bridge failures:
 | Cause | Fix |
 |---|---|
 | Bridge not built | Run `dotnet build -c Release` in `bridge/D365MetadataBridge/` |
-| Wrong `packagePath` | Fix `D365FO_PACKAGE_PATH` env var in `.mcp.json` to point to `PackagesLocalDirectory` |
+| Wrong `packagePath` | Fix `D365FO_PACKAGE_PATH` env var (in `.env` for traditional, or `.mcp.json` env block) to point to `PackagesLocalDirectory` |
 | Missing DLLs | Verify `{D365FO_PACKAGE_PATH}/bin/` contains `Microsoft.Dynamics.AX.Metadata.*.dll` |
 | Running on Linux/macOS | Expected — bridge is Windows-only, server uses SQLite fallback |
 
@@ -214,6 +213,28 @@ feed, add the public source explicitly:
 
 ```powershell
 dotnet build -c Release -p:D365BinPath="<FrameworkDirectory>\bin" --source https://api.nuget.org/v3/index.json
+```
+
+### Metamodel version mismatch
+
+The bridge compiles against the `Microsoft.Dynamics.*` assemblies in `D365BinPath` but loads
+them at runtime from whichever environment it is pointed at. On a machine spanning several
+platform builds those can differ. Every build stamps assembly version `7.0.0.0` and varies
+only in file version, so the CLR cannot tell them apart — a mismatched metamodel loads
+silently and surfaces much later as `MissingMethodException` or `TypeLoadException`.
+
+The bridge logs both versions at startup and warns when they diverge:
+
+```
+[INFO] Metamodel runtime: 7.0.7690.155 (K:\AosService\PackagesLocalDirectory\bin\...)
+[WARN] Metamodel version mismatch: built against 7.0.7996.33 (from ...), loading 7.0.7690.155.
+```
+
+The warning is informational — differing builds are usually compatible. If metadata calls do
+fail with the exceptions above, rebuild against that environment:
+
+```powershell
+dotnet build -c Release -p:D365BinPath="<that environment>\bin"
 ```
 
 ### Output shows SQLite data, not bridge data

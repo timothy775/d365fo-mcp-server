@@ -6,11 +6,13 @@
  * prevents the server from working at all), 0 otherwise.
  */
 import * as fs from 'node:fs';
-import { resolve } from 'node:path';
+import { relative, resolve } from 'node:path';
 import { p } from '../ui.js';
+import { settingByPath } from '../../config/settings.js';
 import { isWindows, paths, repoRoot } from '../context.js';
-import { readEnvValue } from '../envFile.js';
 import { listInstances } from '../instances.js';
+import { conflictingLegacyValues, readPath, readSetting, type SettingsStore } from '../settingsStore.js';
+import { instanceTarget, rootTarget, type Target } from '../target.js';
 import { isXppConfigStale, listXppConfigs, xppConfigDir } from '../xppConfig.js';
 
 type Severity = 'ok' | 'warn' | 'fail' | 'info';
@@ -33,10 +35,8 @@ function report(r: CheckResult): void {
   else p.log.info(line);
 }
 
-function checkDb(envFile: string | null, defaultDb: string, label: string): CheckResult {
-  const configured = envFile ? readEnvValue(envFile, 'DB_PATH') : null;
-  const base = envFile ? resolve(envFile, '..') : repoRoot;
-  const dbPath = configured ? resolve(base, configured) : defaultDb;
+function checkDb(store: SettingsStore, defaultDb: string, label: string): CheckResult {
+  const dbPath = readPath(store, settingByPath('index.dbPath')!, defaultDb);
   if (!fs.existsSync(dbPath)) {
     return {
       severity: 'warn',
@@ -54,6 +54,41 @@ function checkDb(envFile: string | null, defaultDb: string, label: string): Chec
     };
   }
   return { severity: 'ok', message: `${label}: database OK (${mb} MB)` };
+}
+
+/** The structured config the setup wizard writes — absent means never set up. */
+function checkConfig(target: Target, label: string): CheckResult {
+  if (fs.existsSync(target.store.configPath)) {
+    const shown = relative(repoRoot, target.store.configPath) || target.store.configPath;
+    return { severity: 'ok', message: `${label}: configuration present (${shown})` };
+  }
+  if (target.envFile) {
+    return {
+      severity: 'warn',
+      message: `${label}: no d365fo-mcp.json — running on the legacy .env only`,
+      fix: 'npm run setup — imports the .env and writes the structured config',
+    };
+  }
+  return {
+    severity: 'info',
+    message: `${label}: not configured — fine when everything comes from the .mcp.json env block`,
+    fix: 'npm run setup',
+  };
+}
+
+/** A legacy .env that disagrees with the config is a trap: the config wins. */
+function legacyEnvChecks(target: Target, label: string): CheckResult[] {
+  if (!target.envFile || !fs.existsSync(target.store.configPath)) return [];
+  const conflicts = conflictingLegacyValues(target.store);
+  if (conflicts.length === 0) {
+    return [{ severity: 'info', message: `${label}: legacy .env present but not contradicting the config` }];
+  }
+  return [{
+    severity: 'warn',
+    message: `${label}: .env and d365fo-mcp.json disagree — the JSON config wins:\n` +
+      conflicts.map(c => `   ${c.setting.env}: .env=${c.envValue} · config=${c.configValue}`).join('\n'),
+    fix: 'delete the stale keys from .env (or the whole file once the config is complete)',
+  }];
 }
 
 async function probeHealth(port: number, label: string): Promise<CheckResult> {
@@ -92,12 +127,12 @@ export async function doctorCommand(): Promise<void> {
     : { severity: 'fail', message: 'dist/index.js missing — server not built', fix: 'npm run build' });
 
   // Configuration
-  emit(fs.existsSync(paths.rootEnv)
-    ? { severity: 'ok', message: 'Root .env present' }
-    : { severity: 'info', message: 'No root .env — fine when config comes from .mcp.json env or instances/', fix: 'd365fo-mcp setup' });
+  const root = rootTarget();
+  emit(checkConfig(root, 'Root'));
+  for (const r of legacyEnvChecks(root, 'Root')) emit(r);
 
   // Database (root)
-  emit(checkDb(fs.existsSync(paths.rootEnv) ? paths.rootEnv : null, paths.defaultDb, 'Root'));
+  emit(checkDb(root.store, paths.defaultDb, 'Root'));
 
   // C# bridge: the only write path; Windows-only.
   if (isWindows) {
@@ -120,8 +155,11 @@ export async function doctorCommand(): Promise<void> {
   if (instances.length > 0) {
     p.log.step(`Instances (${instances.length})`);
     for (const inst of instances) {
-      emit(checkDb(inst.envFile, resolve(inst.dir, 'data', 'xpp-metadata.db'), `Instance '${inst.name}'`));
-      if (isWindows && isXppConfigStale(inst.envFile)) {
+      const target = instanceTarget(inst);
+      emit(checkConfig(target, `Instance '${inst.name}'`));
+      for (const r of legacyEnvChecks(target, `Instance '${inst.name}'`)) emit(r);
+      emit(checkDb(target.store, resolve(inst.dir, 'data', 'xpp-metadata.db'), `Instance '${inst.name}'`));
+      if (isWindows && isXppConfigStale(target.store)) {
         emit({
           severity: 'warn',
           message: `Instance '${inst.name}': XPP_CONFIG_NAME no longer resolves — UDE upgraded since configuration`,
@@ -132,8 +170,8 @@ export async function doctorCommand(): Promise<void> {
   }
 
   // Live servers
-  const rootPortRaw = readEnvValue(paths.rootEnv, 'PORT');
-  const rootPort = rootPortRaw && /^\d+$/.test(rootPortRaw) ? parseInt(rootPortRaw, 10) : 8080;
+  const configuredPort = readSetting(root.store, settingByPath('server.port')!);
+  const rootPort = typeof configuredPort === 'number' ? configuredPort : 8080;
   emit(await probeHealth(rootPort, 'Server'));
   for (const inst of instances) {
     if (inst.port !== null) emit(await probeHealth(inst.port, `Instance '${inst.name}'`));
