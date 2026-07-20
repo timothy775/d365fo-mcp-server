@@ -25,7 +25,7 @@ function formatDefault(setting: Setting): string {
 }
 
 function escapeCell(text: string): string {
-  return text.replace(/\|/g, '\\|');
+  return text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
 }
 
 function exampleValue(setting: Setting): unknown {
