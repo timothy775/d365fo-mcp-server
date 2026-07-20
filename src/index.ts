@@ -278,10 +278,10 @@ async function initializeServices() {
         const modelNames = modelNamesStr.split(',').map(m => m.trim()).filter(Boolean);
         log.detail(`model names: ${modelNames.join(', ')}`);
 
-        for (const modelName of modelNames) {
-          log.detail(`indexing ${modelName}` + glyph.ellipsis);
-          await symbolIndex.indexMetadataDirectory(METADATA_PATH, modelName);
-        }
+        // Single pass over all requested models — the FTS index is rebuilt once at the
+        // end of the call, so looping per model would repeat a full-table rebuild.
+        log.detail(`indexing ${modelNames.join(', ')}` + glyph.ellipsis);
+        await symbolIndex.indexMetadataDirectory(METADATA_PATH, modelNames);
 
         log.ok(`Indexed ${symbolIndex.getSymbolCount().toLocaleString('en-US')} symbols from ${modelNames.length} model(s)`);
       } catch {

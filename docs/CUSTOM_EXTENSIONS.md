@@ -5,7 +5,7 @@ This guide explains how to configure, extract, and index your custom X++ models 
 ## What this covers
 
 - How to tell the server which models are "yours" (vs. standard Microsoft models)
-- How to extract only custom models (fast, a few minutes) vs. everything (slow, 1–2 h)
+- How to extract only custom models (fast, a few minutes) vs. everything (a full rebuild)
 - How the `search(scope="extensions")` mode filters to your code only
 - Multi-instance setups where each client has its own custom models
 
@@ -70,7 +70,9 @@ npm run extract-metadata
 npm run build-database
 ```
 
-Takes 1–2 hours (standard Microsoft models are large). Only needed when Microsoft standard model content changes.
+Only needed when Microsoft standard model content changes (e.g. after a D365FO upgrade).
+
+Timing depends heavily on the environment. On a single-label-language instance (~176 models, ~1.2M symbols) a full `all` rebuild is roughly 10–15 minutes end to end. It grows substantially when many label languages are installed, because label indexing re-indexes every Microsoft label across all languages — so a large multi-language installation can take much longer. The dominant cost is label breadth, not X++ model size.
 
 ---
 

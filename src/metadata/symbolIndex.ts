@@ -1295,18 +1295,31 @@ export class XppSymbolIndex {
   }
 
   /**
-   * Index metadata from a directory
-   * Uses single transaction for all models - fastest approach with 8GB heap
+   * Index metadata from a directory.
+   *
+   * `modelNames` scopes the pass:
+   *   - omitted        → index every model directory found under `metadataPath`
+   *   - a model name   → index just that one model
+   *   - an array       → index exactly those models in a SINGLE pass
+   *
+   * Pass an array rather than calling this once per model: the FTS index is rebuilt from
+   * scratch ONCE at the end of the call (and the FTS triggers dropped/recreated once), both
+   * O(all symbols in the DB), so a per-model loop turns a scoped rebuild into N full-table
+   * rebuilds.
    */
-  async indexMetadataDirectory(metadataPath: string, modelName?: string): Promise<void> {
+  async indexMetadataDirectory(metadataPath: string, modelNames?: string | string[]): Promise<void> {
     const skipFts = process.env.SKIP_FTS === 'true';
     const resumable = process.env.RESUME === 'true';
 
-    const allModels = modelName ? [modelName] : await this.getModelDirectories(metadataPath);
+    const requested = modelNames === undefined
+      ? undefined
+      : (Array.isArray(modelNames) ? modelNames : [modelNames]);
+    const allModels = requested ?? await this.getModelDirectories(metadataPath);
 
-    // Sort largest models first — ensures Foundation (56K files) is indexed before any CI timeout
+    // Sort largest models first — ensures Foundation (56K files) is indexed before any CI timeout.
+    // Skip the size scan only when a single model was requested (nothing to order).
     let models = allModels;
-    if (!modelName) {
+    if (allModels.length > 1) {
       log.detail(`Scanning ${allModels.length} model(s) to determine build order...`);
       models = this.sortModelsBySize(metadataPath, allModels);
       log.detail(`Build order determined (largest model first: ${models[0] ?? '—'})`);
