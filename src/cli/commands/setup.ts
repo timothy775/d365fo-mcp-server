@@ -101,7 +101,11 @@ async function configureEnvironment(store: SettingsStore, scenario: Scenario): P
     envType = 'ude';
     writeSetting(store, setting('environment.type'), 'ude');
   } else {
-    envType = String(await askSetting(store, setting('environment.type')));
+    // Preselect what this machine looks like: XPP config files are what
+    // distinguishes a UDE box from a classic AOSService VM.
+    envType = String(await askSetting(store, setting('environment.type'), {
+      initial: listXppConfigs().length > 0 ? 'ude' : 'traditional',
+    }));
   }
 
   if (envType === 'ude') {

@@ -115,6 +115,10 @@ export function migrateLegacyEnv(store: SettingsStore): Setting[] {
     if (!cleaned) continue;
     const parsed = parseValue(setting, cleaned);
     if (parsed === undefined || (Array.isArray(parsed) && parsed.length === 0)) continue;
+    // A value the registry no longer offers (the retired
+    // D365FO_DEV_ENVIRONMENT_TYPE=auto, say) is left behind rather than carried
+    // into the new config, where it would show up as an unpickable choice.
+    if (setting.type === 'enum' && !setting.choices?.some(c => c.value === parsed)) continue;
     setAtPath(store.config, setting.path, parsed);
     migrated.push(setting);
   }

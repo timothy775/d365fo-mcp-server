@@ -5,8 +5,8 @@
  * for "I just need to change the prefix" or "the UDE was upgraded, repoint the
  * XPP config". Same registry, same descriptions, writes the same JSON.
  */
-import { SECTIONS, settingByPath, settingsInSection, type SectionId } from '../../config/settings.js';
-import { askSecrets, askSettings } from '../settingsPrompt.js';
+import { SECTIONS, settingByPath, settingsInSection, type SectionId, type Setting } from '../../config/settings.js';
+import { askSecrets, askSetting, askSettings } from '../settingsPrompt.js';
 import { readSetting, saveStore, writeSetting, type SettingsStore } from '../settingsStore.js';
 import { pickTarget } from '../target.js';
 import { askSelect, p } from '../ui.js';
@@ -68,13 +68,22 @@ export async function configCommand(
     return;
   }
 
-  // The XPP config is a picker, not free text — offer it first when it applies.
-  if (section === 'environment' && readSetting(store, envTypeSetting) !== 'traditional' && listXppConfigs().length > 0) {
-    await selectXppConfig(store);
+  const skip = new Set<Setting>();
+  if (section === 'environment') {
+    // The environment type drives the rest of the section, and the XPP config is
+    // a picker rather than free text — both need more than the generic walk.
+    await askSetting(store, envTypeSetting, {
+      initial: listXppConfigs().length > 0 ? 'ude' : 'traditional',
+    });
+    skip.add(envTypeSetting);
+    if (readSetting(store, envTypeSetting) === 'ude' && listXppConfigs().length > 0) {
+      await selectXppConfig(store);
+      skip.add(xppConfigNameSetting);
+    }
   }
 
   await askSettings(store, [
-    ...settingsInSection(section, 'basic').filter(s => s !== xppConfigNameSetting),
+    ...settingsInSection(section, 'basic').filter(s => !skip.has(s)),
     ...settingsInSection(section, 'advanced'),
   ]);
   await askSecrets(store, [section]);

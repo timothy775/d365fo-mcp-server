@@ -115,10 +115,9 @@ export const SETTINGS: Setting[] = [
     label: 'Development environment type',
     description:
       'Classic AOSService VM ("traditional") or Unified Developer Experience / Power Platform Tools ("ude"). ' +
-      '"auto" picks UDE when XPP config files exist in %LOCALAPPDATA%\\Microsoft\\Dynamics365\\XPPConfig.',
-    default: 'auto',
+      'The wizard preselects the one it detects — UDE when XPP config files exist in ' +
+      '%LOCALAPPDATA%\\Microsoft\\Dynamics365\\XPPConfig. Left unset, the server falls back to that same detection.',
     choices: [
-      { value: 'auto', hint: 'detect from the presence of XPP config files' },
       { value: 'traditional', hint: 'classic AOSService VM with PackagesLocalDirectory' },
       { value: 'ude', hint: 'Unified Developer Experience / Power Platform Tools' },
     ],

@@ -88,7 +88,9 @@ export async function instanceAddCommand(name: string | undefined, portArg: stri
   // Same questions as the root wizard, scoped to this instance's config file.
   const store = openInstanceStore(inst.dir);
   p.log.step('D365FO environment — where this instance reads its X++ packages');
-  const envType = String(await askSetting(store, envTypeSetting));
+  const envType = String(await askSetting(store, envTypeSetting, {
+    initial: listXppConfigs().length > 0 ? 'ude' : 'traditional',
+  }));
   if (envType === 'ude') {
     await selectXppConfig(store);
   } else {

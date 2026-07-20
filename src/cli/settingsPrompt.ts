@@ -10,7 +10,7 @@ import { c } from '../utils/terminalUi.js';
 import { multiselect, type Option } from '@clack/prompts';
 import type { Setting, SectionId } from '../config/settings.js';
 import { SECTIONS, settingsInSection } from '../config/settings.js';
-import { initialText, readSettingOrDefault, writeSetting, type SettingsStore } from './settingsStore.js';
+import { initialText, readSetting, readSettingOrDefault, writeSetting, type SettingsStore } from './settingsStore.js';
 import { askConfirm, askSelect, askText, ensure, p } from './ui.js';
 
 /** "Label\n  description" — the uniform question layout. */
@@ -39,7 +39,11 @@ function wrapText(text: string, width: number, indent: string): string {
  * Ask for one setting and persist the answer.
  * Returns the value that ended up in the store (or undefined when skipped).
  */
-export async function askSetting(store: SettingsStore, setting: Setting, opts?: { required?: boolean }): Promise<unknown> {
+export async function askSetting(
+  store: SettingsStore,
+  setting: Setting,
+  opts?: { required?: boolean; initial?: string },
+): Promise<unknown> {
   const required = opts?.required ?? setting.required ?? false;
 
   // Secrets are never echoed and never pre-filled; an empty answer keeps
@@ -61,7 +65,11 @@ export async function askSetting(store: SettingsStore, setting: Setting, opts?: 
     }
     case 'enum': {
       const choices = setting.choices ?? [];
-      const current = String(readSettingOrDefault(store, setting) ?? choices[0]?.value ?? '');
+      // A stored value wins over the caller's suggestion — re-running setup must
+      // not silently move an installation onto a freshly detected default.
+      const current = String(
+        readSetting(store, setting) ?? opts?.initial ?? setting.default ?? choices[0]?.value ?? '',
+      );
       const value = await askSelect(
         message(setting),
         choices.map(choice => ({ value: choice.value, label: choice.value, hint: choice.hint })),

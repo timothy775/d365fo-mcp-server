@@ -175,6 +175,17 @@ describe('settings store', () => {
     expect(migrated).not.toContain('AZURE_STORAGE_CONNECTION_STRING');
   });
 
+  it('leaves behind an enum value the registry no longer offers', () => {
+    // D365FO_DEV_ENVIRONMENT_TYPE=auto was retired; the server still falls back
+    // to detection when the setting is absent, so dropping it is lossless.
+    const envFile = writeEnv('D365FO_DEV_ENVIRONMENT_TYPE=auto\nEXTENSION_PREFIX=ISV_\n');
+    const store = openStore(tmp, envFile);
+    const migrated = migrateLegacyEnv(store).map(s => s.env);
+
+    expect(migrated).toEqual(['EXTENSION_PREFIX']);
+    expect(getAtPath(store.config, 'environment.type')).toBeUndefined();
+  });
+
   it('reports keys where a legacy .env disagrees with the config', () => {
     const envFile = writeEnv('EXTENSION_PREFIX=OLD\nPORT=3005\n');
     const store = openStore(tmp, envFile);
