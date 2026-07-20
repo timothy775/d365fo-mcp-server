@@ -14,10 +14,11 @@ const __cliDir = dirname(fileURLToPath(import.meta.url));
 export const repoRoot = resolve(__cliDir, '../..');
 
 export const paths = {
+  /** Legacy configuration file — still read as a fallback, no longer written. */
   rootEnv: resolve(repoRoot, '.env'),
-  envExample: resolve(repoRoot, '.env.example'),
+  rootConfig: resolve(repoRoot, 'config', 'd365fo-mcp.json'),
+  rootSecrets: resolve(repoRoot, 'config', 'secrets.json'),
   instancesDir: resolve(repoRoot, 'instances'),
-  instanceTemplate: resolve(repoRoot, 'instances', '.env.template'),
   distEntry: resolve(repoRoot, 'dist', 'index.js'),
   defaultDb: resolve(repoRoot, 'data', 'xpp-metadata.db'),
   defaultLabelsDb: resolve(repoRoot, 'data', 'xpp-metadata-labels.db'),

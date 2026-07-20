@@ -1,22 +1,31 @@
 /**
- * Shared dotenv loader with ENV_FILE support.
+ * Configuration loader: structured JSON config first, legacy .env as fallback.
  *
- * Allows running multiple server instances (or build scripts) from a single
- * source folder by pointing each instance at its own .env file:
+ * `npm run setup` writes config/d365fo-mcp.json (+ config/secrets.json); this
+ * module projects it onto process.env so every consumer keeps reading plain
+ * environment variables. Precedence, highest first:
  *
- *   ENV_FILE=.env.alpha node dist/index.js
- *   ENV_FILE=.env.beta  npm run build-database
+ *   1. the real environment — shell, .mcp.json env{} block, Azure App Settings
+ *   2. a .env named explicitly via ENV_FILE (an instance or eval profile the
+ *      caller picked on purpose)
+ *   3. config/d365fo-mcp.json + config/secrets.json
+ *   4. the ambient repo-root .env (pre-wizard installations keep working)
  *
- * When ENV_FILE is not set, falls back to the repo-root .env file.
+ * Multiple instances run from one source folder by pointing each at its own
+ * config or .env file:
+ *
+ *   D365FO_CONFIG=instances/alpha/d365fo-mcp.json node dist/index.js
+ *   ENV_FILE=.env.alpha  npm run build-database
  *
  * Relative paths in DB_PATH, LABELS_DB_PATH, and METADATA_PATH are resolved
- * relative to the .env file's directory, so instance .env files can use
+ * relative to the config (or .env) file's directory, so instance files can use
  * portable paths like ./data/xpp-metadata.db that survive folder renames.
  */
 
 import dotenv from 'dotenv';
 import { dirname, isAbsolute, resolve } from 'path';
 import { fileURLToPath } from 'url';
+import { resolveConfigFiles, toEnvRecord } from '../config/configFile.js';
 
 /** Env vars whose relative paths should resolve from the .env file directory. */
 const PATH_VARS = ['DB_PATH', 'LABELS_DB_PATH', 'METADATA_PATH'] as const;
@@ -34,6 +43,10 @@ export function loadEnv(callerImportMetaUrl: string): void {
   const envPath = process.env.ENV_FILE
     ? resolve(process.env.ENV_FILE)
     : resolve(callerDir, '../.env');
+
+  // Everything already present is a real environment variable (shell, .mcp.json
+  // env{} block, App Settings) and outranks both files below.
+  const fromRealEnv = new Set(Object.keys(process.env));
 
   // quiet: true suppresses dotenv v17's stdout logging, which would otherwise
   // corrupt the MCP JSON-RPC channel in stdio mode (writes to process.stdout
@@ -53,6 +66,20 @@ export function loadEnv(callerImportMetaUrl: string): void {
     if (val && !isAbsolute(val)) {
       process.env[key] = resolve(envDir, val);
     }
+  }
+
+  // The structured config wins over an ambient .env — the wizard writes it, so a
+  // stale .env left over from a manual installation must not silently override
+  // the answers the user just gave. Two things still outrank it: the real
+  // environment, and a .env the caller asked for by name (ENV_FILE=.env.eval
+  // picks that file deliberately, and no D365FO_CONFIG was given to go with it).
+  const pinnedByEnvFile = process.env.ENV_FILE && !process.env.D365FO_CONFIG
+    ? new Set(Object.keys(result.parsed ?? {}))
+    : new Set<string>();
+
+  const files = resolveConfigFiles(envDir);
+  for (const [key, value] of Object.entries(toEnvRecord(files))) {
+    if (!fromRealEnv.has(key) && !pinnedByEnvFile.has(key)) process.env[key] = value;
   }
 
   // Bridge the public D365FO_-prefixed setting name to the internal

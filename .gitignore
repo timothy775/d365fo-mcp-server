@@ -12,7 +12,11 @@ yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
 
-# Environment variables
+# Configuration written by `npm run setup` (machine-specific, may hold secrets)
+config/d365fo-mcp.json
+config/secrets.json
+
+# Environment variables (legacy configuration, still read as a fallback)
 .env
 .env.eval
 .env.local
