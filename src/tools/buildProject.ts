@@ -1,14 +1,18 @@
 import { execFile, spawn } from 'child_process';
 import util from 'util';
 import path from 'path';
-import { access, writeFile, readFile, unlink, appendFile, readdir } from 'fs/promises';
+import { access, writeFile, readFile, unlink, appendFile, readdir, stat } from 'fs/promises';
 import { openSync as openSyncFs, closeSync as closeSyncFs } from 'fs';
 import os from 'os';
 import crypto from 'crypto';
 import { getConfigManager } from '../utils/configManager.js';
+import { describePackagesRootScan, findPackagesRoot } from '../utils/packagesRoot.js';
+import { findFrameworkTool } from '../utils/frameworkBin.js';
 import { forceReleaseLock } from '../utils/operationLocks.js';
 import { lookupErrorFix } from './d365foErrorHelp.js';
 import { generateRuntimeMetadata } from './generateMetadata.js';
+import { compileModelLabels, type CompileLabelsResult } from './compileLabels.js';
+import { readModuleReferences } from '../metadata/modelDescriptor.js';
 
 const execFileAsync = util.promisify(execFile);
 
@@ -184,6 +188,83 @@ function logFilePath(targetModel: string, queueIndex: number, customPackagesPath
   return path.join(os.tmpdir(), `d365build_log_${hash}.log`);
 }
 
+/**
+ * Written BY the build, so always newer than it — scanning them would make
+ * every cached result look stale and rebuild forever.
+ */
+const BUILD_OUTPUT_DIRS = new Set(['bin', 'xppmetadata']);
+
+/**
+ * True when any source file in the model package changed after `since` (epoch
+ * ms). Short-circuits on the first hit, so the "something changed" case — the
+ * one that must not be missed — is also the fast one.
+ *
+ * On a blown time budget or an unreadable tree it returns TRUE. Both failure
+ * directions are not equal: a needless rebuild costs minutes, while a wrongly
+ * reused result reports a compile that never happened.
+ */
+export async function hasSourceChangesSince(
+  modelDir: string,
+  since: number,
+  budgetMs = 3000,
+): Promise<boolean> {
+  const deadline = Date.now() + budgetMs;
+  const stack: string[] = [modelDir];
+  while (stack.length > 0) {
+    if (Date.now() > deadline) return true;
+    const dir = stack.pop()!;
+    let entries;
+    try {
+      // The directory's OWN mtime is what catches a DELETION: removing a class
+      // leaves no file to stat, but the parent's mtime moves. Without this a
+      // deleted source reads as "unchanged" and the stale result comes back.
+      if ((await stat(dir)).mtimeMs > since) return true;
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      // Unreadable subtree: can't prove it is unchanged.
+      return true;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (dir === modelDir && BUILD_OUTPUT_DIRS.has(entry.name.toLowerCase())) continue;
+        stack.push(full);
+        continue;
+      }
+      try {
+        if ((await stat(full)).mtimeMs > since) return true;
+      } catch { /* vanished mid-scan — ignore */ }
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether a finished build result still describes what is on disk.
+ *
+ * A finished state left on disk used to be returned verbatim to the NEXT
+ * call, which then read as that call's own result. Observed 2026-07-28 while
+ * capturing the L2-coc-inherited-method golden: a wrapper was edited to a
+ * deliberately uncompilable signature, and the following build reported
+ * "✅ Build succeeded / Errors: 0" with byte-identical phase timings from the
+ * previous run. The poisoned file was written at 15:05:46; the build log had
+ * last been touched at 15:05:04 — 42 s EARLIER. Nothing had been compiled.
+ *
+ * That is the worst failure this tool can have: pass@build is the gate the
+ * whole eval loop leans on, and a green that describes a tree nobody compiled
+ * is indistinguishable from a real one without checking log timestamps by hand.
+ */
+export async function finishedResultStillDescribesDisk(
+  state: BuildJobState,
+  targetModel: string,
+  customPackagesPath: string,
+): Promise<boolean> {
+  if (!state.endTime) return false; // no idea when it finished — do not trust it
+  const endedAt = new Date(state.endTime).getTime();
+  if (!Number.isFinite(endedAt)) return false;
+  return !(await hasSourceChangesSince(path.join(customPackagesPath, targetModel), endedAt));
+}
+
 async function readBuildState(targetModel: string, customPackagesPath: string): Promise<BuildJobState | null> {
   try {
     const raw = await readFile(stateFilePath(targetModel, customPackagesPath), 'utf-8');
@@ -303,35 +384,7 @@ async function getModelFromRnrproj(projectPath: string): Promise<string | null> 
 }
 
 async function findXppcExe(microsoftPackagesPath: string | null): Promise<string | null> {
-  const candidates: string[] = [];
-
-  if (microsoftPackagesPath) {
-    candidates.push(path.join(microsoftPackagesPath, 'bin', 'xppc.exe'));
-  }
-
-  // Search AppData for any installed UDE version
-  const appDataLocal = process.env.LOCALAPPDATA ||
-    path.join(process.env.USERPROFILE || 'C:\\Users\\Default', 'AppData', 'Local');
-  const d365Base = path.join(appDataLocal, 'Microsoft', 'Dynamics365');
-  try {
-    const versions = await readdir(d365Base);
-    for (const ver of versions.sort().reverse()) {
-      candidates.push(path.join(d365Base, ver, 'PackagesLocalDirectory', 'bin', 'xppc.exe'));
-    }
-  } catch { /* ignore */ }
-
-  // CHE well-known locations
-  candidates.push(
-    'C:\\AOSService\\PackagesLocalDirectory\\bin\\xppc.exe',
-    'K:\\AOSService\\PackagesLocalDirectory\\bin\\xppc.exe',
-    'J:\\AOSService\\PackagesLocalDirectory\\bin\\xppc.exe',
-    'I:\\AOSService\\PackagesLocalDirectory\\bin\\xppc.exe',
-  );
-
-  for (const c of candidates) {
-    try { await access(c); return c; } catch { /* next */ }
-  }
-  return null;
+  return findFrameworkTool(microsoftPackagesPath, 'xppc.exe');
 }
 
 /**
@@ -353,21 +406,14 @@ async function resolveBuildQueue(
     if (visited.has(modelName.toLowerCase())) return;
     visited.add(modelName.toLowerCase());
 
-    // Read descriptor
-    const descriptorPath = path.join(customPackagesPath, modelName, 'Descriptor', `${modelName}.xml`);
-    let content: string;
-    try {
-      content = await readFile(descriptorPath, 'utf-8');
-    } catch {
+    // Shared reader: resolve_references reads the same element to decide type
+    // visibility, and one parser keeps the two from drifting apart.
+    const refs = await readModuleReferences(customPackagesPath, modelName);
+    if (refs === null) {
       // No descriptor — still include this model but can't follow its deps
       order.push(modelName);
       return;
     }
-
-    // Extract all <d2p1:string> entries inside <ModuleReferences>
-    const refs = Array.from(content.matchAll(/<d2p1:string>\s*([^<\s]+)\s*<\/d2p1:string>/g))
-      .map(m => m[1].trim())
-      .filter(Boolean);
 
     // Visit custom/ISV dependencies first (skip Microsoft standard models)
     for (const ref of refs) {
@@ -391,6 +437,28 @@ async function killOrphanedBuildProcesses(): Promise<void> {
   await execFileAsync('taskkill', ['/F', '/IM', 'xppc.exe'], { timeout: 10_000, windowsHide: true })
     .then(({ stdout }) => console.error(`[build_d365fo_project] killed xppc.exe: ${stdout.trim() || '(no output)'}`))
     .catch(() => {});
+}
+
+/**
+ * The label-compilation outcome as it should appear at the top of the build
+ * log. A clean run is silent — nothing was wrong, and a note per build would
+ * only crowd out the compiler output. A FAILED run is loud and says what it
+ * costs, because the symptom it produces (`BPErrorUnknownLabel` on a label
+ * that plainly exists, plus the `BPUnusedStrFmtArgument` warnings that cascade
+ * from it) otherwise reads as broken source code.
+ */
+export function describeLabelCompilation(modelName: string, result: CompileLabelsResult): string {
+  if (result.success) {
+    return result.skipped ? '' : `✅ Labels compiled for ${modelName} — ${result.message}\n\n`;
+  }
+  return [
+    `⚠️ Label compilation FAILED for ${modelName} — ${result.message}`,
+    `   Labels stay uncompiled, so references to them can be reported as`,
+    `   BPErrorUnknownLabel (with BPUnusedStrFmtArgument cascading from them)`,
+    `   even though the source is correct. Fix labelc before trusting those.`,
+    '',
+    '',
+  ].join('\n');
 }
 
 /** Passed through the entire queue so the close handler can launch the next model without re-resolving paths. */
@@ -455,7 +523,24 @@ async function spawnXppcForState(ctx: XppcBuildContext, state: BuildJobState): P
 
   await buildLog('INFO', `xppc.exe args: ${xppcArgs.join(' ')}`);
 
-  const logFd = openSyncFs(state.logFile, 'w');
+  // Labels first — see compileLabels.ts. xppc and xppbp resolve @Model:Id
+  // against the compiled resource assembly, so compiling labels afterwards
+  // would leave THIS build reporting unknown-label errors for labels that are
+  // perfectly well defined, and only clear them on the next one.
+  const labelResult = await compileModelLabels(microsoftPackagesPath, customPackagesPath, modelName, !!useFullBuild);
+  const labelHeader = describeLabelCompilation(modelName, labelResult);
+  if (labelResult.skipped && labelResult.success) {
+    await buildLog('INFO', `labelc skipped for ${modelName}: ${labelResult.message}`);
+  } else if (labelResult.success) {
+    await buildLog('INFO', `labelc compiled ${modelName} labels: ${labelResult.message}`);
+  } else {
+    await buildLog('WARN', `labelc did not compile ${modelName} labels: ${labelResult.message}`);
+  }
+
+  // Truncate the log with the label outcome, then append xppc's output to it,
+  // so a single tail read shows the whole build in the order it happened.
+  await writeFile(state.logFile, labelHeader, 'utf-8');
+  const logFd = openSyncFs(state.logFile, 'a');
 
   const child = spawn(xppcExe, xppcArgs, {
     detached: false,
@@ -677,12 +762,30 @@ async function renderFinishedBuildResult(
   return {
     content: [{
       type: 'text',
-      text: `${statusIcon} (${finalState.tool}, ${buildMode}, ${duration}s)\n\nModel: ${targetModel}\n\n` +
+      text: `${statusIcon} (${finalState.tool}, ${buildMode}, ${duration}s)\n\nModel: ${targetModel}\n` +
+        incrementalScopeCaveat(succeeded, !!finalState.fullBuild) + '\n' +
         (structured ? `${structured}\n\n--- Raw log ---\n` : '') +
         `${logContent || '(no output)'}`,
     }],
     ...((!succeeded) ? { isError: true } : {}),
   };
+}
+
+/**
+ * What a clean INCREMENTAL build does and does not prove.
+ *
+ * `-incremental` is documented by xppc as "Compile only the elements that have
+ * been changed", so an element it considers unchanged is never recompiled and
+ * its metadata errors are never reported. A model with real metadata errors
+ * therefore builds green incrementally — which is how a run scored pass@build
+ * on a model that does not actually compile. Only a full build sees everything,
+ * so a green incremental result has to say what it covered.
+ */
+function incrementalScopeCaveat(succeeded: boolean, fullBuild: boolean): string {
+  if (!succeeded || fullBuild) return '';
+  return '\nℹ️ Incremental: only CHANGED elements were compiled. A clean result here is not proof ' +
+    'the model compiles — unchanged elements with metadata errors are not revisited. ' +
+    'Use fullBuild: true before trusting a green build (e.g. to score a task as done).\n';
 }
 
 // ---------------------------------------------------------------------------
@@ -757,16 +860,9 @@ export const buildProjectTool = async (params: any, _context: any) => {
     if (!customPackagesPath)    customPackagesPath    = await configManager.getCustomPackagesPath();
     if (!microsoftPackagesPath) microsoftPackagesPath = await configManager.getMicrosoftPackagesPath() ?? configManager.getPackagePath();
 
-    // Priority 3: CHE fallback — probe well-known PackagesLocalDirectory locations
+    // Priority 3: CHE fallback — scan the machine's drives for AosService
     if (!microsoftPackagesPath) {
-      for (const candidate of [
-        'C:\\AOSService\\PackagesLocalDirectory',
-        'K:\\AOSService\\PackagesLocalDirectory',
-        'J:\\AOSService\\PackagesLocalDirectory',
-        'I:\\AOSService\\PackagesLocalDirectory',
-      ]) {
-        try { await access(candidate); microsoftPackagesPath = candidate; break; } catch { /* next */ }
-      }
+      microsoftPackagesPath = findPackagesRoot();
     }
 
     // In CHE, custom and Microsoft packages share the same PackagesLocalDirectory
@@ -783,7 +879,7 @@ export const buildProjectTool = async (params: any, _context: any) => {
             `Microsoft packages path: ${microsoftPackagesPath ?? '(not found)'}`,
             ``,
             `For UDE: ensure an XPP config is present at %LOCALAPPDATA%\\Microsoft\\Dynamics365\\XPPConfig\\`,
-            `For CHE: ensure PackagesLocalDirectory exists at C:\\AOSService\\PackagesLocalDirectory (or K:\\, J:\\, I:\\)`,
+            `For CHE: ensure <drive>:\\AosService\\PackagesLocalDirectory exists. ${describePackagesRootScan()}`,
           ].join('\n'),
         }],
         isError: true,
@@ -905,9 +1001,33 @@ export const buildProjectTool = async (params: any, _context: any) => {
         }
       }
 
-      // Build finished — return result and clear state
+      // Build finished. It may be this caller collecting the result they were
+      // handed off ("call again to collect"), or a fresh build request that
+      // merely arrived after an old state file. Only the disk can tell them
+      // apart: if sources changed since the build ended, the cached result
+      // describes a tree that no longer exists and must not be replayed as
+      // this call's success.
+      const stillCurrent = await finishedResultStillDescribesDisk(
+        existingState, targetModel, customPackagesPath,
+      );
       await clearBuildState(targetModel, customPackagesPath);
-      return await renderFinishedBuildResult(existingState, targetModel);
+      if (stillCurrent) {
+        const result = await renderFinishedBuildResult(existingState, targetModel);
+        // Say plainly that nothing was compiled just now, so a reader can never
+        // mistake a collected result for a fresh one.
+        const collected =
+          `ℹ️  Collected the result of the build that ended ${existingState.endTime} ` +
+          `(no source changes since — nothing was recompiled by this call).\n\n`;
+        return {
+          ...result,
+          content: [{ type: 'text', text: collected + (result.content[0]?.text ?? '') }],
+        };
+      }
+      // Sources moved on — fall through and build for real.
+      await buildLog(
+        'WARN',
+        `discarding finished build state for ${targetModel}: sources changed after ${existingState.endTime}`,
+      );
       } // end else (buildModeChanged)
     }
 

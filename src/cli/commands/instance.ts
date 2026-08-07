@@ -7,7 +7,9 @@
 import * as fs from 'node:fs';
 import { resolve } from 'node:path';
 import { settingByPath, settingsInSection } from '../../config/settings.js';
-import { createInstance, getInstance, listInstances, suggestPort } from '../instances.js';
+import { pinBridgeExe } from '../bridgePath.js';
+import { maybePrepareCopilotInstructions } from '../copilotFiles.js';
+import { createInstance, getInstance, listInstances, normalizeInstanceLayout, suggestPort } from '../instances.js';
 import { mcpJsonNote, placementNote, stdioServer } from '../mcpJson.js';
 import { selectXppConfig } from './config.js';
 import { askAdvanced, askSetting, askSettings } from '../settingsPrompt.js';
@@ -15,6 +17,7 @@ import { openInstanceStore, readPath, readSetting, saveStore, writeSetting } fro
 import { instanceTarget } from '../target.js';
 import { askConfirm, askSelect, askText, p } from '../ui.js';
 import { listXppConfigs, XppConfig, xppConfigDir } from '../xppConfig.js';
+import { findPackagesRoot } from '../../utils/packagesRoot.js';
 import { rebuildIndex } from './indexCmd.js';
 
 const dbPathSetting = settingByPath('index.dbPath')!;
@@ -87,6 +90,9 @@ export async function instanceAddCommand(name: string | undefined, portArg: stri
 
   // Same questions as the root wizard, scoped to this instance's config file.
   const store = openInstanceStore(inst.dir);
+  // Instances share the one bridge binary this machine built, and need to be
+  // told where it is for the same reason the root config does.
+  pinBridgeExe(store);
   p.log.step('D365FO environment — where this instance reads its X++ packages');
   const envType = String(await askSetting(store, envTypeSetting, {
     initial: listXppConfigs().length > 0 ? 'ude' : 'traditional',
@@ -94,17 +100,28 @@ export async function instanceAddCommand(name: string | undefined, portArg: stri
   if (envType === 'ude') {
     await selectXppConfig(store);
   } else {
-    await askSetting(store, settingByPath('environment.packagePath')!, { required: true });
+    await askSetting(store, settingByPath('environment.packagePath')!, {
+      required: true,
+      initial: findPackagesRoot() ?? undefined,
+    });
     await askSetting(store, settingByPath('environment.customModels')!, { required: true });
   }
   p.log.step('Workspace and naming');
   await askSetting(store, settingByPath('workspace.modelName')!);
   await askSetting(store, settingByPath('workspace.path')!);
+  await askSetting(store, settingByPath('workspace.solutionsPath')!);
   await askSettings(store, settingsInSection('naming', 'basic'));
   p.log.step('Metadata index');
   await askSettings(store, settingsInSection('index', 'basic'));
   await askAdvanced(store, ['environment', 'workspace', 'index', 'server', 'bridge', 'behavior']);
   saveStore(store);
+
+  // Copilot needs the instructions file just as much as it needs .mcp.json,
+  // and an instance is somebody's only setup run — asking here is the only
+  // chance scenario F gets.
+  await maybePrepareCopilotInstructions(
+    String(readSetting(store, settingByPath('workspace.solutionsPath')!) ?? ''),
+  );
 
   // Both ways to reach this instance: the IDE spawning it over stdio with its
   // own config, or an HTTP client on the port it was given.
@@ -171,6 +188,16 @@ export async function instanceUpgradeCommand(name: string | undefined): Promise<
       }),
     );
     inst = getInstance(picked)!;
+  }
+
+  // The one command that already rewrites an instance's configuration is also
+  // where an instance left in the old instances/<name>/config/ layout gets out
+  // of it — every doc and script names the top-level path, so an instance that
+  // keeps the old one silently ignores a D365FO_CONFIG copied from them.
+  const moved = normalizeInstanceLayout(inst);
+  if (moved.length > 0) {
+    p.log.success(`Moved out of the old config/ layout: ${moved.join(', ')}`);
+    inst = getInstance(inst.name)!;
   }
 
   const store = openInstanceStore(inst.dir);

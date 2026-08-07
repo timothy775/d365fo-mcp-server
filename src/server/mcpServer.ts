@@ -4,6 +4,7 @@
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { VERSION } from '../version.js';
 import {
   ListToolsRequestSchema,
   InitializedNotificationSchema,
@@ -99,7 +100,7 @@ export function createXppMcpServer(context: XppServerContext): Server {
   const server = new Server(
     {
       name: `d365fo-mcp-server${serverNameSuffix}`,
-      version: '1.0.0',
+      version: VERSION,
     },
     {
       capabilities: {

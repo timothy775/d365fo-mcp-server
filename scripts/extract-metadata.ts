@@ -3,16 +3,18 @@
  * Extracts X++ metadata from D365 F&O PackagesLocalDirectory
  */
 
-import { loadEnv } from '../src/utils/loadEnv.js';
-loadEnv(import.meta.url);
+// Load configuration onto process.env — MUST stay the first import (see src/bootstrapEnv.ts).
+import '../src/bootstrapEnv.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import * as os from 'os';
 import { fileURLToPath } from 'url';
 import { XppMetadataParser, buildClassExtensionRecord } from '../src/metadata/xmlParser.js';
 import type { XppClassInfo } from '../src/metadata/types.js';
 import { isCustomModel as checkIsCustomModel, getCustomModels } from '../src/utils/modelClassifier.js';
 import { writeExtractManifest } from '../src/utils/extractManifest.js';
 import { XppConfigProvider } from '../src/utils/xppConfigProvider.js';
+import { defaultPackagesRoot } from '../src/utils/packagesRoot.js';
 import { box, kv, sectionTitle, statusLine, spread, c, glyph, log, shortPath, supportsUnicode, sanitize } from '../src/utils/terminalUi.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -31,7 +33,7 @@ if (!supportsUnicode) {
   wrapWrite(process.stderr);
 }
 
-const PACKAGES_PATH = process.env.D365FO_PACKAGE_PATH || 'C:\\AOSService\\PackagesLocalDirectory';
+const PACKAGES_PATH = process.env.D365FO_PACKAGE_PATH || defaultPackagesRoot();
 const OUTPUT_PATH = process.env.METADATA_PATH || './extracted-metadata';
 const CUSTOM_MODELS_PATH = process.env.CUSTOM_MODELS_PATH; // Optional: separate path for custom extensions
 
@@ -43,6 +45,40 @@ const EXTRACT_MODE = process.env.EXTRACT_MODE || 'all';
 
 // Use shared utility for checking custom models
 const isCustomModel = checkIsCustomModel;
+
+/**
+ * Decide how one model relates to "custom" for this extract run.
+ *
+ * `isCustom` — the classification recorded in the extract manifest and used for
+ * sourcePath normalisation. On UDE (customRoot set) it is PATH-based: a model is custom
+ * iff it lives under the custom root, matching the root-level package scan. Name-based
+ * isCustomModel() is only the fallback for traditional environments with no custom root.
+ * Using isCustomModel() on UDE would drop ISV models that ship source under the custom
+ * root — their names match neither D365FO_MODEL_NAME nor EXTENSION_PREFIX — leaving a
+ * `custom` build scoped to just the configured model (#711).
+ *
+ * `narrowedByConfig` — an explicit CUSTOM_MODELS list still NARROWS a custom-only run on
+ * UDE. The path rule decides what CAN be custom; a hand-maintained list decides how much
+ * of it to extract. The root-level scan ignores CUSTOM_MODELS entirely once customRoot is
+ * set, so without this an operator who set CUSTOM_MODELS="Contoso*" would have no way to
+ * scope a refresh to their own models and would re-extract every ISV under the root.
+ * Only wildcard patterns reach here — exact names take the MODELS_TO_EXTRACT path, which
+ * leaves FILTER_MODE at 'all'.
+ *
+ * Exported so the classification can be tested without running an extraction; the
+ * `customModels` parameter exists so tests need not depend on import-time env capture.
+ */
+export function classifyCustom(
+  rootPath: string,
+  customRoot: string | null,
+  modelName: string,
+  customModels: string[] = CUSTOM_MODELS,
+): { isCustom: boolean; narrowedByConfig: boolean } {
+  const isCustom = customRoot ? rootPath === customRoot : isCustomModel(modelName);
+  const narrowedByConfig =
+    !!customRoot && customModels.length > 0 && !isCustomModel(modelName);
+  return { isCustom, narrowedByConfig };
+}
 
 /**
  * Strip machine-specific prefix so that sourcePath stored in JSON is relative
@@ -161,6 +197,81 @@ function formatDecimal(value: number): string {
 function formatPercent(current: number, total: number): string {
   if (total <= 0) return '0.00%';
   return `${formatDecimal((current / total) * 100)}%`;
+}
+
+function parsePositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return fallback;
+  const normalized = Math.floor(parsed);
+  return normalized > 0 ? normalized : fallback;
+}
+
+function parsePositiveFloatEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function hostParallelism(): number {
+  try {
+    return typeof os.availableParallelism === 'function'
+      ? os.availableParallelism()
+      : os.cpus().length;
+  } catch {
+    return 4;
+  }
+}
+
+const DEFAULT_FILE_CONCURRENCY = Math.max(2, Math.min(24, hostParallelism()));
+const FILE_CONCURRENCY = parsePositiveIntEnv('EXTRACT_FILE_CONCURRENCY', DEFAULT_FILE_CONCURRENCY);
+const MAX_FILE_CONCURRENCY = parsePositiveIntEnv('EXTRACT_FILE_CONCURRENCY_MAX', Math.max(FILE_CONCURRENCY, 24));
+const HEAVY_MULTIPLIER = parsePositiveFloatEnv('EXTRACT_HEAVY_MULTIPLIER', 1);
+const LIGHT_MULTIPLIER = parsePositiveFloatEnv('EXTRACT_LIGHT_MULTIPLIER', 1.25);
+
+type WorkloadProfile = 'heavy' | 'light';
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function getAdaptiveConcurrency(fileCount: number, profile: WorkloadProfile): number {
+  if (fileCount <= 0) return 1;
+
+  let concurrency = FILE_CONCURRENCY;
+
+  // Large batches in big models can saturate disk and parser CPU; reduce fanout.
+  if (fileCount >= 5000) {
+    concurrency = Math.floor(concurrency * 0.55);
+  } else if (fileCount >= 2500) {
+    concurrency = Math.floor(concurrency * 0.7);
+  } else if (fileCount >= 1000) {
+    concurrency = Math.floor(concurrency * 0.85);
+  } else if (fileCount <= 200) {
+    // Small batches benefit from a slight boost to hide FS latency.
+    concurrency = Math.ceil(concurrency * 1.15);
+  }
+
+  const multiplier = profile === 'light' ? LIGHT_MULTIPLIER : HEAVY_MULTIPLIER;
+  concurrency = Math.floor(concurrency * multiplier);
+
+  return clamp(concurrency, 1, Math.min(MAX_FILE_CONCURRENCY, fileCount));
+}
+
+async function forEachWithConcurrency<T>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  if (items.length === 0) return;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async (_unused, workerIndex) => {
+    for (let i = workerIndex; i < items.length; i += concurrency) {
+      await worker(items[i]);
+    }
+  });
+  await Promise.all(workers);
 }
 
 /** The model-level values every extractor needs, threaded through AOT_EXTRACTORS. */
@@ -284,11 +395,10 @@ async function countXmlFilesInDirectory(dirPath: string): Promise<number> {
 
 /** Expected XML file count for a model, over exactly the folders the extractors read. */
 export async function countModelXmlFiles(dirsByLowerName: Map<string, string>): Promise<number> {
-  let total = 0;
-  for (const dirPath of resolveDirs(dirsByLowerName, EXTRACTED_AOT_DIRS)) {
-    total += await countXmlFilesInDirectory(dirPath);
-  }
-  return total;
+  const totals = await Promise.all(
+    resolveDirs(dirsByLowerName, EXTRACTED_AOT_DIRS).map(dirPath => countXmlFilesInDirectory(dirPath)),
+  );
+  return totals.reduce((sum, count) => sum + count, 0);
 }
 
 async function extractMetadata() {
@@ -329,6 +439,10 @@ async function extractMetadata() {
 
   console.log(kv('Source', metadataRoots.join(', ')));
   console.log(kv('Output', shortPath(OUTPUT_PATH)));
+  console.log(kv('File workers', formatCount(FILE_CONCURRENCY)));
+  console.log(kv('File workers max', formatCount(MAX_FILE_CONCURRENCY)));
+  console.log(kv('Heavy multiplier', formatDecimal(HEAVY_MULTIPLIER)));
+  console.log(kv('Light multiplier', formatDecimal(LIGHT_MULTIPLIER)));
   
   if (EXTRACT_MODE === 'custom') {
     if (MODELS_TO_EXTRACT.length > 0) {
@@ -534,20 +648,23 @@ async function extractMetadata() {
         continue;
       }
 
+      const { isCustom, narrowedByConfig } = classifyCustom(rootPath, customRoot, modelName);
+
       // Apply model-level filtering
-      if (FILTER_MODE === 'custom-only' && !isCustomModel(modelName)) {
+      if (FILTER_MODE === 'custom-only' && !isCustom) {
         log.detail(`${glyph.arrow} skip standard model: ${modelName}`);
         continue;
       }
-      if (FILTER_MODE === 'standard-only' && isCustomModel(modelName)) {
+      if (FILTER_MODE === 'custom-only' && narrowedByConfig) {
+        log.detail(`${glyph.arrow} skip model outside CUSTOM_MODELS patterns: ${modelName}`);
+        continue;
+      }
+      if (FILTER_MODE === 'standard-only' && isCustom) {
         log.detail(`${glyph.arrow} skip custom model: ${modelName}`);
         continue;
       }
 
       const expectedXmlFiles = await countModelXmlFiles(modelDirsByLowerName);
-      // In UDE mode: custom iff the package lives under customRoot.
-      // In traditional mode: fall back to name-based detection.
-      const isCustom = customRoot ? rootPath === customRoot : isCustomModel(modelName);
       modelWorkItems.push({ packageName, modelName, modelPath, expectedXmlFiles, isCustom });
     }
   }
@@ -688,10 +805,11 @@ async function extractClasses(
 ) {
   const files = await fs.readdir(classesPath);
   const xmlFiles = files.filter(f => f.endsWith('.xml'));
+  const fileConcurrency = getAdaptiveConcurrency(xmlFiles.length, 'heavy');
 
-  log.detail(`Classes: ${formatCount(xmlFiles.length)} files`);
+  log.detail(`Classes: ${formatCount(xmlFiles.length)} files (${formatCount(fileConcurrency)} workers)`);
 
-  for (const file of xmlFiles) {
+  await forEachWithConcurrency(xmlFiles, fileConcurrency, async (file) => {
     const filePath = path.join(classesPath, file);
     stats.totalFiles++;
 
@@ -701,14 +819,15 @@ async function extractClasses(
       if (!classInfo.success || !classInfo.data) {
         log.warn(`Failed to parse ${file}: ${classInfo.error || 'Unknown error'}`);
         stats.errors++;
-        continue;
+        return;
       }
+      const classData = classInfo.data;
       
       // Save as JSON
       const outputDir = path.join(OUTPUT_PATH, modelName, 'classes');
       await fs.mkdir(outputDir, { recursive: true });
-      const outputFile = path.join(outputDir, `${classInfo.data.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify(classInfo.data, isCustom ? sourcePathReplacer : undefined, 2));
+      const outputFile = path.join(outputDir, `${classData.name}.json`);
+      await fs.writeFile(outputFile, JSON.stringify(classData, isCustom ? sourcePathReplacer : undefined, 2));
 
       stats.classes++;
 
@@ -716,14 +835,14 @@ async function extractClasses(
       // indexed as a class (it is a real AxClass) and additionally gets an
       // extension record, which is what find_coc_extensions and
       // resolve_references' extension-method path query.
-      if (classInfo.data.extensionOf) {
-        await writeClassExtensionRecord(classInfo.data, modelName, stats, isCustom);
+      if (classData.extensionOf) {
+        await writeClassExtensionRecord(classData, modelName, stats, isCustom);
       }
     } catch (error) {
       log.err(`Error parsing ${file}: ${error instanceof Error ? error.message : error}`);
       stats.errors++;
     }
-  }
+  });
 
 }
 
@@ -761,10 +880,11 @@ async function extractTables(
 ) {
   const files = await fs.readdir(tablesPath);
   const xmlFiles = files.filter(f => f.endsWith('.xml'));
+  const fileConcurrency = getAdaptiveConcurrency(xmlFiles.length, 'heavy');
 
-  log.detail(`Tables: ${formatCount(xmlFiles.length)} files`);
+  log.detail(`Tables: ${formatCount(xmlFiles.length)} files (${formatCount(fileConcurrency)} workers)`);
 
-  for (const file of xmlFiles) {
+  await forEachWithConcurrency(xmlFiles, fileConcurrency, async (file) => {
     const filePath = path.join(tablesPath, file);
     stats.totalFiles++;
 
@@ -774,21 +894,22 @@ async function extractTables(
       if (!tableInfo.success || !tableInfo.data) {
         log.warn(`Failed to parse ${file}: ${tableInfo.error || 'Unknown error'}`);
         stats.errors++;
-        continue;
+        return;
       }
+      const tableData = tableInfo.data;
       
       // Save as JSON
       const outputDir = path.join(OUTPUT_PATH, modelName, 'tables');
       await fs.mkdir(outputDir, { recursive: true });
-      const outputFile = path.join(outputDir, `${tableInfo.data.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify(tableInfo.data, isCustom ? sourcePathReplacer : undefined, 2));
+      const outputFile = path.join(outputDir, `${tableData.name}.json`);
+      await fs.writeFile(outputFile, JSON.stringify(tableData, isCustom ? sourcePathReplacer : undefined, 2));
 
       stats.tables++;
     } catch (error) {
       log.err(`Error parsing ${file}: ${error instanceof Error ? error.message : error}`);
       stats.errors++;
     }
-  }
+  });
 
 }
 
@@ -801,10 +922,11 @@ async function extractForms(
 ) {
   const files = await fs.readdir(formsPath);
   const xmlFiles = files.filter(f => f.endsWith('.xml'));
+  const fileConcurrency = getAdaptiveConcurrency(xmlFiles.length, 'heavy');
 
-  log.detail(`Forms: ${formatCount(xmlFiles.length)} files`);
+  log.detail(`Forms: ${formatCount(xmlFiles.length)} files (${formatCount(fileConcurrency)} workers)`);
 
-  for (const file of xmlFiles) {
+  await forEachWithConcurrency(xmlFiles, fileConcurrency, async (file) => {
     const filePath = path.join(formsPath, file);
     stats.totalFiles++;
 
@@ -815,7 +937,7 @@ async function extractForms(
       if (!result.success || !result.data) {
         log.err(`Error parsing ${file}: ${result.error || 'Unknown error'}`);
         stats.errors++;
-        continue;
+        return;
       }
       
       const formInfo = result.data;
@@ -830,7 +952,7 @@ async function extractForms(
       log.err(`Error parsing ${file}: ${error instanceof Error ? error.message : error}`);
       stats.errors++;
     }
-  }
+  });
 
 }
 
@@ -842,10 +964,11 @@ async function extractQueries(
 ) {
   const files = await fs.readdir(queriesPath);
   const xmlFiles = files.filter(f => f.endsWith('.xml'));
+  const fileConcurrency = getAdaptiveConcurrency(xmlFiles.length, 'light');
 
-  log.detail(`Queries: ${formatCount(xmlFiles.length)} files`);
+  log.detail(`Queries: ${formatCount(xmlFiles.length)} files (${formatCount(fileConcurrency)} workers)`);
 
-  for (const file of xmlFiles) {
+  await forEachWithConcurrency(xmlFiles, fileConcurrency, async (file) => {
     const filePath = path.join(queriesPath, file);
     stats.totalFiles++;
 
@@ -869,7 +992,7 @@ async function extractQueries(
       log.err(`Error parsing ${file}: ${error instanceof Error ? error.message : error}`);
       stats.errors++;
     }
-  }
+  });
 
 }
 
@@ -885,9 +1008,10 @@ async function extractViews(
   for (const sourceDir of sourceDirs) {
     const files = await fs.readdir(sourceDir);
     const xmlFiles = files.filter(f => f.endsWith('.xml'));
+    const fileConcurrency = getAdaptiveConcurrency(xmlFiles.length, 'heavy');
     totalXmlFiles += xmlFiles.length;
 
-    for (const file of xmlFiles) {
+    await forEachWithConcurrency(xmlFiles, fileConcurrency, async (file) => {
       const filePath = path.join(sourceDir, file);
       stats.totalFiles++;
 
@@ -897,15 +1021,16 @@ async function extractViews(
         if (!viewInfo.success || !viewInfo.data) {
           log.warn(`Failed to parse ${file}: ${viewInfo.error || 'Unknown error'}`);
           stats.errors++;
-          continue;
+          return;
         }
+        const viewData = viewInfo.data;
 
         const outputDir = path.join(OUTPUT_PATH, modelName, 'views');
         await fs.mkdir(outputDir, { recursive: true });
-        const outputFile = path.join(outputDir, `${viewInfo.data.name}.json`);
-        await fs.writeFile(outputFile, JSON.stringify(viewInfo.data, isCustom ? sourcePathReplacer : undefined, 2));
+        const outputFile = path.join(outputDir, `${viewData.name}.json`);
+        await fs.writeFile(outputFile, JSON.stringify(viewData, isCustom ? sourcePathReplacer : undefined, 2));
 
-        if (viewInfo.data.type === 'data-entity') {
+        if (viewData.type === 'data-entity') {
           stats.dataEntities++;
         } else {
           stats.views++;
@@ -914,7 +1039,7 @@ async function extractViews(
         log.err(`Error parsing ${file}: ${error instanceof Error ? error.message : error}`);
         stats.errors++;
       }
-    }
+    });
   }
 
   log.detail(`Views/Data entities: ${formatCount(totalXmlFiles)} files`);
@@ -928,10 +1053,11 @@ async function extractEnums(
 ) {
   const files = await fs.readdir(enumsPath);
   const xmlFiles = files.filter(f => f.endsWith('.xml'));
+  const fileConcurrency = getAdaptiveConcurrency(xmlFiles.length, 'light');
 
-  log.detail(`Enums: ${formatCount(xmlFiles.length)} files`);
+  log.detail(`Enums: ${formatCount(xmlFiles.length)} files (${formatCount(fileConcurrency)} workers)`);
 
-  for (const file of xmlFiles) {
+  await forEachWithConcurrency(xmlFiles, fileConcurrency, async (file) => {
     const filePath = path.join(enumsPath, file);
     stats.totalFiles++;
 
@@ -948,7 +1074,7 @@ async function extractEnums(
       log.err(`Error parsing ${file}: ${error instanceof Error ? error.message : error}`);
       stats.errors++;
     }
-  }
+  });
 
 }
 
@@ -961,10 +1087,11 @@ async function extractEdts(
 ) {
   const files = await fs.readdir(edtsPath);
   const xmlFiles = files.filter(f => f.endsWith('.xml'));
+  const fileConcurrency = getAdaptiveConcurrency(xmlFiles.length, 'heavy');
 
-  log.detail(`EDTs: ${formatCount(xmlFiles.length)} files`);
+  log.detail(`EDTs: ${formatCount(xmlFiles.length)} files (${formatCount(fileConcurrency)} workers)`);
 
-  for (const file of xmlFiles) {
+  await forEachWithConcurrency(xmlFiles, fileConcurrency, async (file) => {
     const filePath = path.join(edtsPath, file);
     stats.totalFiles++;
 
@@ -975,7 +1102,7 @@ async function extractEdts(
       if (!result.success || !result.data) {
         log.err(`Error parsing ${file}: ${result.error || 'Unknown error'}`);
         stats.errors++;
-        continue;
+        return;
       }
       
       const edtInfo = result.data;
@@ -990,7 +1117,7 @@ async function extractEdts(
       log.err(`Error parsing ${file}: ${error instanceof Error ? error.message : error}`);
       stats.errors++;
     }
-  }
+  });
 
 }
 
@@ -1010,12 +1137,13 @@ async function extractReports(
   const xmlFiles = files.filter(f => f.endsWith('.xml'));
 
   if (xmlFiles.length === 0) return;
-  log.detail(`Reports: ${formatCount(xmlFiles.length)} files`);
+  const fileConcurrency = getAdaptiveConcurrency(xmlFiles.length, 'light');
+  log.detail(`Reports: ${formatCount(xmlFiles.length)} files (${formatCount(fileConcurrency)} workers)`);
 
   const outputDir = path.join(OUTPUT_PATH, modelName, 'reports');
   await fs.mkdir(outputDir, { recursive: true });
 
-  for (const file of xmlFiles) {
+  await forEachWithConcurrency(xmlFiles, fileConcurrency, async (file) => {
     const filePath = path.join(reportsPath, file);
     stats.totalFiles++;
 
@@ -1037,7 +1165,7 @@ async function extractReports(
       log.err(`Error extracting report ${file}: ${error instanceof Error ? error.message : error}`);
       stats.errors++;
     }
-  }
+  });
 }
 
 async function extractSecurityPrivileges(
@@ -1049,23 +1177,25 @@ async function extractSecurityPrivileges(
 ) {
   const files = (await fs.readdir(dirPath)).filter(f => f.endsWith('.xml'));
   if (files.length === 0) return;
-  log.detail(`Security privileges: ${formatCount(files.length)} files`);
+  const fileConcurrency = getAdaptiveConcurrency(files.length, 'heavy');
+  log.detail(`Security privileges: ${formatCount(files.length)} files (${formatCount(fileConcurrency)} workers)`);
   const outputDir = path.join(OUTPUT_PATH, modelName, 'security-privileges');
   await fs.mkdir(outputDir, { recursive: true });
-  for (const file of files) {
+  await forEachWithConcurrency(files, fileConcurrency, async (file) => {
     const filePath = path.join(dirPath, file);
     stats.totalFiles++;
     try {
       const result = await parser.parseSecurityPrivilegeFile(filePath);
-      if (!result.success || !result.data) { stats.errors++; continue; }
-      const outputFile = path.join(outputDir, `${result.data.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify({ ...result.data, model: modelName, type: 'security-privilege' }, isCustom ? sourcePathReplacer : undefined, 2));
+      if (!result.success || !result.data) { stats.errors++; return; }
+      const privilegeData = result.data;
+      const outputFile = path.join(outputDir, `${privilegeData.name}.json`);
+      await fs.writeFile(outputFile, JSON.stringify({ ...privilegeData, model: modelName, type: 'security-privilege' }, isCustom ? sourcePathReplacer : undefined, 2));
       stats.securityPrivileges++;
     } catch (error) {
       log.err(`Error extracting security privilege ${file}: ${error instanceof Error ? error.message : error}`);
       stats.errors++;
     }
-  }
+  });
 }
 
 async function extractSecurityDuties(
@@ -1077,23 +1207,25 @@ async function extractSecurityDuties(
 ) {
   const files = (await fs.readdir(dirPath)).filter(f => f.endsWith('.xml'));
   if (files.length === 0) return;
-  log.detail(`Security duties: ${formatCount(files.length)} files`);
+  const fileConcurrency = getAdaptiveConcurrency(files.length, 'heavy');
+  log.detail(`Security duties: ${formatCount(files.length)} files (${formatCount(fileConcurrency)} workers)`);
   const outputDir = path.join(OUTPUT_PATH, modelName, 'security-duties');
   await fs.mkdir(outputDir, { recursive: true });
-  for (const file of files) {
+  await forEachWithConcurrency(files, fileConcurrency, async (file) => {
     const filePath = path.join(dirPath, file);
     stats.totalFiles++;
     try {
       const result = await parser.parseSecurityDutyFile(filePath);
-      if (!result.success || !result.data) { stats.errors++; continue; }
-      const outputFile = path.join(outputDir, `${result.data.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify({ ...result.data, model: modelName, type: 'security-duty' }, isCustom ? sourcePathReplacer : undefined, 2));
+      if (!result.success || !result.data) { stats.errors++; return; }
+      const dutyData = result.data;
+      const outputFile = path.join(outputDir, `${dutyData.name}.json`);
+      await fs.writeFile(outputFile, JSON.stringify({ ...dutyData, model: modelName, type: 'security-duty' }, isCustom ? sourcePathReplacer : undefined, 2));
       stats.securityDuties++;
     } catch (error) {
       log.err(`Error extracting security duty ${file}: ${error instanceof Error ? error.message : error}`);
       stats.errors++;
     }
-  }
+  });
 }
 
 async function extractSecurityRoles(
@@ -1105,23 +1237,25 @@ async function extractSecurityRoles(
 ) {
   const files = (await fs.readdir(dirPath)).filter(f => f.endsWith('.xml'));
   if (files.length === 0) return;
-  log.detail(`Security roles: ${formatCount(files.length)} files`);
+  const fileConcurrency = getAdaptiveConcurrency(files.length, 'heavy');
+  log.detail(`Security roles: ${formatCount(files.length)} files (${formatCount(fileConcurrency)} workers)`);
   const outputDir = path.join(OUTPUT_PATH, modelName, 'security-roles');
   await fs.mkdir(outputDir, { recursive: true });
-  for (const file of files) {
+  await forEachWithConcurrency(files, fileConcurrency, async (file) => {
     const filePath = path.join(dirPath, file);
     stats.totalFiles++;
     try {
       const result = await parser.parseSecurityRoleFile(filePath);
-      if (!result.success || !result.data) { stats.errors++; continue; }
-      const outputFile = path.join(outputDir, `${result.data.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify({ ...result.data, model: modelName, type: 'security-role' }, isCustom ? sourcePathReplacer : undefined, 2));
+      if (!result.success || !result.data) { stats.errors++; return; }
+      const roleData = result.data;
+      const outputFile = path.join(outputDir, `${roleData.name}.json`);
+      await fs.writeFile(outputFile, JSON.stringify({ ...roleData, model: modelName, type: 'security-role' }, isCustom ? sourcePathReplacer : undefined, 2));
       stats.securityRoles++;
     } catch (error) {
       log.err(`Error extracting security role ${file}: ${error instanceof Error ? error.message : error}`);
       stats.errors++;
     }
-  }
+  });
 }
 
 async function extractMenuItems(
@@ -1138,23 +1272,25 @@ async function extractMenuItems(
 
   const files = (await fs.readdir(dirPath)).filter(f => f.endsWith('.xml'));
   if (files.length === 0) return;
-  log.detail(`Menu items (${itemType}): ${formatCount(files.length)} files`);
+  const fileConcurrency = getAdaptiveConcurrency(files.length, 'heavy');
+  log.detail(`Menu items (${itemType}): ${formatCount(files.length)} files (${formatCount(fileConcurrency)} workers)`);
   const outputDir = path.join(OUTPUT_PATH, modelName, outDirName);
   await fs.mkdir(outputDir, { recursive: true });
-  for (const file of files) {
+  await forEachWithConcurrency(files, fileConcurrency, async (file) => {
     const filePath = path.join(dirPath, file);
     stats.totalFiles++;
     try {
       const result = await parser.parseMenuItemFile(filePath, itemType);
-      if (!result.success || !result.data) { stats.errors++; continue; }
-      const outputFile = path.join(outputDir, `${result.data.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify({ ...result.data, model: modelName, type: `menu-item-${itemType}` }, isCustom ? sourcePathReplacer : undefined, 2));
+      if (!result.success || !result.data) { stats.errors++; return; }
+      const menuItemData = result.data;
+      const outputFile = path.join(outputDir, `${menuItemData.name}.json`);
+      await fs.writeFile(outputFile, JSON.stringify({ ...menuItemData, model: modelName, type: `menu-item-${itemType}` }, isCustom ? sourcePathReplacer : undefined, 2));
       (stats as any)[statKey]++;
     } catch (error) {
       log.err(`Error extracting menu item (${itemType}) ${file}: ${error instanceof Error ? error.message : error}`);
       stats.errors++;
     }
-  }
+  });
 }
 
 async function extractExtensions(
@@ -1186,24 +1322,26 @@ async function extractExtensions(
 
   const files = (await fs.readdir(dirPath)).filter(f => f.endsWith('.xml'));
   if (files.length === 0) return;
-  log.detail(`${extensionType}s: ${formatCount(files.length)} files`);
+  const fileConcurrency = getAdaptiveConcurrency(files.length, 'heavy');
+  log.detail(`${extensionType}s: ${formatCount(files.length)} files (${formatCount(fileConcurrency)} workers)`);
   const outputDir = path.join(OUTPUT_PATH, modelName, outDirName);
   await fs.mkdir(outputDir, { recursive: true });
-  for (const file of files) {
+  await forEachWithConcurrency(files, fileConcurrency, async (file) => {
     const filePath = path.join(dirPath, file);
     stats.totalFiles++;
     try {
       const result = await parser.parseExtensionFile(filePath, extensionType);
-      if (!result.success || !result.data) { stats.errors++; continue; }
-      const outputFile = path.join(outputDir, `${result.data.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify({ ...result.data, model: modelName, type: extensionType }, isCustom ? sourcePathReplacer : undefined, 2));
+      if (!result.success || !result.data) { stats.errors++; return; }
+      const extensionData = result.data;
+      const outputFile = path.join(outputDir, `${extensionData.name}.json`);
+      await fs.writeFile(outputFile, JSON.stringify({ ...extensionData, model: modelName, type: extensionType }, isCustom ? sourcePathReplacer : undefined, 2));
       const statKey = statKeyMap[extensionType];
       if (statKey) (stats as any)[statKey]++;
     } catch (error) {
       log.err(`Error extracting ${extensionType} ${file}: ${error instanceof Error ? error.message : error}`);
       stats.errors++;
     }
-  }
+  });
 }
 
 async function extractServices(
@@ -1215,23 +1353,25 @@ async function extractServices(
 ) {
   const files = (await fs.readdir(dirPath)).filter(f => f.endsWith('.xml'));
   if (files.length === 0) return;
-  log.detail(`Services: ${formatCount(files.length)} files`);
+  const fileConcurrency = getAdaptiveConcurrency(files.length, 'heavy');
+  log.detail(`Services: ${formatCount(files.length)} files (${formatCount(fileConcurrency)} workers)`);
   const outputDir = path.join(OUTPUT_PATH, modelName, 'services');
   await fs.mkdir(outputDir, { recursive: true });
-  for (const file of files) {
+  await forEachWithConcurrency(files, fileConcurrency, async (file) => {
     const filePath = path.join(dirPath, file);
     stats.totalFiles++;
     try {
       const result = await parser.parseServiceFile(filePath);
-      if (!result.success || !result.data) { stats.errors++; continue; }
-      const outputFile = path.join(outputDir, `${result.data.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify({ ...result.data, model: modelName, type: 'service' }, isCustom ? sourcePathReplacer : undefined, 2));
+      if (!result.success || !result.data) { stats.errors++; return; }
+      const serviceData = result.data;
+      const outputFile = path.join(outputDir, `${serviceData.name}.json`);
+      await fs.writeFile(outputFile, JSON.stringify({ ...serviceData, model: modelName, type: 'service' }, isCustom ? sourcePathReplacer : undefined, 2));
       stats.services++;
     } catch (error) {
       log.err(`Error extracting service ${file}: ${error instanceof Error ? error.message : error}`);
       stats.errors++;
     }
-  }
+  });
 }
 
 async function extractServiceGroups(
@@ -1243,23 +1383,25 @@ async function extractServiceGroups(
 ) {
   const files = (await fs.readdir(dirPath)).filter(f => f.endsWith('.xml'));
   if (files.length === 0) return;
-  log.detail(`Service groups: ${formatCount(files.length)} files`);
+  const fileConcurrency = getAdaptiveConcurrency(files.length, 'heavy');
+  log.detail(`Service groups: ${formatCount(files.length)} files (${formatCount(fileConcurrency)} workers)`);
   const outputDir = path.join(OUTPUT_PATH, modelName, 'service-groups');
   await fs.mkdir(outputDir, { recursive: true });
-  for (const file of files) {
+  await forEachWithConcurrency(files, fileConcurrency, async (file) => {
     const filePath = path.join(dirPath, file);
     stats.totalFiles++;
     try {
       const result = await parser.parseServiceGroupFile(filePath);
-      if (!result.success || !result.data) { stats.errors++; continue; }
-      const outputFile = path.join(outputDir, `${result.data.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify({ ...result.data, model: modelName, type: 'service-group' }, isCustom ? sourcePathReplacer : undefined, 2));
+      if (!result.success || !result.data) { stats.errors++; return; }
+      const serviceGroupData = result.data;
+      const outputFile = path.join(outputDir, `${serviceGroupData.name}.json`);
+      await fs.writeFile(outputFile, JSON.stringify({ ...serviceGroupData, model: modelName, type: 'service-group' }, isCustom ? sourcePathReplacer : undefined, 2));
       stats.serviceGroups++;
     } catch (error) {
       log.err(`Error extracting service group ${file}: ${error instanceof Error ? error.message : error}`);
       stats.errors++;
     }
-  }
+  });
 }
 
 /**
@@ -1279,23 +1421,25 @@ async function extractSimpleType(
 ) {
   const files = (await fs.readdir(dirPath)).filter(f => f.endsWith('.xml'));
   if (files.length === 0) return;
-  log.detail(`${label}: ${formatCount(files.length)} files`);
+  const fileConcurrency = getAdaptiveConcurrency(files.length, 'heavy');
+  log.detail(`${label}: ${formatCount(files.length)} files (${formatCount(fileConcurrency)} workers)`);
   const outputDir = path.join(OUTPUT_PATH, modelName, outDirName);
   await fs.mkdir(outputDir, { recursive: true });
-  for (const file of files) {
+  await forEachWithConcurrency(files, fileConcurrency, async (file) => {
     const filePath = path.join(dirPath, file);
     stats.totalFiles++;
     try {
       const result = await parseFn(filePath);
-      if (!result.success || !result.data) { stats.errors++; continue; }
-      const outputFile = path.join(outputDir, `${result.data.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify({ ...result.data, model: modelName, type }, isCustom ? sourcePathReplacer : undefined, 2));
+      if (!result.success || !result.data) { stats.errors++; return; }
+      const parsedData = result.data;
+      const outputFile = path.join(outputDir, `${parsedData.name}.json`);
+      await fs.writeFile(outputFile, JSON.stringify({ ...parsedData, model: modelName, type }, isCustom ? sourcePathReplacer : undefined, 2));
       (stats as any)[statKey]++;
     } catch (error) {
       log.err(`Error extracting ${label} ${file}: ${error instanceof Error ? error.message : error}`);
       stats.errors++;
     }
-  }
+  });
 }
 
 async function extractMaps(parser: XppMetadataParser, dirPath: string, modelName: string, stats: ExtractionStats, isCustom = false) {

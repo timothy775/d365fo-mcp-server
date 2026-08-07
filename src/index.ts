@@ -3,9 +3,10 @@
  * Main entry point
  */
 
-// Load .env — supports ENV_FILE env var for multi-instance setups (see src/utils/loadEnv.ts).
-import { loadEnv } from './utils/loadEnv.js';
-loadEnv(import.meta.url);
+// Load configuration onto process.env — MUST stay the first import: ESM
+// evaluates imports before any module body, so anything above this line is
+// evaluated before the configuration exists (see src/bootstrapEnv.ts).
+import './bootstrapEnv.js';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
 import express from 'express';
@@ -22,7 +23,10 @@ import { initializeConfig, getConfigManager } from './utils/configManager.js';
 import { SERVER_MODE, LOCAL_TOOLS, isToolAllowedInMode } from './server/serverMode.js';
 import { TOOL_ANNOTATIONS } from './server/toolAnnotations.js';
 import { apiKeyAuth } from './middleware/apiKeyAuth.js';
+import { VERSION } from './version.js';
 import { setInitializeParams } from './utils/stdioSessionInfo.js';
+import { setModelObjectNameSource } from './utils/modelPrefixInference.js';
+import { createShutdownCoordinator } from './utils/gracefulShutdown.js';
 import { box, kv, sectionTitle, statusLine, spread, c, glyph, sanitize, supportsUnicode, log, shortPath, startupWarnings } from './utils/terminalUi.js';
 import * as fs from 'fs/promises';
 import * as fsSync from 'node:fs';
@@ -138,6 +142,12 @@ const serverState: ServerState = {
   statusMessage: 'Starting...',
 };
 
+// Graceful shutdown — see src/utils/gracefulShutdown.ts for why and how.
+const shutdownCoordinator = createShutdownCoordinator({
+  deadlineMs: Math.max(1_000, parseInt(process.env.SHUTDOWN_TIMEOUT_MS || '5000', 10) || 5_000),
+});
+const onShutdown = shutdownCoordinator.onShutdown;
+
 async function initializeServices() {
   // -----------------------------------------------------------------------
   // write-only mode: skip all database/symbol work — LOCAL_TOOLS
@@ -227,7 +237,7 @@ async function initializeServices() {
 
     // Yield event loop so any pending MCP protocol messages (initialize exchange,
     // roots/list, first tool call) can be queued before new Database() blocks.
-    // better-sqlite3 open is synchronous — a 1.5 GB file can stall the loop for
+    // Opening a SQLite database is synchronous — a 1.5 GB file can stall the loop for
     // several seconds, causing the first client request to time out and cancel.
     await new Promise<void>(r => setImmediate(r));
 
@@ -261,6 +271,11 @@ async function initializeServices() {
         throw error;
       }
     }
+
+    // Let object naming learn each model's prefix from the objects that model
+    // already contains, instead of applying one configured EXTENSION_PREFIX to
+    // every model a developer works in (see utils/modelPrefixInference.ts).
+    setModelObjectNameSource(model => symbolIndex.getModelObjectNames(model));
 
     const parser = new XppMetadataParser();
 
@@ -408,6 +423,10 @@ async function initializeBridge(targetContext: import('./types/context.js').XppS
     });
     if (bridge) {
       targetContext.bridge = bridge;
+      // dispose() ends the child's stdin and escalates to SIGTERM/SIGKILL, so the
+      // bridge gets the chance to finish an in-flight AOT write and close its own
+      // metadata handles rather than being cut off mid-file.
+      onShutdown('C# bridge', () => bridge.dispose());
       const cap = `metadata ${bridge.metadataAvailable ? 'yes' : 'no'} ${glyph.dot} xref ${bridge.xrefAvailable ? 'yes' : 'no'}`;
       return { ok: true, summary: `C# bridge connected (${devEnvType}) ${glyph.dot} ${cap}` };
     }
@@ -422,6 +441,19 @@ async function initializeBridge(targetContext: import('./types/context.js').XppS
 }
 
 async function main() {
+  // Registered first so it runs LAST (cleanups run in reverse): the log file is
+  // where the other steps report, so it has to outlive them.
+  onShutdown('log file', () => {
+    if (_logStream) {
+      _logStream.end();
+      _logStream = undefined;
+    }
+  });
+  // Covers whichever index ended up in serverState — the real one, the in-memory
+  // stub, or the replacement built after a corrupt-DB recovery.
+  onShutdown('symbol index', () => serverState.symbolIndex?.close?.());
+  shutdownCoordinator.registerSignalHandlers({ stdio: isStdioMode });
+
   // ─────────────────────────────────────────────────────────────────────────────
   // Stdin sniffer: capture the `initialize` request params for get_workspace_info.
   // ─────────────────────────────────────────────────────────────────────────────
@@ -624,7 +656,7 @@ async function main() {
     const W = 50;
     console.log('');
     for (const line of box([
-      spread(c.bold('D365 F&O MCP Server'), c.dim('v1.0.0'), W),
+      spread(c.bold('D365 F&O MCP Server'), c.dim(`v${VERSION}`), W),
       c.gray('X++ Code Intelligence'),
     ], W)) {
       console.log(line);
@@ -661,7 +693,7 @@ async function main() {
         status: ready ? 'healthy' : 'starting',
         ready,
         service: 'd365fo-mcp-server',
-        version: '1.0.0',
+        version: VERSION,
         message: serverState.statusMessage,
         // Cached-only: a health probe must never trigger a 30-60 s COUNT scan.
         symbols: serverState.symbolIndex?.getCachedSymbolCounts()?.total || 0,
@@ -687,7 +719,13 @@ async function main() {
     });
 
     // Bind port immediately — Azure requires the port to be open within ~230 s
-    await new Promise<void>(resolve => app.listen(PORT, host, () => resolve()));
+    const httpServer = await new Promise<import('http').Server>(resolve => {
+      const s = app.listen(PORT, host, () => resolve(s));
+    });
+    // Stop accepting new connections and let in-flight requests finish. Bounded
+    // by the shutdown deadline, so a held-open keep-alive socket cannot stall the
+    // exit.
+    onShutdown('HTTP server', () => new Promise<void>(resolve => httpServer.close(() => resolve())));
 
     // Initialise services in the background; register MCP routes once ready
     initializeServices().then(async ({ mcpServer, symbolIndex, parser, workspaceScanner, hybridSearch, context }) => {

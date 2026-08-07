@@ -24,7 +24,22 @@ export interface ExtractManifest {
   extractMode: string;
   /** 'ude' when custom models were path-auto-detected, else 'traditional'. */
   environment: 'ude' | 'traditional';
-  /** Model names the extract run classified as custom (exact on-disk directory names). */
+  /**
+   * Model names the extract run classified as custom (exact on-disk directory names).
+   *
+   * On UDE this means "non-Microsoft — lives under the custom root", which includes
+   * third-party ISV models that ship X++ source. It does NOT mean "models you own" or
+   * "models that are safe to write into": the runtime write guard keeps its own name-based
+   * `isCustomModel()` classification and does not read this manifest. Consumers that need
+   * "is this our code" must not treat this list as an answer to that question.
+   *
+   * Consumers today, both in `build-database`:
+   *  - scoping of a `custom` rebuild;
+   *  - `XppSymbolIndex.setNonMicrosoftModels()`, which excludes these models from the
+   *    property-stats corpus ("what does the standard platform do"). "Non-Microsoft" is
+   *    exactly the right granularity there — ISV conventions are no more platform
+   *    convention than ours.
+   */
   customModels: string[];
 }
 

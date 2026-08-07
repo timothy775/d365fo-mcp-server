@@ -3,8 +3,8 @@
  * Builds SQLite database from extracted metadata
  */
 
-import { loadEnv } from '../src/utils/loadEnv.js';
-loadEnv(import.meta.url);
+// Load configuration onto process.env — MUST stay the first import (see src/bootstrapEnv.ts).
+import '../src/bootstrapEnv.js';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
@@ -18,6 +18,7 @@ import { isCustomModel, isStandardModel, getCustomModels } from '../src/utils/mo
 import { readExtractedCustomModels } from '../src/utils/extractManifest.js';
 import { indexAllLabels } from '../src/metadata/labelParser.js';
 import { XppConfigProvider } from '../src/utils/xppConfigProvider.js';
+import { defaultPackagesRoot } from '../src/utils/packagesRoot.js';
 import { crossCheckPatternCatalog, formatCrossCheckReport } from '../src/knowledge/formPatterns/crossCheck.js';
 import { box, kv, sectionTitle, statusLine, spread, c, log, shortPath, supportsUnicode, sanitize } from '../src/utils/terminalUi.js';
 
@@ -41,7 +42,7 @@ const EXTRACT_MODE = process.env.EXTRACT_MODE || 'all';
 const CUSTOM_MODELS = getCustomModels();
 const FORCE_VACUUM = process.env.VACUUM === 'true';
 // Labels are indexed from PackagesLocalDirectory directly (not from extracted-metadata)
-const PACKAGES_PATH = process.env.D365FO_PACKAGE_PATH || process.env.PACKAGES_PATH || 'K:\\AosService\\PackagesLocalDirectory';
+const PACKAGES_PATH = process.env.D365FO_PACKAGE_PATH || process.env.PACKAGES_PATH || defaultPackagesRoot();
 const INCLUDE_LABELS = process.env.INCLUDE_LABELS !== 'false'; // default: true
 // Two-phase CI build: Phase 1 indexes symbols only (SKIP_FTS=true), Phase 2 runs build-fts
 const SKIP_FTS = process.env.SKIP_FTS === 'true';
@@ -66,6 +67,18 @@ async function buildDatabase() {
 
   // Create symbol index with separate labels database
   const symbolIndex = new XppSymbolIndex(OUTPUT_DB, OUTPUT_LABELS_DB);
+
+  // The extract phase is the only place that knows which models are non-Microsoft on UDE
+  // (path rule under the custom root; CUSTOM_MODELS is empty there by design). Read the
+  // manifest unconditionally — not just when scoping a `custom` rebuild — so the
+  // property-stats miners never mine our own or an ISV's objects as "standard platform".
+  const extractManifestCustomModels = readExtractedCustomModels(INPUT_PATH);
+  if (extractManifestCustomModels !== undefined) {
+    symbolIndex.setNonMicrosoftModels(extractManifestCustomModels);
+    console.log(kv('Non-MS models', extractManifestCustomModels.length > 0
+      ? c.dim(`${extractManifestCustomModels.length} from extract manifest (excluded from property stats)`)
+      : c.dim('none recorded by extract manifest')));
+  }
 
   // Optimize for bulk loading: use MEMORY journal during build
   log.step('Setting bulk load optimizations (MEMORY journal)...');
@@ -107,8 +120,8 @@ async function buildDatabase() {
 
     // When CUSTOM_MODELS is empty, bridge the classification from extract-metadata's manifest.
     // `undefined` = no manifest (legacy/blob-download flow); an array (even empty) = the extract
-    // run's authoritative custom set. Read once so we can tell those two apart.
-    const manifestCustomModels = CUSTOM_MODELS.length > 0 ? undefined : readExtractedCustomModels(INPUT_PATH);
+    // run's authoritative custom set. Read above so we can tell those two apart.
+    const manifestCustomModels = CUSTOM_MODELS.length > 0 ? undefined : extractManifestCustomModels;
 
     if (CUSTOM_MODELS.length > 0) {
       // Expand patterns (e.g., "My*" → ["MyModel", "MyFinanceCore", ...])
@@ -173,18 +186,33 @@ async function buildDatabase() {
     symbolIndex.clearModels(modelsToRebuild, shouldVacuum);
   }
 
+  // property_stats counts are cumulative, so gating the miners only stops NEW pollution —
+  // rows a previous build wrote for a custom/ISV model survive until deleted. The table is
+  // tiny (one row per node_type/property/value/model), so re-checking it on every build
+  // costs microseconds and needs no reindex.
+  const purged = symbolIndex.purgeNonMineableStats();
+  if (purged.length > 0) {
+    log.info(`Purged property_stats mined from ${purged.length} non-Microsoft model(s): ${purged.slice(0, 10).join(', ')}${purged.length > 10 ? '...' : ''}`);
+  }
+
   // Index the extracted metadata
   console.log('');
   log.step('Indexing metadata...');
   const startTime = Date.now();
   
   if (modelsToRebuild.length > 0) {
-    // Index specific models in a SINGLE pass (not one call per model): the FTS index is
-    // rebuilt from scratch — O(all symbols in the DB) — once at the end of the call, so
-    // looping here would repeat that full rebuild N times.
+    // Index specific models in a SINGLE pass (not one call per model): a per-model loop
+    // would repeat the whole end-of-call FTS maintenance N times.
+    //
+    // FTS strategy: `custom` scopes the build to the custom models — a small fraction of
+    // the database (~10K of ~1.2M symbols here) — so the triggers maintain symbols_fts far
+    // more cheaply than re-tokenising every row (measured 327s vs 5s of real indexing work
+    // on a cold cache). `standard` covers nearly the whole database, where the bulk rebuild
+    // still wins.
+    const ftsStrategy = EXTRACT_MODE === 'custom' ? 'incremental' : 'rebuild';
     log.detail(`${modelsToRebuild.length} model(s): ${modelsToRebuild.slice(0, 10).join(', ')}${modelsToRebuild.length > 10 ? '...' : ''}`);
     log.detail('Incremental build: standard models in database will be preserved');
-    await symbolIndex.indexMetadataDirectory(INPUT_PATH, modelsToRebuild);
+    await symbolIndex.indexMetadataDirectory(INPUT_PATH, modelsToRebuild, { ftsStrategy });
   } else if (EXTRACT_MODE === 'all' || RESUME) {
     // Full rebuild (or resume): index every model in the directory in one bulk pass.
     log.detail(`All models from: ${shortPath(INPUT_PATH)}`);
@@ -282,12 +310,16 @@ async function buildDatabase() {
       let grandTotalModels = 0;
 
       if (isIncrementalCustomBuild) {
-        symbolIndex.clearLabelsForModels(modelsToRebuild);
+        // Both steps stay O(scope): the labels_fts triggers maintain the index for the
+        // cleared and re-inserted rows, instead of two delete-all + re-INSERT passes over
+        // every en-US label in the database (485K rows here, 284s on a cold cache).
+        symbolIndex.clearLabelsForModels(modelsToRebuild, { ftsStrategy: 'incremental' });
         for (const rootPath of validRoots) {
           const { totalLabels, modelsIndexed } = await indexAllLabels(
             symbolIndex,
             rootPath,
             (modelName) => modelsToRebuild.includes(modelName),
+            { ftsStrategy: 'incremental' },
           );
           grandTotalLabels += totalLabels;
           grandTotalModels += modelsIndexed;
@@ -344,7 +376,16 @@ async function buildDatabase() {
     // ANALYZE + optimize: persist query-planner stats into the DB so the production
     // server can open it with zero warmup cost (skipped when SKIP_FTS=true because
     // build-fts will run these tasks at the end of phase 2).
-    symbolIndex.runPostBuildTasks();
+    //
+    // ANALYZE reads the whole database (309s cold for 2 GB + 585 MB here) and an
+    // incremental build changes well under 1% of the rows, which does not move the
+    // planner's stats — so run it on a full rebuild only, or on demand via ANALYZE=true.
+    if (EXTRACT_MODE === 'all' || process.env.ANALYZE === 'true') {
+      symbolIndex.runPostBuildTasks();
+    } else {
+      log.info(`Skipping ANALYZE for incremental ${EXTRACT_MODE} build (use ANALYZE=true to force)`);
+      log.detail('Planner statistics from the last full rebuild stay valid');
+    }
   }
 
   // Show breakdown by type

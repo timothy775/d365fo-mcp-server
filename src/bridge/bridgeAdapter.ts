@@ -15,6 +15,8 @@ import type { BridgeClient } from './bridgeClient.js';
 import * as debouncedRefresh from './debouncedRefresh.js';
 import { debugLog } from '../utils/logger.js';
 import { reindentXppSource } from '../utils/xppFormat.js';
+import { parseXppDeclaration } from '../metadata/xppDeclaration.js';
+import { rankCustomFirst, isExactNameMatch } from '../utils/exactMatchRanking.js';
 import type {
   BridgeTableInfo,
   BridgeClassInfo,
@@ -158,6 +160,40 @@ export async function tryBridgeClass(
   }
 }
 
+/**
+ * The one-line signature shown per method in the compact class view.
+ *
+ * This used to be `source.split('\n')[0]`, which for any method whose body opens
+ * with an XML doc comment rendered the METHOD NAME as `/// <summary>`: on
+ * Foundation's CustVendVoucher, 14 of the first 15 methods came out that way
+ * (L2-datetime-timezone-range run). Every documented platform class was
+ * therefore unreadable through the default grounding path, while the sibling
+ * `options={members:"names"}` path answered correctly.
+ *
+ * The declaration is located with the shared X++ parser, which handles
+ * parameter lists wrapped across lines; only if that fails do we fall back to
+ * the first line that is neither blank, nor a comment, nor an attribute — and
+ * finally to the name the metadata itself carries, which is never wrong.
+ */
+export function methodSignatureLine(name: string, source?: string): string {
+  if (!source) return name;
+
+  const decl = parseXppDeclaration(source, name);
+  if (decl) {
+    const params = decl.parameters
+      .map(p => `${p.type} ${p.name}${p.defaultValue ? ` = ${p.defaultValue}` : ''}`)
+      .join(', ');
+    const mods = decl.modifiers.length ? `${decl.modifiers.join(' ')} ` : '';
+    return `${mods}${decl.returnType} ${decl.name}(${params})`;
+  }
+
+  const firstCode = source
+    .split('\n')
+    .map(l => l.trim())
+    .find(l => l && !l.startsWith('///') && !l.startsWith('//') && !l.startsWith('/*') && !l.startsWith('*') && !l.startsWith('['));
+  return firstCode || name;
+}
+
 function formatClass(cls: BridgeClassInfo, compact: boolean, methodOffset: number): string {
   const modifiers: string[] = [];
   if (cls.isFinal) modifiers.push('final');
@@ -187,9 +223,7 @@ function formatClass(cls: BridgeClassInfo, compact: boolean, methodOffset: numbe
 
   for (const m of visible) {
     if (compact) {
-      // Signature-only: extract first line of source for signature
-      const sig = m.source ? m.source.split('\n')[0].trim() : m.name;
-      out += `- \`${sig}\`\n`;
+      out += `- \`${methodSignatureLine(m.name, m.source)}\`\n`;
     } else {
       out += `### ${m.name}\n\n`;
       if (m.source) {
@@ -672,23 +706,90 @@ function formatLabelReferences(references: BridgeReferenceInfo[], label: string,
 
 // SEARCH
 
+export interface BridgeSearchOptions {
+  /**
+   * Exact-name hits the caller already resolved from the SQLite index with an
+   * index-safe probe. Used to repair defect #15: the bridge fills its result
+   * window in provider-enumeration order and truncates at maxResults, so an
+   * exact match can be missing entirely. Any candidate absent from the bridge
+   * window is spliced in and ranked first.
+   */
+  exactMatches?: Array<{ name: string; type: string }>;
+  /**
+   * Keyword hits from CUSTOM/ISV models the caller resolved from the SQLite
+   * index (model-scoped, FTS-driven). The bridge enumerates a single merged
+   * key list dominated by Microsoft standard objects and truncates at
+   * maxResults, so custom matches that enumerate later never reach the client.
+   * These are spliced in and ranked directly after the exact matches (ahead of
+   * Microsoft standard hits) so custom code is always visible.
+   */
+  customMatches?: Array<{ name: string; type: string }>;
+}
+
 export async function tryBridgeSearch(
   bridge: BridgeClient | undefined,
   query: string,
   objectType?: string,
   maxResults = 50,
+  opts?: BridgeSearchOptions,
 ): Promise<ToolResult | null> {
   if (!bridge?.isReady || !bridge.metadataAvailable) return null;
   try {
     const sr = await bridge.searchObjects(query, objectType, maxResults);
-    if (!sr || sr.results.length === 0) return null;
+    if (!sr) return null;
+
+    // Splice in exact matches the bridge's truncated window missed (#15).
+    const bridgeHits = sr.results ?? [];
+    const known = new Set(bridgeHits.map(r => `${r.name.toLowerCase()} ${r.type}`));
+    const spliced: Array<{ name: string; type: string; fromIndex?: boolean }> = [];
+    for (const cand of opts?.exactMatches ?? []) {
+      if (!isExactNameMatch(query, cand.name)) continue;
+      if (known.has(`${cand.name.toLowerCase()} ${cand.type}`)) continue;
+      known.add(`${cand.name.toLowerCase()} ${cand.type}`);
+      spliced.push({ ...cand, fromIndex: true });
+    }
+
+    const key = (n: string, t: string) => `${n.toLowerCase()} ${t}`;
+    const exactKeys = new Set(spliced.map(s => key(s.name, s.type)));
+    const bridgeKeys = new Set(bridgeHits.map(r => key(r.name, r.type)));
+
+    // Custom/ISV matches truncated out of the Microsoft-dominated bridge window:
+    // splice the ones the window missed and flag them so they rank ahead of
+    // Microsoft standard hits (see BridgeSearchOptions.customMatches).
+    const customKeys = new Set((opts?.customMatches ?? []).map(c => key(c.name, c.type)));
+    const customSpliced = (opts?.customMatches ?? [])
+      .filter(c => !exactKeys.has(key(c.name, c.type)) && !bridgeKeys.has(key(c.name, c.type)))
+      .map(c => ({ name: c.name, type: c.type, fromIndex: true as const, custom: true as const }));
+    const splicedCustom = customSpliced.length;
+
+    const merged: Array<{ name: string; type: string; fromIndex?: boolean; custom?: boolean }> = [
+      ...spliced.map(s => ({ ...s })),
+      ...customSpliced,
+      ...bridgeHits.map(r => ({ name: r.name, type: r.type, custom: customKeys.has(key(r.name, r.type)) })),
+    ];
+    if (merged.length === 0) return null;
+
+    // Exact name matches first — the bridge itself returns provider order (#15).
+    const ranked = rankCustomFirst(query, merged, r => r.name, r => !!r.custom)
+      .slice(0, Math.max(maxResults, spliced.length + splicedCustom));
 
     let out = `# Search: "${query}"${objectType ? ` (type: ${objectType})` : ''}\n\n`;
-    out += `**Results:** ${sr.results.length}\n`;
+    out += `**Results:** ${ranked.length}\n`;
     out += `_Source: C# bridge (IMetadataProvider)_\n\n`;
 
-    for (const r of sr.results.slice(0, maxResults)) {
-      out += `- **${r.name}** (${r.type})\n`;
+    for (const r of ranked) {
+      const exact = isExactNameMatch(query, r.name) ? ' ⭐ exact match' : '';
+      out += `- **${r.name}** (${r.type})${exact}\n`;
+    }
+
+    if (spliced.length > 0) {
+      out += `\n_${spliced.length} exact match(es) came from the SQLite symbol index — ` +
+        `the bridge's result window (maxResults=${maxResults}) did not contain them._\n`;
+    }
+
+    if (splicedCustom > 0) {
+      out += `\n_${splicedCustom} custom/ISV-model match(es) were spliced in from the ` +
+        `SQLite symbol index and prioritized (bridge window maxResults=${maxResults} had truncated them)._\n`;
     }
 
     return { content: [{ type: 'text', text: out }] };
@@ -992,6 +1093,9 @@ export async function bridgeRefreshProvider(
 ): Promise<{ refreshed: boolean; elapsedMs: number } | null> {
   if (!bridge?.isReady || !bridge.metadataAvailable) return null;
   try {
+    // Recorded so callers that only need the provider to be no older than a
+    // given write can skip a redundant rebuild — see debouncedRefresh.
+    debouncedRefresh.markRefreshStarted();
     return await bridge.refreshProvider();
   } catch (e) {
     console.error(`[BridgeAdapter] refreshProvider failed: ${e}`);
@@ -1089,7 +1193,12 @@ const BRIDGE_MODIFY_OPS = new Set([
   'add-method', 'remove-method', 'replace-code',
   'add-field', 'modify-field', 'rename-field', 'replace-all-fields', 'remove-field',
   'add-index', 'remove-index',
+  'add-full-text-index', 'remove-full-text-index',
+  'add-table-mapping', 'remove-table-mapping',
   'add-relation', 'remove-relation',
+  // No C# op backs these — they are served by a direct-XML writer, but they still
+  // pass through the same modify gate.
+  'add-delete-action', 'remove-delete-action',
   'add-field-group', 'remove-field-group', 'add-field-to-field-group',
   'modify-property',
   'add-enum-value', 'modify-enum-value', 'remove-enum-value',
@@ -1105,8 +1214,9 @@ const BRIDGE_MODIFY_OPS = new Set([
  */
 const BRIDGE_MODIFY_TYPES = new Set([
   'class', 'table', 'enum', 'edt',
-  'form', 'query', 'view',
-  'class-extension', 'table-extension', 'form-extension', 'enum-extension',
+  'form', 'query', 'view', 'data-entity',
+  'class-extension', 'table-extension', 'form-extension', 'enum-extension', 'edt-extension',
+  'data-entity-extension',
   'menu-item-action', 'menu-item-display', 'menu-item-output',
   'menu',
 ]);
@@ -1238,7 +1348,12 @@ export async function bridgeAddMethod(
 }
 
 /**
- * Adds a field to a table via the C# bridge (IMetadataProvider.Update()).
+ * Adds a field to a table, table-extension or data-entity-view-extension via the C#
+ * bridge (IMetadataProvider.Update()).
+ *
+ * `mapped` carries the data-entity mapped-field binding. A mapped field has no EDT and
+ * no base type — it points at a field on one of the entity's data sources — so passing
+ * it switches the bridge to the AxDataEntityViewMappedField path.
  */
 export async function bridgeAddField(
   bridge: BridgeClient | undefined,
@@ -1248,11 +1363,15 @@ export async function bridgeAddField(
   edt?: string,
   mandatory?: boolean,
   label?: string,
+  mapped?: { dataField?: string; dataSource?: string; fieldGroupName?: string },
 ): Promise<{ success: boolean; message: string } | null> {
   if (!bridge?.isReady || !bridge.metadataAvailable) return null;
 
   try {
-    const result = await bridge.addField(tableName, fieldName, fieldType, edt, mandatory, label);
+    const result = await bridge.addField(
+      tableName, fieldName, fieldType, edt, mandatory, label,
+      mapped?.dataField, mapped?.dataSource, mapped?.fieldGroupName,
+    );
     return {
       success: result.success,
       message: result.success
@@ -1396,6 +1515,98 @@ export async function bridgeRemoveIndex(
 }
 
 /**
+ * Adds a full-text index to a table or table-extension via the C# bridge.
+ *
+ * <FullTextIndexes> is a separate collection with a separate element type
+ * (AxTableFullTextIndex), so add-index could never reach it.
+ */
+export async function bridgeAddFullTextIndex(
+  bridge: BridgeClient | undefined,
+  tableName: string,
+  indexName: string,
+  fields?: string[],
+): Promise<{ success: boolean; message: string } | null> {
+  if (!bridge?.isReady || !bridge.metadataAvailable) return null;
+  try {
+    const result = await bridge.addFullTextIndex(tableName, indexName, fields);
+    return {
+      success: result.success,
+      message: result.success
+        ? `✅ Full-text index '${indexName}' added via ${result.api}`
+        : `Bridge addFullTextIndex returned success=false`,
+    };
+  } catch (e) {
+    console.error(`[BridgeAdapter] addFullTextIndex(${tableName}, ${indexName}) failed: ${e}`);
+    return { success: false, message: String(e) };
+  }
+}
+
+/** Removes a full-text index from a table or table-extension via the C# bridge. */
+export async function bridgeRemoveFullTextIndex(
+  bridge: BridgeClient | undefined,
+  tableName: string,
+  indexName: string,
+): Promise<{ success: boolean; message: string } | null> {
+  if (!bridge?.isReady || !bridge.metadataAvailable) return null;
+  try {
+    const result = await bridge.removeFullTextIndex(tableName, indexName);
+    return {
+      success: result.success,
+      message: result.success
+        ? `✅ Full-text index '${indexName}' removed via ${result.api}`
+        : `Bridge removeFullTextIndex returned success=false`,
+    };
+  } catch (e) {
+    console.error(`[BridgeAdapter] removeFullTextIndex(${tableName}, ${indexName}) failed: ${e}`);
+    return { success: false, message: String(e) };
+  }
+}
+
+/** Adds a Map membership to a table or table-extension via the C# bridge. */
+export async function bridgeAddTableMapping(
+  bridge: BridgeClient | undefined,
+  tableName: string,
+  mapName: string,
+  mappingTable?: string,
+  connections?: Array<{ mapField?: string; mapFieldTo?: string }>,
+): Promise<{ success: boolean; message: string } | null> {
+  if (!bridge?.isReady || !bridge.metadataAvailable) return null;
+  try {
+    const result = await bridge.addTableMapping(tableName, mapName, mappingTable, connections);
+    return {
+      success: result.success,
+      message: result.success
+        ? `✅ Mapping '${mapName}' added via ${result.api}`
+        : `Bridge addTableMapping returned success=false`,
+    };
+  } catch (e) {
+    console.error(`[BridgeAdapter] addTableMapping(${tableName}, ${mapName}) failed: ${e}`);
+    return { success: false, message: String(e) };
+  }
+}
+
+/** Removes a Map membership from a table or table-extension via the C# bridge. */
+export async function bridgeRemoveTableMapping(
+  bridge: BridgeClient | undefined,
+  tableName: string,
+  mapName: string,
+): Promise<{ success: boolean; message: string } | null> {
+  if (!bridge?.isReady || !bridge.metadataAvailable) return null;
+  try {
+    const result = await bridge.removeTableMapping(tableName, mapName);
+    return {
+      success: result.success,
+      message: result.success
+        ? `✅ Mapping '${mapName}' removed via ${result.api}`
+        : `Bridge removeTableMapping returned success=false`,
+    };
+  } catch (e) {
+    console.error(`[BridgeAdapter] removeTableMapping(${tableName}, ${mapName}) failed: ${e}`);
+    return { success: false, message: String(e) };
+  }
+}
+
+/**
  * Adds a relation to a table via the C# bridge.
  */
 export async function bridgeAddRelation(
@@ -1404,14 +1615,28 @@ export async function bridgeAddRelation(
   relationName: string,
   relatedTable: string,
   constraints?: Array<{ field?: string; relatedField?: string }>,
-): Promise<{ success: boolean; message: string } | null> {
+  properties?: { relationCardinality?: string; relatedTableCardinality?: string; relationshipType?: string },
+): Promise<{ success: boolean; message: string; propertiesWritten?: boolean } | null> {
   if (!bridge?.isReady || !bridge.metadataAvailable) return null;
   try {
-    const result = await bridge.addRelation(tableName, relationName, relatedTable, constraints);
+    const result = await bridge.addRelation(tableName, relationName, relatedTable, constraints, properties);
+    // An older bridge binary silently ignores the extra params; it echoes back only
+    // what it set, so the response says whether the on-disk fallback is still needed.
+    const r = result as unknown as Record<string, unknown>;
+    const propertiesWritten = typeof r.relationshipType === 'string';
+    // On a table-extension the bridge routes a relation the BASE table already owns into
+    // <RelationExtensions> and says so in `note` — the constraints landed, but the three
+    // relation properties belong to the base relation and were deliberately not written.
+    // Surfacing it verbatim is what stops that from reading as a plain "✅ added".
+    const note = typeof r.note === 'string' ? ` ${r.note}` : '';
     return {
       success: result.success,
+      propertiesWritten,
       message: result.success
-        ? `✅ Relation '${relationName}' added via ${result.api}`
+        ? `✅ Relation '${relationName}' added via ${result.api}` +
+          (propertiesWritten
+            ? ` (Cardinality=${r.cardinality}, RelatedTableCardinality=${r.relatedTableCardinality}, RelationshipType=${r.relationshipType})`
+            : '') + note
         : `Bridge addRelation returned success=false`,
     };
   } catch (e) {
@@ -1499,14 +1724,22 @@ export async function bridgeAddFieldToFieldGroup(
   tableName: string,
   groupName: string,
   fieldName: string,
+  extendBaseFieldGroup?: boolean,
 ): Promise<{ success: boolean; message: string } | null> {
   if (!bridge?.isReady || !bridge.metadataAvailable) return null;
   try {
-    const result = await bridge.addFieldToFieldGroup(tableName, groupName, fieldName);
+    const result = await bridge.addFieldToFieldGroup(tableName, groupName, fieldName, extendBaseFieldGroup);
+    // An OLD bridge binary silently ignores extendBaseFieldGroup and writes to
+    // <FieldGroups> instead — the field then lands in the file but never surfaces on
+    // the base table's forms. The C# echoes the flag back, so say which collection
+    // actually received it rather than letting the caller assume.
+    const target = (result as unknown as Record<string, unknown>).extendBaseFieldGroup === true
+      ? '<FieldGroupExtensions> (extending the base-table group)'
+      : '<FieldGroups>';
     return {
       success: result.success,
       message: result.success
-        ? `✅ Field '${fieldName}' added to group '${groupName}' via ${result.api}`
+        ? `✅ Field '${fieldName}' added to group '${groupName}' in ${target} via ${result.api}`
         : `Bridge addFieldToFieldGroup returned success=false`,
     };
   } catch (e) {
@@ -2103,11 +2336,37 @@ export async function tryBridgeCompletion(
   bridge: BridgeClient | undefined,
   symbolName: string,
   prefix?: string,
+  ancestors?: string[],
 ): Promise<ToolResult | null> {
   if (!bridge?.isReady || !bridge.metadataAvailable) return null;
   try {
     const result = await bridge.getCompletionMembers(symbolName);
     if (!result || !result.members || result.members.length === 0) return null;
+
+    // IMetadataProvider returns DECLARED members only, so a subclass lists
+    // nothing it inherits and the reader concludes the member does not exist.
+    // Merge the base classes in, nearest first; a name already present wins,
+    // since that is the subclass's own override.
+    if (ancestors?.length) {
+      const seen = new Set(result.members.map(m => m.name.toLowerCase()));
+      for (const ancestor of ancestors) {
+        let inherited: BridgeCompletionResult | null = null;
+        try {
+          inherited = await bridge.getCompletionMembers(ancestor);
+        } catch (e) {
+          // One unreadable link must not discard the members already merged.
+          console.error(`[BridgeAdapter] getCompletionMembers(${ancestor}) failed: ${e}`);
+          continue;
+        }
+        for (const m of inherited?.members ?? []) {
+          const key = m.name.toLowerCase();
+          if (seen.has(key)) continue;
+          seen.add(key);
+          result.members.push({ ...m, inheritedFrom: inherited?.symbolName || ancestor });
+        }
+      }
+    }
+
     return { content: [{ type: 'text', text: formatCompletion(result, prefix) }] };
   } catch (e) {
     console.error(`[BridgeAdapter] getCompletionMembers(${symbolName}) failed: ${e}`);
@@ -2137,9 +2396,15 @@ function formatCompletion(r: BridgeCompletionResult, prefix?: string): string {
   const fieldMembers = members.filter(m => m.kind === 'field');
 
   if (methodMembers.length > 0) {
+    const inheritedCount = methodMembers.filter(m => m.inheritedFrom).length;
     out += `## Methods (${methodMembers.length})\n`;
     for (const m of methodMembers) {
-      out += m.signature ? `- \`${m.signature}\`\n` : `- ${m.name}\n`;
+      const body = m.signature ? `\`${m.signature}\`` : m.name;
+      out += m.inheritedFrom ? `- ${body} _(inherited from ${m.inheritedFrom})_\n` : `- ${body}\n`;
+    }
+    if (inheritedCount > 0) {
+      out += `\n> ${inheritedCount} of these are inherited — callable on ${r.symbolName}, but ` +
+        `declared on a base class. To read or wrap one, target the class named beside it.\n`;
     }
   }
 

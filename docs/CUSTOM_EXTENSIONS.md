@@ -60,7 +60,13 @@ npm run extract-metadata
 npm run build-database
 ```
 
-Takes a few minutes. Use after every code change or sprint.
+Use after every code change or sprint. Cost scales with your custom models, not with the
+database: every step is scoped to them, including full-text index maintenance and ANALYZE
+(which run over the whole database on an `all` rebuild only). On a ~1.2M-symbol instance
+a 3-model, ~10K-symbol build takes well under a minute.
+
+`ANALYZE=true npm run build-database` forces the query-planner statistics to be recomputed
+if you ever need them refreshed without a full rebuild.
 
 ### Everything (first-time setup or after D365FO upgrade)
 
@@ -75,6 +81,63 @@ Only needed when Microsoft standard model content changes (e.g. after a D365FO u
 Timing depends heavily on the environment. On a single-label-language instance (~176 models, ~1.2M symbols) a full `all` rebuild is roughly 10–15 minutes end to end. It grows substantially when many label languages are installed, because label indexing re-indexes every Microsoft label across all languages — so a large multi-language installation can take much longer. The dominant cost is label breadth, not X++ model size.
 
 ---
+
+## Where the prefix comes from
+
+Development normally spans several models, each with its own prefix, and `EXTENSION_PREFIX` is a single value chosen once during setup. So the **active model's own objects decide the prefix**, and the configured value is the fallback:
+
+1. **The prefix the model's existing objects already use.** A model whose tables are `DEMO_ArchiveAccDocErrorLog`, `DEMO_AssetIPFairValue`… and whose extensions are `AssetBookTable.DEMOExtension` teaches the tools both tokens — `DEMO_` for new objects and members, `DEMO` as the extension infix. Switching to a sibling model whose objects say `DMC_` switches the prefix with it, with no reconfiguration.
+2. **`EXTENSION_PREFIX`** — used for a model with nothing to learn from, e.g. one that is still empty.
+3. **The model name**, when neither of the above applies.
+
+Inference is conservative: a model whose objects show no consistent prefix (fewer than four of them, or under 60 % agreement) falls through to step 2 rather than guessing. `get_workspace_info` reports the effective prefix and where it came from, and warns when the model's own naming overrides `EXTENSION_PREFIX`.
+
+Compound prefixes are read in full, up to three PascalCase segments: a model whose objects are `ContosoFinSKVendPaymentTable`, `ContosoFinSKCustInvoiceJour`… yields `ContosoFinSK`, not `ContosoFin`. Where the model's extensions state the infix outright (`VendTable.ContosoFinSKExtension`), that spelling wins over anything derived.
+
+```env
+EXTENSION_PREFIX_SOURCE=config   # pin step 2 above step 1 (pre-1.8.2 behaviour)
+```
+
+## Objects owned by another model
+
+A customer solution is commonly split across several **custom** models — a shared `ContosoFinanceCore` plus country models `ContosoFinanceSK` / `ContosoFinanceCZ` that extend it. The workspace targets exactly one of them; every other model is code this workspace only consumes.
+
+So any write — `d365fo_file(action="modify")`, `action="create"`, a scaffold from `generate_object(mode="scaffold")`, or a new label — that resolves into a model other than the workspace's own is **refused**. Asked to "add a field to `ContosoCore_TaxTransReportChangeLog`", the tools would otherwise resolve that table by name, land in the Core model that owns it, and edit it in place — the field would never appear in the active model's project or version control, and every other model built on Core would inherit it. What was wanted is a table extension in the active model:
+
+```
+d365fo_file(action="create", objectType="table-extension",
+            objectName="ContosoCore_TaxTransReportChangeLog.ContosoSKExtension",
+            modelName="ContosoFinanceSK")
+```
+
+…and the field added to that extension, prefixed per the active model (`ContosoSK_…`). The refusal spells this out, and names the extension the active model **already** has when one exists, so the answer is a copy-paste away.
+
+### A project switch moves reads, not writes
+
+`get_workspace_info(projectName=…)` changes which project is **active** — what gets built, BP-checked and written into. It is not a way to reach another model's code: `get_object_info`, `search`, `find_references` and the rest query the index across every model, switched or not.
+
+Writes therefore stay anchored to the model the workspace resolved on its own, and a create/modify/scaffold into the switched-to model is refused like any other cross-model write. Otherwise the switch would be self-served consent: refused write → switch project → same write, no refusal. The anchor is dropped when the user genuinely moves — the client reports a different workspace root, or a git branch that resolves to another project — because then the workspace really did change.
+
+If the switch is what the user wanted and the writes belong in the other model, that is the allow-list below, not the switch.
+
+### Consent lives in configuration, not in the call
+
+The first version of this guard accepted `modelName="<owning model>"` on the call as consent. For a human that is a reasonable "I know what I'm doing"; for an agent it is not — the refusal text named the parameter, so the agent added the parameter and wrote into the shared model anyway, then explained why afterwards. A bypass the caller can mint for itself is not a bypass.
+
+Allowing a cross-model write is therefore a **configuration** change — a file the user edits and the agent has no tool to write:
+
+```env
+D365FO_CROSS_MODEL_WRITE_MODELS=ContosoFinanceCore   # allow these models (comma-separated)
+D365FO_ALLOW_CROSS_MODEL_WRITE=true                  # allow any model
+```
+
+These two settings are re-read from `.env` before every decision, so an answer given mid-task applies to the **next attempt** — no restart, no lost session. That matters for the guard rather than against it: while the only sanctioned route cost the user their session, all the pressure was on finding a cheaper one. Nothing else is re-read; this is a policy refresh, not a configuration reload.
+
+A value set in the real environment (shell, the `.mcp.json` `env{}` block, App Settings) still outranks the file, exactly as at boot.
+
+The refusal deliberately offers the caller no workaround, and says outright that half-finished pieces of the same feature already sitting in the other model — a matching enum, field or label left by an earlier run — are evidence of an earlier mistake, not a reason to continue there.
+
+Writes into **standard Microsoft** models stay refused regardless — see the model-ownership guard.
 
 ## Extension Naming Style
 

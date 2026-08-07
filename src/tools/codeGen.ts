@@ -1656,14 +1656,16 @@ public final class ${name}ServiceResponse
 // ── 2. Service class ────────────────────────────────────────────────────
 /// <summary>
 /// Custom service operations for ${name}.
-/// Each public method with [SysEntryPointAttribute] becomes a service operation.
+/// Each public method becomes a service operation exposed via the AxService.
+/// Do NOT add [SysEntryPointAttribute] — it is deprecated in AX7/D365FO for
+/// custom services and only raises an "obsolete" BP warning; access rights are
+/// enforced without it. (SysOperation framework entry points still use it.)
 /// </summary>
 public class ${name}Service
 {
     /// <summary>
     /// Processes the request and returns a response.
     /// </summary>
-    [SysEntryPointAttribute(true)]
     public ${name}ServiceResponse processRequest(${name}ServiceRequest _request)
     {
         ${name}ServiceResponse response = new ${name}ServiceResponse();
@@ -1695,7 +1697,6 @@ public class ${name}Service
     /// <summary>
     /// Returns a health check / ping response.
     /// </summary>
-    [SysEntryPointAttribute(false)]
     public str ping()
     {
         return 'OK';

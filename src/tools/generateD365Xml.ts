@@ -12,9 +12,13 @@ import { ensureXppDocComment, ensureBlankLineBeforeClosingBrace } from '../utils
 import { reindentXppSource } from '../utils/xppFormat.js';
 import { decodeXmlEntitiesFromXppSource } from './modifyD365File.js';
 import { buildAxSecurityPrivilegeXml } from './securityPrivilegeXml.js';
-import { buildAxDataEntityXml } from './dataEntityXml.js';
+import { buildAxDataEntityXml, isYes } from './dataEntityXml.js';
 import { buildAxQueryXml, buildAxViewXml } from './queryViewXml.js';
+import { buildAxEdtExtensionXml } from './edtExtensionXml.js';
+import { buildAxDataEntityViewExtensionXml } from './dataEntityViewExtensionXml.js';
+import { buildAxMenuItemExtensionXml, type AxMenuItemExtensionRootElement } from './menuItemExtensionXml.js';
 import { buildAxMapXml } from './mapXml.js';
+import { buildAxServiceXml, buildAxServiceGroupXml } from './serviceXml.js';
 
 const GenerateD365XmlArgsSchema = z.object({
   objectType: z
@@ -27,6 +31,7 @@ const GenerateD365XmlArgsSchema = z.object({
       'menu', 'menu-extension',
       'security-privilege', 'security-duty', 'security-role',
       'security-duty-extension', 'security-role-extension', 'map',
+      'service', 'service-group',
     ])
     .describe('Type of D365FO object'),
   objectName: z
@@ -49,7 +54,9 @@ const GenerateD365XmlArgsSchema = z.object({
 /**
  * XML Template Generator for D365FO Objects
  */
-class XmlTemplateGenerator {
+// Exported so tests can assert this mirror stays in step with createD365File.ts's
+// copy — the two dispatchers have drifted before (see dataEntityXml.ts header).
+export class XmlTemplateGenerator {
 
   /**
    * Split X++ class source into the Declaration block (class header + field
@@ -316,6 +323,17 @@ ${methodsXml}\t</SourceCode>
     const titleField2Xml = titleField2
       ? `\t<TitleField2>${titleField2}</TitleField2>\n`
       : '';
+    // Canonical order: Title block → these → collections. See axTablePropertyOrder.
+    const noYes = (key: string, tag: string) =>
+      isYes(properties?.[key]) ? `\t<${tag}>Yes</${tag}>\n` : '';
+    const extendedXml =
+      noYes('allowRowVersionChangeTracking', 'AllowRowVersionChangeTracking') +
+      noYes('createdBy', 'CreatedBy') +
+      noYes('createdDateTime', 'CreatedDateTime') +
+      noYes('createdTransactionId', 'CreatedTransactionId') +
+      noYes('modifiedBy', 'ModifiedBy') +
+      noYes('modifiedDateTime', 'ModifiedDateTime') +
+      noYes('modifiedTransactionId', 'ModifiedTransactionId');
 
     return `<?xml version="1.0" encoding="utf-8"?>
 <AxTable xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
@@ -330,7 +348,7 @@ public class ${tableName} extends common
 \t</SourceCode>
 \t<Label>${label}</Label>
 \t<TableGroup>${tableGroup}</TableGroup>
-${titleField1Xml}${titleField2Xml}\t<DeleteActions />
+${titleField1Xml}${titleField2Xml}${extendedXml}\t<DeleteActions />
 \t<FieldGroups>
 \t\t<AxTableFieldGroup>
 \t\t\t<Name>AutoReport</Name>
@@ -1014,8 +1032,24 @@ ${defaultParamGroupXml}
         return this.generateAxViewXml(objectName, properties);
       case 'map':
         return this.generateAxMapXml(objectName, properties);
-      case 'data-entity':
-        return this.generateAxDataEntityXml(objectName, properties);
+      case 'data-entity': {
+        // Mirrors createD365File.ts: X++ handed in for a data entity used to be
+        // dropped, producing an entity with no <SourceCode>. Split it here — the
+        // shared builder deliberately does no X++ parsing.
+        const entitySource = sourceCode ?? (properties as any)?.sourceCode;
+        let entityProps = properties;
+        if (typeof entitySource === 'string' && entitySource.trim()) {
+          const split = XmlTemplateGenerator.splitXppClassSource(
+            decodeXmlEntitiesFromXppSource(entitySource),
+          );
+          entityProps = {
+            declaration: split.declaration,
+            methods: split.methods.map(m => ({ ...m, source: reindentXppSource(m.source) })),
+            ...properties,
+          };
+        }
+        return this.generateAxDataEntityXml(objectName, entityProps);
+      }
       case 'report':
         return this.generateAxReportXml(objectName, properties);
       case 'edt':
@@ -1025,21 +1059,21 @@ ${defaultParamGroupXml}
       case 'form-extension':
         return this.generateAxFormExtensionXml(objectName);
       case 'edt-extension':
-        return this.generateAxSimpleExtensionXml('AxEdtExtension', objectName);
+        return this.generateAxEdtExtensionXml(objectName, properties);
       case 'enum-extension':
         return this.generateAxEnumExtensionXml(objectName, properties);
       case 'data-entity-extension':
-        return this.generateAxSimpleExtensionXml('AxDataEntityViewExtension', objectName);
+        return this.generateAxDataEntityViewExtensionXml(objectName, properties);
       case 'menu-item-display':
       case 'menu-item-action':
       case 'menu-item-output':
         return this.generateAxMenuItemXml(objectType, objectName, properties);
       case 'menu-item-display-extension':
-        return this.generateAxSimpleExtensionXml('AxMenuItemDisplayExtension', objectName);
+        return this.generateAxMenuItemExtensionXml('AxMenuItemDisplayExtension', objectName, properties);
       case 'menu-item-action-extension':
-        return this.generateAxSimpleExtensionXml('AxMenuItemActionExtension', objectName);
+        return this.generateAxMenuItemExtensionXml('AxMenuItemActionExtension', objectName, properties);
       case 'menu-item-output-extension':
-        return this.generateAxSimpleExtensionXml('AxMenuItemOutputExtension', objectName);
+        return this.generateAxMenuItemExtensionXml('AxMenuItemOutputExtension', objectName, properties);
       case 'menu':
         return this.generateAxMenuXml(objectName, properties);
       case 'menu-extension':
@@ -1054,6 +1088,10 @@ ${defaultParamGroupXml}
         return this.generateAxSecurityDutyExtensionXml(objectName, properties);
       case 'security-role-extension':
         return this.generateAxSecurityRoleExtensionXml(objectName, properties);
+      case 'service':
+        return buildAxServiceXml(objectName, properties);
+      case 'service-group':
+        return buildAxServiceGroupXml(objectName, properties);
       default:
         throw new Error(`Unsupported object type: ${objectType}`);
     }
@@ -1090,12 +1128,35 @@ ${defaultParamGroupXml}
 </AxEdt>`;
   }
 
-  static generateAxSimpleExtensionXml(rootElement: string, name: string): string {
-    return `<?xml version="1.0" encoding="utf-8"?>
-<${rootElement} xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
-\t<Name>${name}</Name>
-\t<PropertyModifications />
-</${rootElement}>`;
+  /**
+   * Generate AxEdtExtension XML. Delegates to the shared builder so this cannot
+   * drift from createD365File.ts's copy — see edtExtensionXml.ts for the property
+   * contract and why <ArrayElements /> is unconditional.
+   */
+  static generateAxEdtExtensionXml(name: string, properties?: Record<string, any>): string {
+    return buildAxEdtExtensionXml(name, properties);
+  }
+
+  /**
+   * Generate AxDataEntityViewExtension XML. Delegates to the shared builder so
+   * this cannot drift from createD365File.ts's copy — see
+   * dataEntityViewExtensionXml.ts for the property contract.
+   */
+  static generateAxDataEntityViewExtensionXml(name: string, properties?: Record<string, any>): string {
+    return buildAxDataEntityViewExtensionXml(name, properties);
+  }
+
+  /**
+   * Generate AxMenuItem{Display,Action,Output}Extension XML. Delegates to the
+   * shared builder so this cannot drift from createD365File.ts's copy — see
+   * menuItemExtensionXml.ts for the property-modification contract.
+   */
+  static generateAxMenuItemExtensionXml(
+    rootElement: AxMenuItemExtensionRootElement,
+    name: string,
+    properties?: Record<string, any>
+  ): string {
+    return buildAxMenuItemExtensionXml(rootElement, name, properties);
   }
 
   /**
@@ -1500,6 +1561,8 @@ export async function handleGenerateD365Xml(
       'security-duty-extension': 'AxSecurityDutyExtension',
       'security-role-extension': 'AxSecurityRoleExtension',
       map: 'AxMap',
+      service: 'AxService',
+      'service-group': 'AxServiceGroup',
     };
 
     const objectFolder = objectFolderMap[args.objectType];

@@ -457,11 +457,18 @@ namespace D365MetadataBridge.Protocol
                                 ?? throw new ArgumentException("Missing: objectName");
                             var fieldName = request.GetStringParam("fieldName")
                                 ?? throw new ArgumentException("Missing: fieldName");
+                            // dataField/dataSource select the data-entity-extension mapped-field
+                            // path inside AddField; both are absent for table/table-extension.
+                            // This is the single-op RPC that BridgeClient.addField() calls —
+                            // it must forward the same parameters as the batch-modify case below.
                             return _writeService!.AddField(tableName, fieldName,
                                 request.GetStringParam("fieldType") ?? "String",
                                 request.GetStringParam("edt"),
                                 request.GetBoolParam("mandatory") ?? false,
-                                request.GetStringParam("label"));
+                                request.GetStringParam("label"),
+                                request.GetStringParam("dataField"),
+                                request.GetStringParam("dataSource"),
+                                request.GetStringParam("fieldGroupName"));
                         });
 
                     case "setproperty":
@@ -528,6 +535,53 @@ namespace D365MetadataBridge.Protocol
                             return _writeService!.RemoveIndex(tableName, indexName);
                         });
 
+                    // This is the single-op RPC that BridgeClient.addFullTextIndex()/
+                    // addTableMapping() actually call — it must carry the same four cases
+                    // HandleBatchModify() has below, or every real request dies with
+                    // "-32601 Unknown method" no matter how correct the C# write path is.
+                    case "addfulltextindex":
+                        return HandleWrite(request, () =>
+                        {
+                            var tableName = request.GetStringParam("objectName")
+                                ?? throw new ArgumentException("Missing: objectName");
+                            var indexName = request.GetStringParam("indexName")
+                                ?? throw new ArgumentException("Missing: indexName");
+                            return _writeService!.AddFullTextIndex(tableName, indexName,
+                                request.GetParam<System.Collections.Generic.List<string>>("fields"));
+                        });
+
+                    case "removefulltextindex":
+                        return HandleWrite(request, () =>
+                        {
+                            var tableName = request.GetStringParam("objectName")
+                                ?? throw new ArgumentException("Missing: objectName");
+                            var indexName = request.GetStringParam("indexName")
+                                ?? throw new ArgumentException("Missing: indexName");
+                            return _writeService!.RemoveFullTextIndex(tableName, indexName);
+                        });
+
+                    case "addtablemapping":
+                        return HandleWrite(request, () =>
+                        {
+                            var tableName = request.GetStringParam("objectName")
+                                ?? throw new ArgumentException("Missing: objectName");
+                            var mapName = request.GetStringParam("mapName")
+                                ?? throw new ArgumentException("Missing: mapName");
+                            return _writeService!.AddTableMapping(tableName, mapName,
+                                request.GetStringParam("mappingTable"),
+                                request.GetParam<System.Collections.Generic.List<WriteMappingConnection>>("connections"));
+                        });
+
+                    case "removetablemapping":
+                        return HandleWrite(request, () =>
+                        {
+                            var tableName = request.GetStringParam("objectName")
+                                ?? throw new ArgumentException("Missing: objectName");
+                            var mapName = request.GetStringParam("mapName")
+                                ?? throw new ArgumentException("Missing: mapName");
+                            return _writeService!.RemoveTableMapping(tableName, mapName);
+                        });
+
                     case "addrelation":
                         return HandleWrite(request, () =>
                         {
@@ -538,7 +592,10 @@ namespace D365MetadataBridge.Protocol
                             var relatedTable = request.GetStringParam("relatedTable")
                                 ?? throw new ArgumentException("Missing: relatedTable");
                             return _writeService!.AddRelation(tableName, relationName, relatedTable,
-                                request.GetParam<System.Collections.Generic.List<WriteRelationConstraint>>("constraints"));
+                                request.GetParam<System.Collections.Generic.List<WriteRelationConstraint>>("constraints"),
+                                request.GetStringParam("relationCardinality") ?? request.GetStringParam("cardinality"),
+                                request.GetStringParam("relatedTableCardinality"),
+                                request.GetStringParam("relationshipType"));
                         });
 
                     case "removerelation":
@@ -585,7 +642,12 @@ namespace D365MetadataBridge.Protocol
                                 ?? throw new ArgumentException("Missing: fieldGroupName");
                             var fieldName = request.GetStringParam("fieldName")
                                 ?? throw new ArgumentException("Missing: fieldName");
-                            return _writeService!.AddFieldToFieldGroup(tableName, groupName, fieldName);
+                            // This is the single-op RPC BridgeClient.addFieldToFieldGroup() actually
+                            // calls — dropping extendBaseFieldGroup here silently reverts every
+                            // caller to the extension-owns-the-group path (see HandleBatchModify()
+                            // below, which forwards it correctly).
+                            return _writeService!.AddFieldToFieldGroup(tableName, groupName, fieldName,
+                                request.GetBoolParam("extendBaseFieldGroup") ?? false);
                         });
 
                     case "modifyfield":
@@ -908,12 +970,17 @@ namespace D365MetadataBridge.Protocol
 
                             case "addfield":
                             case "add-field":
+                                // dataField/dataSource select the data-entity-extension mapped-field
+                                // path inside AddField; both are absent for table/table-extension.
                                 writeResult = _writeService.AddField(objectName,
                                     S("fieldName") ?? throw new ArgumentException("Missing: fieldName"),
                                     S("fieldType") ?? "String",
                                     S("edt"),
                                     B("mandatory") ?? false,
-                                    S("label"));
+                                    S("label"),
+                                    S("dataField"),
+                                    S("dataSource"),
+                                    S("fieldGroupName"));
                                 break;
 
                             case "modifyfield":
@@ -960,12 +1027,42 @@ namespace D365MetadataBridge.Protocol
                                     S("indexName") ?? throw new ArgumentException("Missing: indexName"));
                                 break;
 
+                            case "addfulltextindex":
+                            case "add-full-text-index":
+                                writeResult = _writeService.AddFullTextIndex(objectName,
+                                    S("indexName") ?? throw new ArgumentException("Missing: indexName"),
+                                    op.GetTypedParam<System.Collections.Generic.List<string>>("fields"));
+                                break;
+
+                            case "removefulltextindex":
+                            case "remove-full-text-index":
+                                writeResult = _writeService.RemoveFullTextIndex(objectName,
+                                    S("indexName") ?? throw new ArgumentException("Missing: indexName"));
+                                break;
+
+                            case "addtablemapping":
+                            case "add-table-mapping":
+                                writeResult = _writeService.AddTableMapping(objectName,
+                                    S("mapName") ?? throw new ArgumentException("Missing: mapName"),
+                                    S("mappingTable"),
+                                    op.GetTypedParam<System.Collections.Generic.List<WriteMappingConnection>>("connections"));
+                                break;
+
+                            case "removetablemapping":
+                            case "remove-table-mapping":
+                                writeResult = _writeService.RemoveTableMapping(objectName,
+                                    S("mapName") ?? throw new ArgumentException("Missing: mapName"));
+                                break;
+
                             case "addrelation":
                             case "add-relation":
                                 writeResult = _writeService.AddRelation(objectName,
                                     S("relationName") ?? throw new ArgumentException("Missing: relationName"),
                                     S("relatedTable") ?? throw new ArgumentException("Missing: relatedTable"),
-                                    op.GetTypedParam<System.Collections.Generic.List<WriteRelationConstraint>>("constraints"));
+                                    op.GetTypedParam<System.Collections.Generic.List<WriteRelationConstraint>>("constraints"),
+                                    S("relationCardinality") ?? S("cardinality"),
+                                    S("relatedTableCardinality"),
+                                    S("relationshipType"));
                                 break;
 
                             case "removerelation":
@@ -992,7 +1089,8 @@ namespace D365MetadataBridge.Protocol
                             case "add-field-to-field-group":
                                 writeResult = _writeService.AddFieldToFieldGroup(objectName,
                                     S("fieldGroupName") ?? S("groupName") ?? throw new ArgumentException("Missing: fieldGroupName"),
-                                    S("fieldName") ?? throw new ArgumentException("Missing: fieldName"));
+                                    S("fieldName") ?? throw new ArgumentException("Missing: fieldName"),
+                                    B("extendBaseFieldGroup") ?? false);
                                 break;
 
                             case "addenumvalue":

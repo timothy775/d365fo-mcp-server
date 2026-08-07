@@ -10,8 +10,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { codeGenTool } from '../../src/tools/codeGen';
 import { completionTool } from '../../src/tools/completion';
-import { handleGenerateD365Xml } from '../../src/tools/generateD365Xml';
-import { XmlTemplateGenerator } from '../../src/tools/createD365File';
+import { handleGenerateD365Xml, XmlTemplateGenerator as generateGenerator } from '../../src/tools/generateD365Xml';
+import { XmlTemplateGenerator, XmlTemplateGenerator as createGenerator } from '../../src/tools/createD365File';
 import { handleGenerateSmartTable, selectUnbuildableEdts } from '../../src/tools/generateSmartTable';
 import { handleGenerateSmartForm } from '../../src/tools/generateSmartForm';
 import { handleSuggestEdt } from '../../src/tools/suggestEdt';
@@ -382,6 +382,62 @@ describe('XmlTemplateGenerator.generateAxDataEntityXml', () => {
   });
 });
 
+// ─── generate('data-entity', …) drops the caller's X++ ──────────────────────
+
+/**
+ * Regression: eval/corpus/runs/2026-07-29T12__L3-dualwrite-entity-mapping__483852c.json
+ * and the L3-dmf-entity-import-slice blocker — X++ handed to
+ * d365fo_file(action="create", objectType="data-entity") was silently dropped, so
+ * validateWrite()/postLoad() overrides never reached <SourceCode>. Both dispatchers
+ * (createD365File.ts and generateD365Xml.ts) must split it and pass it to the
+ * shared builder.
+ */
+describe.each([
+  ['createD365File', createGenerator],
+  ['generateD365Xml', generateGenerator],
+])('%s.generate("data-entity") — X++ passthrough', (_name, Generator: any) => {
+  const xpp = `public class ConDemoImportTargetEntity extends common
+{
+}
+
+public boolean validateWrite()
+{
+    boolean ret = super();
+    return ret;
+}`;
+
+  it('splits the caller X++ into Declaration + Methods instead of dropping it', () => {
+    const xml = Generator.generate('data-entity', 'ConDemoImportTargetEntity', xpp, {
+      primaryTable: 'ConDemoImportTarget',
+      fields: [{ name: 'DocumentCode' }],
+    });
+    expect(xml).toContain('public class ConDemoImportTargetEntity extends common');
+    expect(xml).toContain('<Name>validateWrite</Name>');
+    expect(xml).toContain('boolean ret = super();');
+    // Passing source implies the AOT-canonical skeleton.
+    expect(xml).toContain('\t<DeleteActions />\n');
+    expect(xml).toContain('\t<StateMachines />\n');
+  });
+
+  it('also accepts the X++ inside properties.sourceCode', () => {
+    const xml = Generator.generate('data-entity', 'ConDemoImportTargetEntity', undefined, {
+      primaryTable: 'ConDemoImportTarget',
+      fields: [{ name: 'DocumentCode' }],
+      sourceCode: xpp,
+    });
+    expect(xml).toContain('<Name>validateWrite</Name>');
+  });
+
+  it('emits no <SourceCode> at entity level when no X++ is supplied (backward compat)', () => {
+    const xml = Generator.generate('data-entity', 'ConDemoImportTargetEntity', undefined, {
+      primaryTable: 'ConDemoImportTarget',
+      fields: [{ name: 'DocumentCode' }],
+    });
+    expect(xml).not.toMatch(/^\t<SourceCode>/m);
+    expect(xml).not.toMatch(/^\t<DeleteActions \/>/m);
+  });
+});
+
 // ─── XmlTemplateGenerator.generateAxQueryXml / generateAxViewXml ────────────
 
 describe('XmlTemplateGenerator.generateAxQueryXml', () => {
@@ -654,7 +710,12 @@ describe('XmlTemplateGenerator security duty/role generators', () => {
       label: '@My:Duty',
       privileges: ['MyView', 'MyMaintain'],
     });
-    expect(xml).toContain('<AxSecurityRolePermissionSet>\n\t\t\t<Name>MyView</Name>');
+    // AxSecurityPrivilegeReference, NOT AxSecurityRolePermissionSet: the latter
+    // deserializes into an empty privilege list, so xppbp reports
+    // BPErrorDutyHasNoPrivileges / BPErrorPrivilegeNotCoveredByDuty for privileges
+    // that are physically in the file (docs/eval-sweep-findings-2026-07-21.md #31).
+    expect(xml).toContain('<AxSecurityPrivilegeReference>\n\t\t\t<Name>MyView</Name>');
+    expect(xml).not.toContain('AxSecurityRolePermissionSet');
     expect(xml).toContain('<Name>MyMaintain</Name>');
     expect(xml).not.toContain('<Privileges />');
   });
@@ -676,7 +737,9 @@ describe('XmlTemplateGenerator security duty/role generators', () => {
     const xml = XmlTemplateGenerator.generateAxSecurityRoleXml('MyRole', {
       duties: ['MyDuty1', 'MyDuty2'],
     });
-    expect(xml).toContain('<AxSecurityRoleDutyPermission>\n\t\t\t<Name>MyDuty1</Name>');
+    // AxSecurityDutyReference — see the duty test above (findings #31).
+    expect(xml).toContain('<AxSecurityDutyReference>\n\t\t\t<Name>MyDuty1</Name>');
+    expect(xml).not.toContain('AxSecurityRoleDutyPermission');
     expect(xml).toContain('<Name>MyDuty2</Name>');
     expect(xml).not.toContain('<Duties />');
   });
@@ -801,6 +864,76 @@ describe('generate_smart_table', () => {
     );
     expect(result?.content[0].text).toContain('MyCustomTable');
     expect(result?.content[0].text).toMatch(/Description|Amount/);
+  });
+
+  // eval #21: fieldsHint carries only names, so an enum-backed field or an explicit
+  // EDT could not be expressed and was silently mis-typed as a String EDT.
+  it('accepts structured fields[] and keeps enum fields as AxTableFieldEnum', async () => {
+    const result = await handleGenerateSmartTable(
+      {
+        name: 'ConDemoNote',
+        modelName: 'MyModel',
+        fields: [
+          { name: 'NoteId', edt: 'Description', mandatory: true },
+          { name: 'Status', enumType: 'ConDemoNoteStatus' },
+        ],
+      },
+      ctx.symbolIndex,
+    );
+    const text = result?.content[0].text as string;
+    expect(text).toContain('<EnumType>ConDemoNoteStatus</EnumType>');
+    expect(text).toContain('i:type="AxTableFieldEnum"');
+    // The caller's enum name survives; fieldsHint could never have expressed it.
+    expect(text).toContain('<Name>NoteId</Name>');
+    expect(text).toContain('<Mandatory>Yes</Mandatory>');
+  });
+
+  // eval #21: scaffold is generation-only by name but the Windows path writes the
+  // file, and undo_last_modification cannot clean that up (PackagesLocalDirectory
+  // is not a git repo). preview=true is the no-write route.
+  it('preview=true returns XML without writing on Windows', async () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    const result = await handleGenerateSmartTable(
+      {
+        name: 'ConDemoPreview',
+        modelName: 'MyModel',
+        preview: true,
+        fields: [{ name: 'NoteId', edt: 'Description' }],
+      },
+      ctx.symbolIndex,
+    );
+    const text = result?.content[0].text as string;
+    expect(text).toContain('nothing was written to disk');
+    expect(text).toContain('<AxTable');
+  });
+
+  it('fields[] wins over fieldsHint', async () => {
+    const result = await handleGenerateSmartTable(
+      {
+        name: 'ConDemoNote',
+        modelName: 'MyModel',
+        fieldsHint: 'ShouldBeIgnored',
+        fields: [{ name: 'OnlyThis', edt: 'Description' }],
+      },
+      ctx.symbolIndex,
+    );
+    const text = result?.content[0].text as string;
+    expect(text).toContain('OnlyThis');
+    expect(text).not.toContain('ShouldBeIgnored');
+  });
+
+  it('rejects reserved system field names passed via fields[]', async () => {
+    const result = await handleGenerateSmartTable(
+      {
+        name: 'ConDemoNote',
+        modelName: 'MyModel',
+        fields: [{ name: 'CreatedDateTime' }],
+      },
+      ctx.symbolIndex,
+    );
+    expect(result?.isError).toBe(true);
+    expect(result?.content[0].text).toContain('Reserved system field name');
+    expect(result?.content[0].text).toContain('`fields`');
   });
 
   it('includes an index when uniqueIndex is specified', async () => {

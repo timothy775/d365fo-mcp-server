@@ -18,7 +18,7 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
         action: {
           type: 'string',
           enum: ['create', 'modify', 'generate'],
-          description: 'create = new object file (write); modify = edit existing object (write); generate = XML text only (no write).',
+          description: 'One of the three modes described above.',
         },
         objectType: {
           type: 'string',
@@ -31,6 +31,8 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
             'security-privilege', 'security-duty', 'security-role',
             'security-duty-extension', 'security-role-extension',
             'business-event', 'tile', 'kpi', 'map',
+            'service', 'service-group',
+            'macro', 'configuration-key', 'security-policy', 'aggregate-measurement', 'license-code',
           ],
           description:
             'Each security/menu-item type maps to its own AOT folder — NEVER use security-privilege for duty or role. ' +
@@ -40,7 +42,7 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
         },
         objectName: {
           type: 'string',
-          description: 'Base name WITHOUT model prefix — the tool prepends EXTENSION_PREFIX (or modelName) and detects an existing prefix. Extension classes: pass "{Base}_Extension" with NO prefix infix (produces e.g. "SalesFormLetterMY_Extension"). NEVER hand-build the prefix.'
+          description: 'Base name WITHOUT model prefix — the tool prepends EXTENSION_PREFIX (or modelName) and detects an existing prefix. Extension classes: pass "{Base}_Extension" with NO prefix infix. NEVER hand-build the prefix.'
         },
         modelName: {
           type: 'string',
@@ -52,31 +54,36 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
         },
         packagePath: {
           type: 'string',
-          description: 'Base package path (default: K:\\AosService\\PackagesLocalDirectory). [modify] also locates objects outside the default dir; for models outside bridge startup roots set D365FO_CUSTOM_PACKAGES_PATH or pass filePath.'
+          description: 'Base package path (default: auto-detected PackagesLocalDirectory). [modify] also locates objects outside the default dir; for models outside bridge startup roots set D365FO_CUSTOM_PACKAGES_PATH or pass filePath.'
         },
         sourceCode: {
           type: 'string',
-          description: 'X++ source for the object. FOR CLASSES the content is auto-split: <Declaration> = the class line + ALL member variables inside the outer { }; <Methods> = each method AFTER the closing }. CRITICAL: member variables MUST sit inside the class { }, methods after — never reversed.'
+          description: 'X++ source for the object. FOR CLASSES the content is auto-split: <Declaration> = the class line + ALL member variables inside the outer { }; <Methods> = each method AFTER the closing }.'
         },
         properties: {
           type: 'object',
           description:
             'Additional properties by objectType:\n' +
             '• class: extends, implements, isFinal, isAbstract\n' +
-            '• table: label, tableGroup, tableType, titleField1/2, fields[{name,type?|edt?|fieldType?,enumType?,label?,mandatory?}] — enum fields need enumType (+ optionally fieldType:"AxTableFieldEnum")\n' +
+            '• table: label, tableGroup, tableType, titleField1/2, cacheLookup?, primaryIndex?, allowRowVersionChangeTracking? (dual-write), created/modifiedBy/DateTime?, fields[{name,type?|edt?|fieldType?,enumType?,label?,mandatory?}] — enum fields need enumType (+ optionally fieldType:"AxTableFieldEnum")\n' +
             '• enum: label, useEnumValue, configurationKey, isExtensible, enumValues[{name,value?,label?,helpText?}]\n' +
             '• enum-extension: enumValues[{name,label?,value?,countryRegionCodes?}]\n' +
             '• table-extension: fields[{name,edt?,enumType?,label?,mandatory?,fieldType?}] — enum fields need fieldType:"AxTableFieldEnum" + enumType\n' +
             '• edt: label, extends, edtType, stringSize\n' +
+            '• edt-extension: label?, helpText?, stringSize?, extends?, formHelp?, propertyModifications?[{name,value}] = the change\n' +
             '• form: caption, formTemplate, dataSource\n' +
             '• security-privilege: label, targetObject, objectType (MenuItemDisplay|Action|Output), accessLevel (view|maintain), dataEntity (grants perms)\n' +
             '• security-duty: label, privileges[]\n' +
             '• security-role: label, duties[], privileges[]\n' +
             '• menu-item-*: label, object, objectType\n' +
-            '• data-entity: primaryTable, fields[{name,dataField?}], dataManagementEnabled? (default false; true only if staging table exists)\n' +
-            '• map: label?, developerDocumentation?, fields[{name,type?,edt?,enumType?,stringSize?}], mappingTable?, mappings?[{mapField,mapFieldTo}] (defaults to one connection/field when mappingTable set)\n' +
+            '• data-entity: primaryTable, fields[{name,dataField?}], primaryKey?, primaryKeyFields?[], isPublic?, entityCategory?, dynamicFields?, allowRowVersionChangeTracking? (dual-write: set on the source TABLES too), dataManagementEnabled? (needs staging table)\n' +
+            '• map: label?, developerDocumentation?, fields[{name,type?,edt?,enumType?,stringSize?}], mappingTable?, mappings?[{mapField,mapFieldTo}] (one connection/field by default)\n' +
             '• query: title?, dataSource (root table; table also works), dataSourceName?, fields?[{name,field?}]\n' +
-            '• view: query (existing AxQuery), fields[{name,dataField?}] — dataSource defaults to query'
+            '• view: query (existing AxQuery), fields[{name,dataField?}] — dataSource defaults to query\n' +
+            '• service: serviceClass (defaults to the service name), externalName?, namespace?, description?, operations["opName"] or [{name?,method?,enableIdempotence?,subscriberAccessLevelRead?}]\n' +
+            '• service-group: autoDeploy? (Yes publishes at /api/services), description?, services["MyService"] or [{name?,service?}]\n' +
+            '  ⚠ service/service-group CROSS-REFS (serviceClass, services[].service) are written VERBATIM — only objectName is prefixed. ' +
+            'Pass the FINAL name (e.g. "ContosoDemoNoteService", not "DemoNoteService") or the group resolves to nothing; verbatim also lets it reference an unprefixed MS service.'
         },
         addToProject: {
           type: 'boolean',
@@ -114,7 +121,10 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
             'add-field', 'modify-field', 'rename-field', 'replace-all-fields', 'remove-field',
             'add-display-method', 'add-table-method',
             'add-index', 'remove-index',
+            'add-full-text-index', 'remove-full-text-index',
+            'add-table-mapping', 'remove-table-mapping',
             'add-relation', 'remove-relation',
+            'add-delete-action', 'remove-delete-action',
             'add-field-group', 'remove-field-group', 'add-field-to-field-group',
             'add-field-modification',
             'add-data-source', 'add-control',
@@ -124,30 +134,32 @@ Model from .mcp.json; prefix auto-applied from EXTENSION_PREFIX. Classes: member
           ],
           description:
             '[modify] REQUIRED. Modification to perform. Non-obvious ones:\n' +
-            'add-method: adds OR updates in place when the method name exists (position preserved).\n' +
-            'replace-code: surgical oldCode→newCode replacement; preferred for rewriting a known method. Form control overrides: methodName="ControlName.methodName".\n' +
+            'add-method: adds OR updates in place if the name exists (position kept).\n' +
+            'replace-code: surgical oldCode→newCode; preferred for rewriting a known method. Control overrides: methodName="Control.method".\n' +
             'rename-field: also fixes index DataField refs and TitleField1/2.\n' +
-            'replace-all-fields: atomic rewrite of ALL fields (corrupted field names).\n' +
+            'replace-all-fields: atomic rewrite of ALL fields.\n' +
             'add-display-method: display method with [SysClientCacheDataMethodAttribute].\n' +
-            'add-table-method: canonical find/exist/findByRecId/validateWrite/validateDelete/initValue boilerplate.\n' +
+            'add-table-method: canonical find/exist/findByRecId/validate*/initValue boilerplate.\n' +
             'add-field-modification: override base-table field label/mandatory in a table-extension.\n' +
-            'modify-property: any object-level property (TableGroup, TitleField1, TableType, Extends…) — see propertyPath.'
+            'add-delete-action: DeleteActions entry — deleteActionName + optional deleteActionTable/deleteActionType.\n' +
+            'add-full-text-index/add-table-mapping: the <FullTextIndexes>/<Mappings> collections.\n' +
+            'modify-property: any object-level property (TableGroup, TitleField1, Extends…) — see propertyPath; on an *-extension it becomes a PropertyModification.'
         },
         params: {
           type: 'object',
           additionalProperties: true,
           description:
-            '[modify] Operation-specific parameters as ONE object. Common shapes: ' +
+            '[modify] Operation-specific parameters as ONE object — NEST them here. Common shapes: ' +
             'add-method {methodName, sourceCode} · replace-code {oldCode, newCode, methodName?} · ' +
-            'add-field {fieldName, fieldType(EDT), fieldBaseType?} · rename-field {fieldName, fieldNewName} · ' +
+            'add-field {fieldName, fieldType(EDT), fieldBaseType?}; data-entity-ext ' +
+            '{fieldName, dataField, dataSource} · rename-field {fieldName, fieldNewName} · ' +
             'add-index {indexName, indexFields[{fieldName}]} · add-relation {relationName, relatedTable, relationConstraints?} · ' +
             'add-field-group {fieldGroupName, fieldGroupFields?} · add-data-source {dataSourceName, dataSourceTable} · ' +
             'add-control {controlName, parentControl, controlDataSource?, controlDataField?} · ' +
             'enum ops {enumValueName, enumValueNewName?(modify-enum-value rename), enumValueLabel?, enumValueInt?} · add-menu-item-to-menu {menuItemToAdd} · ' +
             'modify-property {propertyPath, propertyValue} · add-table-method {tableMethodType, tableKeyField?} · ' +
             'add-display-method {methodName, displayMethodReturnEdt}. ' +
-            'A missing/wrong parameter returns the COMPLETE spec (names, types, descriptions) for that operation — ' +
-            'follow the error guidance instead of guessing. Same keys also accepted flat at top level.',
+            'A missing/wrong parameter returns the COMPLETE spec for that operation — follow it instead of guessing.',
         },
         createBackup: {
           type: 'boolean',

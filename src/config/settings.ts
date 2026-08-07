@@ -130,8 +130,10 @@ export const SETTINGS: Setting[] = [
     type: 'path',
     label: 'Packages root (PackagesLocalDirectory)',
     description:
-      'Root folder of all D365FO packages — the read-only reference the index is built from. ' +
-      'Machine-wide on a traditional VM; UDE resolves it from the XPP config instead.',
+      'AOT packages folder (PackagesLocalDirectory) used as the read-only source for indexing. ' +
+      'Machine-wide on a traditional VM; UDE resolves it from the XPP config instead. ' +
+      'Left empty, the server scans the machine\'s drives for AosService\\PackagesLocalDirectory — ' +
+      'which volume that is depends on the VM image (K:, C:, J:, …).',
     placeholder: 'C:\\AOSService\\PackagesLocalDirectory',
   },
   {
@@ -563,6 +565,18 @@ export const SETTINGS: Setting[] = [
     label: 'Max restarts per minute',
     description: 'Circuit breaker: after this many respawns within 60 s the server stops trying.',
     default: 3,
+  },
+  {
+    path: 'bridge.exePath',
+    env: 'D365FO_BRIDGE_EXE_PATH',
+    section: 'bridge',
+    tier: 'advanced',
+    type: 'path',
+    label: 'Bridge executable',
+    description:
+      'Absolute path to D365MetadataBridge.exe. Leave empty to auto-detect inside the installation — ' +
+      'the setup wizard fills this in for an npm install, where the binary is built outside the package ' +
+      'so that updating the package does not delete it.',
   },
   {
     path: 'bridge.logFile',

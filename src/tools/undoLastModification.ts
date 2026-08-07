@@ -5,6 +5,7 @@ import { promises as fsp } from 'fs';
 import path from 'path';
 import type { XppServerContext } from '../types/context.js';
 import { bridgeRefreshProvider } from '../bridge/index.js';
+import { lookupCreatedArtifact, forgetCreatedArtifact, type CreatedArtifact } from './createdArtifactLedger.js';
 
 const execFileAsync = util.promisify(execFile);
 
@@ -50,6 +51,16 @@ export const undoLastModificationTool = async (params: any, context: XppServerCo
     try {
       repoRoot = await git(['rev-parse', '--show-toplevel'], cwd);
     } catch {
+      // Not inside a git repository — e.g. the D365FO sandbox
+      // K:\AosService\PackagesLocalDirectory. The git-based revert/delete cannot
+      // help here. Fall back to the create-artifact ledger: undo may delete a file
+      // ONLY when d365fo_file(action="create") recorded creating it (genuinely new)
+      // in THIS server session. Anything not in the ledger keeps the original
+      // "not inside a git repository" error — the non-git path never deletes an
+      // arbitrary or pre-existing file.
+      // (Corpus: eval/corpus/runs/2026-07-21T__L3-custom-service-basic__a2a4131.json.)
+      const ledgerResult = await undoViaLedger(absolutePath, context);
+      if (ledgerResult) return ledgerResult;
       return {
         content: [{ type: 'text', text: 'File is not inside a git repository: ' + absolutePath }],
         isError: true,
@@ -129,6 +140,67 @@ export const undoLastModificationTool = async (params: any, context: XppServerCo
     };
   }
 };
+
+/**
+ * Non-git undo path. Safe by construction: it acts ONLY on a file that
+ * d365fo_file(action="create") recorded creating (genuinely new) in this session.
+ * Returns null when the path is not in the ledger, so the caller can fall back to
+ * the original "not inside a git repository" error. Deletes the created file and
+ * cleans its .rnrproj entry (when the create recorded a project) plus the index.
+ */
+async function undoViaLedger(
+  absolutePath: string,
+  context: XppServerContext,
+): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean } | null> {
+  const entry = lookupCreatedArtifact(absolutePath);
+  if (!entry) return null;
+
+  if (!fs.existsSync(absolutePath)) {
+    // Already gone (e.g. removed by hand). Still clean the project + index and
+    // forget the ledger entry so the run's state is consistent.
+    await removeFromProjectSafe(entry);
+    forgetCreatedArtifact(absolutePath);
+    await cleanupIndexAfterUndo(context, absolutePath, 'deleted');
+    return {
+      content: [{ type: 'text', text: 'File already removed; cleaned project + index entries for session-created object: ' + absolutePath }],
+    };
+  }
+
+  const stat = await fsp.stat(absolutePath);
+  if (!stat.isFile()) {
+    return {
+      content: [{ type: 'text', text: 'Refusing to delete non-file path: ' + absolutePath }],
+      isError: true,
+    };
+  }
+
+  fs.unlinkSync(absolutePath);
+  await removeFromProjectSafe(entry);
+  forgetCreatedArtifact(absolutePath);
+  await cleanupIndexAfterUndo(context, absolutePath, 'deleted');
+
+  const projectNote = entry.projectPath
+    ? '\nRemoved its project entry from ' + path.basename(entry.projectPath) + '.'
+    : '';
+  return {
+    content: [{ type: 'text', text: 'Successfully undid file creation (deleted session-created file outside git): ' + absolutePath + projectNote + '\nStale index entries cleaned up.' }],
+  };
+}
+
+/**
+ * Best-effort reversal of create_d365fo_file's addToProject. Non-fatal: a failure
+ * to touch the .rnrproj must never abort the file deletion that already succeeded.
+ * Uses a dynamic import to avoid a static dependency cycle with createD365File.ts.
+ */
+async function removeFromProjectSafe(entry: CreatedArtifact): Promise<void> {
+  if (!entry.projectPath || !entry.objectType || !entry.objectName) return;
+  try {
+    const { ProjectFileManager } = await import('./createD365File.js');
+    await new ProjectFileManager().removeFromProject(entry.projectPath, entry.objectType, entry.objectName);
+  } catch (e) {
+    console.error(`[undo] Non-git project cleanup failed (non-fatal): ${e}`);
+  }
+}
 
 /**
  * Clean up the symbol index, label index, and bridge after a file is reverted or

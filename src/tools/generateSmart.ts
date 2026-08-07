@@ -28,7 +28,7 @@ type SmartHandler = (args: any, context: XppServerContext) => Promise<any>;
 export const GENERATE_SMART_DISPATCH: Record<GenerateSmartType, SmartHandler> = {
   table:  (args, ctx) => handleGenerateSmartTable(args, ctx.symbolIndex, ctx.bridge),
   form:   (args, ctx) => handleGenerateSmartForm(args, ctx.symbolIndex),
-  report: (args, ctx) => handleGenerateSmartReport(args, ctx.symbolIndex),
+  report: (args, ctx) => handleGenerateSmartReport(args, ctx.symbolIndex, ctx.bridge),
 };
 
 const GenerateSmartArgsSchema = z
@@ -59,7 +59,11 @@ export async function generateSmartTool(request: CallToolRequest, context: XppSe
   }
 
   const result = await handler(rest, context);
-  return { content: result?.content ?? [{ type: 'text', text: 'No results returned' }] };
+  // Preserve isError — dropping it reported a rejected generation as a success.
+  return {
+    content: result?.content ?? [{ type: 'text', text: 'No results returned' }],
+    ...(result?.isError ? { isError: true } : {}),
+  };
 }
 
 // Tool registration (name, description, inputSchema) lives inline in

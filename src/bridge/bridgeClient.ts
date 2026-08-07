@@ -54,6 +54,7 @@ import type {
   BridgeEventSubscriberResult,
   BridgeApiUsageCallersResult,
 } from './bridgeTypes.js';
+import { packagesRoots } from '../utils/packagesRoot.js';
 
 // Re-export types for convenience
 export type { BridgeReadyPayload, BridgeInfoPayload } from './bridgeTypes.js';
@@ -122,7 +123,7 @@ function sleep(ms: number): Promise<void> {
 export interface BridgeClientOptions {
   /** Path to the D365MetadataBridge.exe (auto-detected if omitted) */
   bridgeExePath?: string;
-  /** K:\AosService\PackagesLocalDirectory */
+  /** e.g. K:\AosService\PackagesLocalDirectory — the volume varies by VM image */
   packagesPath: string;
   /**
    * Optional secondary packages path.
@@ -712,9 +713,13 @@ export class BridgeClient extends EventEmitter {
     return this.call<BridgeWriteResult>('addMethod', { objectType, objectName, methodName, sourceCode });
   }
 
-  /** Add a field to a table via IMetadataProvider.Update() */
-  async addField(objectName: string, fieldName: string, fieldType: string, edt?: string, mandatory?: boolean, label?: string): Promise<BridgeWriteResult> {
-    return this.call<BridgeWriteResult>('addField', { objectName, fieldName, fieldType, edt, mandatory, label });
+  /**
+   * Add a field to a table, table-extension or data-entity-view-extension via
+   * IMetadataProvider.Update(). dataField/dataSource select the data-entity mapped-field
+   * path on the bridge side; fieldGroupName additionally appends it to a base-entity group.
+   */
+  async addField(objectName: string, fieldName: string, fieldType: string, edt?: string, mandatory?: boolean, label?: string, dataField?: string, dataSource?: string, fieldGroupName?: string): Promise<BridgeWriteResult> {
+    return this.call<BridgeWriteResult>('addField', { objectName, fieldName, fieldType, edt, mandatory, label, dataField, dataSource, fieldGroupName });
   }
 
   /** Set a property on any object via IMetadataProvider.Update() */
@@ -742,9 +747,54 @@ export class BridgeClient extends EventEmitter {
     return this.call<BridgeWriteResult>('removeIndex', { objectName: tableName, indexName });
   }
 
-  /** Add a relation to a table */
-  async addRelation(tableName: string, relationName: string, relatedTable: string, constraints?: Array<{ field?: string; relatedField?: string }>): Promise<BridgeWriteResult> {
-    return this.call<BridgeWriteResult>('addRelation', { objectName: tableName, relationName, relatedTable, constraints });
+  /** Add a full-text index to a table or table-extension (a separate collection from Indexes) */
+  async addFullTextIndex(tableName: string, indexName: string, fields?: string[]): Promise<BridgeWriteResult> {
+    return this.call<BridgeWriteResult>('addFullTextIndex', { objectName: tableName, indexName, fields });
+  }
+
+  /** Remove a full-text index from a table or table-extension */
+  async removeFullTextIndex(tableName: string, indexName: string): Promise<BridgeWriteResult> {
+    return this.call<BridgeWriteResult>('removeFullTextIndex', { objectName: tableName, indexName });
+  }
+
+  /** Add a Map membership to a table or table-extension */
+  async addTableMapping(
+    tableName: string,
+    mapName: string,
+    mappingTable?: string,
+    connections?: Array<{ mapField?: string; mapFieldTo?: string }>,
+  ): Promise<BridgeWriteResult> {
+    return this.call<BridgeWriteResult>('addTableMapping', { objectName: tableName, mapName, mappingTable, connections });
+  }
+
+  /** Remove a Map membership from a table or table-extension */
+  async removeTableMapping(tableName: string, mapName: string): Promise<BridgeWriteResult> {
+    return this.call<BridgeWriteResult>('removeTableMapping', { objectName: tableName, mapName });
+  }
+
+  /**
+   * Add a relation to a table.
+   *
+   * `properties` carries Cardinality / RelatedTableCardinality / RelationshipType —
+   * real AxTableRelation properties the bridge now sets through the provider. They
+   * used to be dropped on both sides, which is what raised
+   * BPErrorTableRelationshipPropertiesCompleteness on a relation reported as added
+   * (findings #5 / #35). An invalid value is rejected by the bridge with the list of
+   * legal ones rather than silently ignored.
+   */
+  async addRelation(
+    tableName: string,
+    relationName: string,
+    relatedTable: string,
+    constraints?: Array<{ field?: string; relatedField?: string }>,
+    properties?: { relationCardinality?: string; relatedTableCardinality?: string; relationshipType?: string },
+  ): Promise<BridgeWriteResult> {
+    return this.call<BridgeWriteResult>('addRelation', {
+      objectName: tableName, relationName, relatedTable, constraints,
+      relationCardinality: properties?.relationCardinality,
+      relatedTableCardinality: properties?.relatedTableCardinality,
+      relationshipType: properties?.relationshipType,
+    });
   }
 
   /** Remove a relation from a table */
@@ -763,8 +813,8 @@ export class BridgeClient extends EventEmitter {
   }
 
   /** Add a field reference to an existing field group */
-  async addFieldToFieldGroup(tableName: string, groupName: string, fieldName: string): Promise<BridgeWriteResult> {
-    return this.call<BridgeWriteResult>('addFieldToFieldGroup', { objectName: tableName, fieldGroupName: groupName, fieldName });
+  async addFieldToFieldGroup(tableName: string, groupName: string, fieldName: string, extendBaseFieldGroup?: boolean): Promise<BridgeWriteResult> {
+    return this.call<BridgeWriteResult>('addFieldToFieldGroup', { objectName: tableName, fieldGroupName: groupName, fieldName, extendBaseFieldGroup });
   }
 
   /** Modify properties of an existing field on a table */
@@ -845,12 +895,27 @@ export class BridgeClient extends EventEmitter {
 
   // Private helpers
 
+  /**
+   * Locate the bridge binary.
+   *
+   * An explicit path wins and is not second-guessed: it is how an npm install
+   * finds a binary built outside the package (updating the package deletes
+   * anything inside it, and the bridge has to be built per environment — see
+   * the metamodel version check in Program.cs), and how one machine can point
+   * several configurations at different builds.
+   *
+   * Everything else falls back to the in-installation search, unchanged.
+   */
   private resolveBridgeExe(): string {
-    if (this.options.bridgeExePath) {
-      if (!fs.existsSync(this.options.bridgeExePath)) {
-        throw new Error(`Bridge exe not found at: ${this.options.bridgeExePath}`);
+    const configured = this.options.bridgeExePath?.trim() || process.env.D365FO_BRIDGE_EXE_PATH?.trim();
+    if (configured) {
+      if (!fs.existsSync(configured)) {
+        throw new Error(
+          `Bridge exe not found at the configured path: ${configured}\n` +
+          '  Set bridge.exePath (D365FO_BRIDGE_EXE_PATH) to the built binary, or clear it to auto-detect.'
+        );
       }
-      return this.options.bridgeExePath;
+      return configured;
     }
 
     const __filename = fileURLToPath(import.meta.url);
@@ -938,11 +1003,8 @@ function detectPackagesPath(): string | null {
   const candidates = [
     process.env.D365FO_PACKAGE_PATH ?? '',
     process.env.PACKAGES_PATH ?? '',
-    // Well-known fallback locations (traditional D365FO VM layouts)
-    'C:\\AosService\\PackagesLocalDirectory',
-    'C:\\AOSService\\PackagesLocalDirectory',
-    'J:\\AosService\\PackagesLocalDirectory',
-    'K:\\AosService\\PackagesLocalDirectory',
+    // Whatever AosService volumes this machine actually has (C:, J:, K:, …)
+    ...packagesRoots(),
   ].filter(Boolean);
 
   for (const p of candidates) {

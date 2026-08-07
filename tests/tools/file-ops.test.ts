@@ -60,6 +60,9 @@ vi.mock('../../src/utils/configManager', () => ({
     ensureLoaded: vi.fn(async () => {}),
     getPackagePath: vi.fn(() => 'K:\\PackagesLocalDirectory'),
     getModelName: vi.fn(() => 'MyModel'),
+    // Writes are measured against the anchor, not the active model (see getWriteAnchorModel).
+    getWriteAnchorModel: vi.fn(() => 'MyModel'),
+    getToolProjectSwitch: vi.fn(() => null),
     getPackageNameFromWorkspacePath: vi.fn(() => 'MyPackage'),
     getProjectPath: vi.fn(async () => 'K:\\VSProjects\\MySolution\\MyProject\\MyProject.rnrproj'),
     getSolutionPath: vi.fn(async () => null),
@@ -91,9 +94,19 @@ vi.mock('../../src/utils/modelClassifier', () => ({
   getObjectSuffix: vi.fn(() => ''),
   applyObjectSuffix: vi.fn((name: string) => name),
   getExtensionNamingStyle: vi.fn(() => 'prefix'),
+  // validate_object_naming derives the extension token from the model's own
+  // convention; the identity form keeps these tests on the plain prefix infix.
+  deriveExtensionInfix: vi.fn((prefix: string) => prefix),
   isCustomModel: vi.fn(() => true),
   isStandardModel: vi.fn(() => false),
 }));
+
+// These fixtures create into model "Contoso" while the mocked workspace targets
+// "MyModel" — a cross-model write, which d365fo_file now refuses by default. The
+// guard has its own suite (tests/utils/crossModelWriteGuard.test.ts); allow it here
+// so these tests keep testing the thing they are about.
+beforeEach(() => { process.env.D365FO_CROSS_MODEL_WRITE_MODELS = 'Contoso,ContosoRobotics'; });
+afterEach(() => { delete process.env.D365FO_CROSS_MODEL_WRITE_MODELS; });
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -1769,7 +1782,12 @@ describe('modify_d365fo_file', () => {
     );
     expect(written).toBeDefined();
     const writtenContent: string = written[1];
-    expect(writtenContent).toContain('AxMenuFunctionItem');
+    // An AxMenu's <Elements> holds AxMenuElement entries discriminated by i:type.
+    // `AxMenuFunctionItem` (what this used to write) is not a type in the metadata
+    // model — zero of the 73 shipped AxMenu files use it, so the element
+    // deserialized into nothing: docs/eval-sweep-findings-2026-07-21.md #30.
+    expect(writtenContent).toContain('<AxMenuElement xmlns="" i:type="AxMenuElementMenuItem">');
+    expect(writtenContent).not.toContain('AxMenuFunctionItem');
     expect(writtenContent).toContain('<MenuItemName>ContosoRentEquipmentTable</MenuItemName>');
     expect(writtenContent).toContain('<MenuItemType>Display</MenuItemType>');
   });
