@@ -11,6 +11,7 @@ import { handleGetFormPatterns } from './getFormPatterns.js';
 import path from 'path';
 import fs from 'fs';
 import { getConfigManager } from '../utils/configManager.js';
+import { defaultPackagesRoot } from '../utils/packagesRoot.js';
 import { resolveObjectPrefix, applyObjectPrefix, getObjectSuffix, applyObjectSuffix } from '../utils/modelClassifier.js';
 import { ProjectFileManager } from './createD365File.js';
 import { extractModelFromProject, findProjectInSolution } from '../utils/projectUtils.js';
@@ -21,8 +22,15 @@ import { expandPatternToXml, canExpandPattern } from '../utils/formControlExpand
 import { cloneFormXml } from '../utils/formCloner.js';
 import { methodStubsForPattern, injectMethodStubs } from '../knowledge/formPatterns/methodStubs.js';
 import { findBaseFormXml } from './modifyD365File.js';
-import { getFieldControlMap, type FieldControlMap } from '../utils/fieldControlTypes.js';
+import { getFieldControlMap, getTableTitleField, type FieldControlMap } from '../utils/fieldControlTypes.js';
 import { lookupSymbolNocase } from '../utils/symbolLookup.js';
+import { scaffoldWriteRefusalResult } from './writeAnchorGuard.js';
+
+/**
+ * Symbol types a form datasource may bind to. Views are indexed as 'view'
+ * (see symbolIndex.indexViews) and are legal in <Table> just like tables.
+ */
+const DATASOURCE_TYPES = ['table', 'view'] as const;
 
 interface GenerateSmartFormArgs {
   name: string;
@@ -259,6 +267,8 @@ export async function handleGenerateSmartForm(
   const builder = new SmartXmlBuilder(symbolIndex);
   let dataSources: FormDataSourceSpec[] = [];
   let controls: FormControlSpec[] = [];
+  /** Note surfaced when the primary datasource resolved to a view, not a table. */
+  let viewDataSourceNote = '';
 
   // Strategy 1: copy datasources from an existing form
   if (copyFrom) {
@@ -309,13 +319,19 @@ export async function handleGenerateSmartForm(
   if (dataSource && !copyFrom) {
     // Validates the table exists and fuzzy-corrects pluralisation (e.g. "...Tables" -> "...Table").
     let dataSourceResolved = dataSource;
+    // A form datasource may be a VIEW as well as a table — the AOT accepts any of
+    // them in <Table>. Resolving against 'table' alone rejected a view that
+    // object_patterns resolves fine, so a form over a view was unbuildable through
+    // the scaffold (docs/eval-sweep-findings-2026-07-21.md, "Open — writers").
+    let dataSourceIsView = false;
     try {
       const db = symbolIndex.getReadDb();
       // Index-safe nocase lookup; also canonicalizes the casing so the field
       // probes below stay BINARY on idx_parent_type_name.
-      const directHit = lookupSymbolNocase(db, dataSource, ['table']);
+      const directHit = lookupSymbolNocase(db, dataSource, DATASOURCE_TYPES);
       if (directHit) {
         dataSourceResolved = directHit.name;
+        dataSourceIsView = directHit.type === 'view';
       } else {
         const add = (n: string | undefined) => {
           const v = (n ?? '').trim();
@@ -325,21 +341,22 @@ export async function handleGenerateSmartForm(
         add(dataSource.replace(/s$/i, ''));
         add(dataSource.replace(/Tables?$/i, 'Table'));
         add(dataSource.replace(/Table$/i, ''));
-        const matched = candidates
-          .map(c => lookupSymbolNocase(db, c, ['table']))
-          .find(r => r)?.name;
-        if (matched) {
-          console.log(`[generateSmartForm] dataSource "${dataSource}" → "${matched}" (auto-corrected)`);
-          dataSourceResolved = matched;
+        const matchedHit = candidates
+          .map(c => lookupSymbolNocase(db, c, DATASOURCE_TYPES))
+          .find(r => r);
+        if (matchedHit) {
+          console.log(`[generateSmartForm] dataSource "${dataSource}" → "${matchedHit.name}" (auto-corrected)`);
+          dataSourceResolved = matchedHit.name;
+          dataSourceIsView = matchedHit.type === 'view';
         } else {
           const alt = db.prepare(
-            `SELECT name FROM symbols WHERE type = 'table' AND name LIKE ? COLLATE NOCASE ORDER BY LENGTH(name) ASC LIMIT 1`,
+            `SELECT name FROM symbols WHERE type IN ('table', 'view') AND name LIKE ? COLLATE NOCASE ORDER BY LENGTH(name) ASC LIMIT 1`,
           ).get(`${dataSource.replace(/s$/i, '')}%`) as { name: string } | undefined;
           const suggestion = alt ? `\n\nDid you mean \`dataSource="${alt.name}"\`?` : '';
           return {
             content: [{
               type: 'text',
-              text: `❌ Table "${dataSource}" not found in the symbol index.${suggestion}\n\nIf the table was just created in this session, call \`update_symbol_index\` first, then retry.`,
+              text: `❌ Table or view "${dataSource}" not found in the symbol index.${suggestion}\n\nIf the object was just created in this session, call \`update_symbol_index\` first, then retry.`,
             }],
           };
         }
@@ -348,7 +365,9 @@ export async function handleGenerateSmartForm(
       /* index unavailable — proceed with provided name */
     }
 
-    console.log(`[generateSmartForm] Creating datasource for table: ${dataSourceResolved}`);
+    console.log(
+      `[generateSmartForm] Creating datasource for ${dataSourceIsView ? 'view' : 'table'}: ${dataSourceResolved}`,
+    );
     dataSources.push({
       name: dataSourceResolved,
       table: dataSourceResolved,
@@ -356,6 +375,14 @@ export async function handleGenerateSmartForm(
       allowCreate: true,
       allowDelete: true,
     });
+    if (dataSourceIsView) {
+      // The pattern templates do not carry AllowCreate/Edit/Delete, so the emitted
+      // datasource keeps the writable default. A view is read-only at runtime —
+      // say so rather than let the caller assume an editable grid.
+      viewDataSourceNote =
+        `\n   ℹ️ "${dataSourceResolved}" is a VIEW — read-only at runtime. Set ` +
+        `AllowCreate/AllowEdit/AllowDelete to No on the datasource if the form must not offer editing.`;
+    }
 
     if (formPattern) {
       try {
@@ -376,6 +403,9 @@ export async function handleGenerateSmartForm(
   // Field -> control-type map (enum->ComboBox, date->Date, etc.) so generated controls
   // aren't all typed as String.
   let fieldTypes: FieldControlMap | undefined;
+  // The primary table's TitleField1 — the field a DetailsMaster title control must
+  // bind to (findings #32); undefined when the table declares none.
+  let primaryTitleField: string | undefined;
   let linesFields: string[] = [];
   let linesFieldTypes: FieldControlMap | undefined;
 
@@ -403,6 +433,7 @@ export async function handleGenerateSmartForm(
       const db = symbolIndex.getReadDb();
       gridFields = collectGridFields(db, dataSourceEffective);
       fieldTypes = getFieldControlMap(db, dataSourceEffective);
+      primaryTitleField = getTableTitleField(db, dataSourceEffective);
 
       if (gridFields.length > 0) {
         if (generateControls) {
@@ -550,7 +581,7 @@ export async function handleGenerateSmartForm(
   // writes actually land) so the reported/fallback path matches the real write location.
   const configManager = getConfigManager();
   const customPackagesRoot = await configManager.getCustomPackagesPath();
-  const packagePath = customPackagesRoot || configManager.getPackagePath() || 'K:\\AosService\\PackagesLocalDirectory';
+  const packagePath = customPackagesRoot || configManager.getPackagePath() || defaultPackagesRoot();
 
   // Resolve project/solution path — fall back to configManager (from .mcp.json / auto-detection)
   let resolvedProjectPath = projectPath;
@@ -624,6 +655,15 @@ export async function handleGenerateSmartForm(
     console.log(`[generateSmartForm] Applied naming: ${name} → ${finalName}`);
   }
 
+  // See generateSmartTable: the resolved model follows the ACTIVE project, the
+  // write anchor does not. Checked before the first byte is written.
+  const anchorRefusal = scaffoldWriteRefusalResult({
+    objectName: finalName,
+    objectType: 'form',
+    targetModel: resolvedModel,
+  });
+  if (anchorRefusal) return anchorRefusal;
+
   // Generate XML: clone an existing form (preferred) or build from a template.
   // Without an explicit pattern, default to the majority pattern mined from
   // standard models (property_stats), falling back to SimpleList.
@@ -632,7 +672,7 @@ export async function handleGenerateSmartForm(
     : builder.defaultFormPattern();
   const primaryDs = dataSources[0];
   let xml: string;
-  let cloneNotes = linesTableNote;
+  let cloneNotes = linesTableNote + viewDataSourceNote;
 
   if (cloneFrom) {
     const sourceXml = await findBaseFormXml(cloneFrom, symbolIndex);
@@ -786,7 +826,7 @@ export async function handleGenerateSmartForm(
     // Pattern-compatibility pre-check (see cloneFromPatternMismatchWarning).
     const mismatch = cloneFromPatternMismatchWarning(formPattern, xml, cloneResult.sourceFormName);
     if (mismatch) noteLines.push(`   ${mismatch}`);
-    cloneNotes = `\n${noteLines.join('\n')}`;
+    cloneNotes = `${viewDataSourceNote}\n${noteLines.join('\n')}`;
   } else {
     const templateOpts = {
       formName: finalName,
@@ -795,6 +835,7 @@ export async function handleGenerateSmartForm(
       caption: resolveFormCaption(caption, label, lookupTableLabel(symbolIndex, primaryDs?.table), finalName),
       gridFields,
       fieldTypes,
+      titleField: primaryTitleField,
       linesDsName: linesDsNameResolved ?? (linesTableResolved || undefined),
       linesDsTable: linesTableResolved || undefined,
       linesFields,

@@ -23,13 +23,26 @@ import { createXppMcpServer } from '../../src/server/mcpServer';
 // the human-readable log line, never for assertions.
 const CHARS_PER_TOKEN = 4;
 
-// Ceilings in characters of serialized JSON. Current actuals (2026-07, after
-// exposing generate_object's `additionalDatasets` (multi-dataset SSRS) — a
-// previously unreachable capability, so the ceiling was raised deliberately:
-// total ≈ 61,823 · d365fo_file ≈ 8,390 (generate_object ≈ 8,469 is now the
-// largest). Headroom is small on purpose so creep is caught early.
-const TOTAL_BUDGET = 62_100;
-const LARGEST_TOOL_BUDGET = 8_800;
+// Ceilings in characters of serialized JSON. Current actual ≈ 63,175 · largest
+// tool d365fo_file ≈ 9,6xx (ahead of generate_object ≈ 8,5xx). Raised
+// deliberately whenever a genuinely new AOT capability lands — `service` +
+// `service-group` objectTypes, then d365fo_file's add-/remove-delete-action
+// (findings #36), generate_object scaffold `fields[]`/`preview` (#21), and the
+// five coverage-closure objectTypes (macro, configuration-key, security-policy,
+// aggregate-measurement, license-code) that took the T flag green on the last
+// create-path holes in the taxonomy, then the data-entity writer properties
+// (primaryKey, isPublic, entityCategory, dynamicFields,
+// allowRowVersionChangeTracking) that were implemented but unadvertised — paid
+// for in part by dropping the member-variable rule from `sourceCode`, where it
+// was the third statement of the same thing.
+//
+// data-entity-extension add-field deliberately does NOT raise these. `params` is
+// additionalProperties:true, so dataField/dataSource/fieldGroupName cost nothing
+// on the wire — only the prose naming them does, and that was paid for by
+// tightening the `params` description rather than by moving the ceiling.
+// Headroom is small on purpose so creep is caught early.
+const TOTAL_BUDGET = 63_300;
+const LARGEST_TOOL_BUDGET = 9_900;
 
 async function getTools(): Promise<Array<{ name: string }>> {
   const ctx: any = { symbolIndex: {}, parser: {} };

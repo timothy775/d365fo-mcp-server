@@ -3,11 +3,12 @@
  * SQLite-based symbol indexing with FTS5 full-text search
  */
 
-import Database from 'better-sqlite3';
+import Database, { type Statement } from '../database/sqlite.js';
 import { Worker } from 'node:worker_threads';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { XppSymbol } from './types.js';
+import { renderMethodSignature } from './xppDeclaration.js';
 import { isStandardModel } from '../utils/modelClassifier.js';
 import { c, log } from '../utils/terminalUi.js';
 
@@ -26,29 +27,37 @@ export interface SymbolCounts {
 }
 
 export class XppSymbolIndex {
-  public db: Database.Database; // Public for direct pragma access in build scripts
-  public labelsDb: Database.Database; // Separate DB for labels (performance optimization)
-  private standardModels: string[] = [];
-  private stmtCache: Map<string, Database.Statement> = new Map();
-  private labelsStmtCache: Map<string, Database.Statement> = new Map();
+  public db: Database; // Public for direct pragma access in build scripts
+  public labelsDb: Database; // Separate DB for labels (performance optimization)
+  private stmtCache: Map<string, Statement> = new Map();
+  private labelsStmtCache: Map<string, Statement> = new Map();
   // Buffer for property_stats observations — flushed once per model (batch INSERT)
   // Key: "nodeType|property|value|model", Value: accumulated count
   private propStatBuffer: Map<string, number> = new Map();
+  // Per-run "not authored by Microsoft" set (lowercased), supplied by the caller —
+  // see setNonMicrosoftModels(). null = caller said nothing, fall back to isStandardModel().
+  private nonMicrosoftModels: Set<string> | null = null;
+  // isStandardModel() re-parses env on every call and the miners run per node; the
+  // answer is constant per model within a run. Cleared by setNonMicrosoftModels().
+  private mineableModelCache: Map<string, boolean> = new Map();
 
   // Read-only connection pool: WAL mode allows N readers + 1 writer without
   // blocking each other. Pool size: READ_POOL_SIZE env var (default 3, clamped 1-8).
   // Not used for :memory: databases (each connection would be a separate empty DB).
-  private readPool: Database.Database[] = [];
-  private labelsReadPool: Database.Database[] = [];
+  private readPool: Database[] = [];
+  private labelsReadPool: Database[] = [];
   private readPoolRR = 0;
   // Symbol-count scans are expensive (full index scan of 1M+ rows, 30-60 s
   // cold) — memoize the result and compute it off-thread (see getSymbolCounts).
   private dbPath: string;
+  // Needed alongside dbPath so ensureFilePathIndexes() can size the labels DB
+  // and hand its path to the background index builder.
+  private labelsDbPath: string = ':memory:';
   private symbolCountsCache: SymbolCounts | null = null;
   private symbolCountsPromise: Promise<SymbolCounts> | null = null;
   // Per-connection prepared-statement cache.  Prepared statements are bound to
   // their originating connection and cannot be shared across connections.
-  private perConnStmtCache = new WeakMap<Database.Database, Map<string, Database.Statement>>();
+  private perConnStmtCache = new WeakMap<Database, Map<string, Statement>>();
 
   constructor(dbPath: string, labelsDbPath?: string) {
     this.dbPath = dbPath;
@@ -63,6 +72,7 @@ export class XppSymbolIndex {
     // Labels live in a separate DB so the main symbol DB stays small and fast;
     // labels can be huge (20M+ rows) without affecting search performance.
     const labelPath = labelsDbPath || dbPath.replace('.db', '-labels.db');
+    this.labelsDbPath = labelPath;
     this.labelsDb = new Database(labelPath);
 
     // journal_mode should be set by caller (MEMORY for build, WAL for production).
@@ -97,7 +107,6 @@ export class XppSymbolIndex {
     // optimize/ANALYZE intentionally NOT run here (slow on 500K+ rows) — the
     // pre-built DB already has persisted stats; use runPostBuildTasks() instead.
 
-    this.loadStandardModels();
     this.initializeDatabase();
 
     // Skip pool for :memory: — each new connection would be a separate empty DB.
@@ -133,7 +142,7 @@ export class XppSymbolIndex {
    * Tool handlers should use this instead of accessing `db` directly
    * to benefit from read-pool parallelism and per-connection stmt caching.
    */
-  getReadDb(): Database.Database {
+  getReadDb(): Database {
     if (this.readPool.length === 0) return this.db;
     return this.readPool[this.readPoolRR++ % this.readPool.length];
   }
@@ -165,10 +174,10 @@ export class XppSymbolIndex {
    * for repeated queries — avoids re-preparing the same SQL on every call.
    */
   getReadStmt(
-    db: Database.Database,
+    db: Database,
     key: string,
     buildSql: () => string
-  ): Database.Statement {
+  ): Statement {
     let cache = this.perConnStmtCache.get(db);
     if (!cache) {
       cache = new Map();
@@ -237,14 +246,6 @@ export class XppSymbolIndex {
       relatedMethods: row.related_methods || undefined,
       apiPatterns: row.api_patterns || undefined,
     };
-  }
-
-  /**
-   * Kept for compatibility; standard-model determination now lives in
-   * isStandardModel() from modelClassifier (standard = not in CUSTOM_MODELS).
-   */
-  private loadStandardModels(): void {
-    this.standardModels = [];
   }
 
   private initializeDatabase(): void {
@@ -718,38 +719,137 @@ export class XppSymbolIndex {
       CREATE INDEX IF NOT EXISTS idx_md_define ON macro_defines(define_name);
       CREATE INDEX IF NOT EXISTS idx_md_model ON macro_defines(model);
     `);
+
+    this.ensureFilePathIndexes();
+  }
+
+  /**
+   * Index `symbols.file_path` and `labels.file_path`.
+   *
+   * Both are the lookup key of removeSymbolsByFile()/removeLabelsByFile(), which
+   * every update_symbol_index, undo_last_modification and resync runs first.
+   * Unindexed, each of those calls scans the entire table — measured on the 2 GB
+   * production DB at 319 s (the SELECT of object names) + 173 s (the DELETE) for
+   * indexing a SINGLE new object, versus 0 ms once the index exists. That is why
+   * indexing one freshly created object cost as much as a rebuild.
+   *
+   * Deliberately not part of the CREATE INDEX block above. node:sqlite is
+   * synchronous, and building this index over an already-populated production
+   * table takes ~8 s, so doing it inline would block the event loop for the whole
+   * of startup — the failure mode that makes MCP clients time out and kill the
+   * server. On an empty or small DB (a fresh build, the test suite, :memory:) the
+   * build is instant and runs here; on a large existing DB it is handed to a
+   * worker thread, and until it finishes those deletes simply stay as slow as
+   * they are today.
+   */
+  private ensureFilePathIndexes(): void {
+    const missing = (db: Database, indexName: string): boolean =>
+      !db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?`).get(indexName);
+
+    // Size is read off the file rather than counted, because COUNT(*) on the
+    // table we are trying to speed up is itself one of the slow scans.
+    const isLarge = (dbFile: string): boolean => {
+      if (dbFile === ':memory:') return false;
+      try {
+        return fs.statSync(dbFile).size > 200 * 1024 * 1024;
+      } catch {
+        return false;
+      }
+    };
+
+    const labelsPath = this.labelsDbPath;
+    const work: Array<{ db: Database; dbFile: string; sql: string; name: string }> = [];
+    if (missing(this.db, 'idx_symbols_file_path')) {
+      work.push({
+        db: this.db,
+        dbFile: this.dbPath,
+        name: 'idx_symbols_file_path',
+        sql: 'CREATE INDEX IF NOT EXISTS idx_symbols_file_path ON symbols(file_path);',
+      });
+    }
+    if (missing(this.labelsDb, 'idx_labels_file_path')) {
+      work.push({
+        db: this.labelsDb,
+        dbFile: labelsPath,
+        name: 'idx_labels_file_path',
+        sql: 'CREATE INDEX IF NOT EXISTS idx_labels_file_path ON labels(file_path);',
+      });
+    }
+
+    for (const item of work) {
+      if (isLarge(item.dbFile)) {
+        this.buildIndexInWorker(item.dbFile, item.sql, item.name);
+      } else {
+        item.db.exec(item.sql);
+      }
+    }
+  }
+
+  /**
+   * Build one index on a separate thread so the main event loop keeps serving.
+   * WAL mode allows the worker's write to proceed alongside main-thread readers.
+   * Best-effort: a failure leaves the index absent, which is exactly the state
+   * the server ran in before, so it is logged and never thrown.
+   */
+  private buildIndexInWorker(dbPath: string, sql: string, indexName: string): void {
+    try {
+      const worker = new Worker(new URL('./buildIndexWorker.js', import.meta.url), {
+        workerData: { dbPath, sql, indexName },
+      });
+      // unref() so a pending index build never keeps the process alive on exit.
+      worker.unref();
+      worker.once('message', (msg: { ok: boolean; elapsedMs?: number; error?: string }) => {
+        if (msg.ok) {
+          console.error(`[SymbolIndex] Built ${indexName} in background (${msg.elapsedMs}ms)`);
+        } else {
+          console.error(`[SymbolIndex] Background build of ${indexName} failed: ${msg.error}`);
+        }
+        void worker.terminate();
+      });
+      worker.once('error', e => console.error(`[SymbolIndex] ${indexName} worker error: ${e}`));
+    } catch (e) {
+      console.error(`[SymbolIndex] Could not start ${indexName} worker: ${e}`);
+    }
   }
 
   /**
    * Create FTS triggers for keeping symbols_fts in sync
    * Extracted to allow disabling during bulk inserts and re-enabling after
+   *
+   * symbols_fts is an external-content table, so removals and updates MUST hand the OLD
+   * column values back to FTS5 via the 'delete' command. A plain `DELETE FROM symbols_fts`
+   * (or `UPDATE symbols_fts SET`) cannot work: the trigger runs AFTER the content row is
+   * already gone, leaving FTS5 nothing to re-derive the row's terms from — it fails with
+   * "missing row N from content table" and strands the old terms in the index.
+   *
+   * Dropped and recreated rather than CREATE-IF-NOT-EXISTS so databases still carrying the
+   * earlier (broken) definitions are repaired on the next index run.
    */
   private createFTSTriggers(): void {
+    this.db.exec('DROP TRIGGER IF EXISTS symbols_ai;');
+    this.db.exec('DROP TRIGGER IF EXISTS symbols_ad;');
+    this.db.exec('DROP TRIGGER IF EXISTS symbols_au;');
+
     this.db.exec(`
-      CREATE TRIGGER IF NOT EXISTS symbols_ai AFTER INSERT ON symbols BEGIN
+      CREATE TRIGGER symbols_ai AFTER INSERT ON symbols BEGIN
         INSERT INTO symbols_fts(rowid, name, type, parent_name, signature, description, tags, source_snippet, inline_comments)
         VALUES (new.id, new.name, new.type, new.parent_name, new.signature, new.description, new.tags, new.source_snippet, new.inline_comments);
       END;
     `);
 
     this.db.exec(`
-      CREATE TRIGGER IF NOT EXISTS symbols_ad AFTER DELETE ON symbols BEGIN
-        DELETE FROM symbols_fts WHERE rowid = old.id;
+      CREATE TRIGGER symbols_ad AFTER DELETE ON symbols BEGIN
+        INSERT INTO symbols_fts(symbols_fts, rowid, name, type, parent_name, signature, description, tags, source_snippet, inline_comments)
+        VALUES ('delete', old.id, old.name, old.type, old.parent_name, old.signature, old.description, old.tags, old.source_snippet, old.inline_comments);
       END;
     `);
 
     this.db.exec(`
-      CREATE TRIGGER IF NOT EXISTS symbols_au AFTER UPDATE ON symbols BEGIN
-        UPDATE symbols_fts SET
-          name = new.name,
-          type = new.type,
-          parent_name = new.parent_name,
-          signature = new.signature,
-          description = new.description,
-          tags = new.tags,
-          source_snippet = new.source_snippet,
-          inline_comments = new.inline_comments
-        WHERE rowid = new.id;
+      CREATE TRIGGER symbols_au AFTER UPDATE ON symbols BEGIN
+        INSERT INTO symbols_fts(symbols_fts, rowid, name, type, parent_name, signature, description, tags, source_snippet, inline_comments)
+        VALUES ('delete', old.id, old.name, old.type, old.parent_name, old.signature, old.description, old.tags, old.source_snippet, old.inline_comments);
+        INSERT INTO symbols_fts(rowid, name, type, parent_name, signature, description, tags, source_snippet, inline_comments)
+        VALUES (new.id, new.name, new.type, new.parent_name, new.signature, new.description, new.tags, new.source_snippet, new.inline_comments);
       END;
     `);
   }
@@ -830,6 +930,29 @@ export class XppSymbolIndex {
    * even when the DB stores a different path form than the caller passed.
    * Returns the names of top-level objects that were removed (for cache invalidation).
    */
+  /**
+   * Top-level object names belonging to one model — the evidence from which a
+   * model's naming prefix is inferred (see utils/modelPrefixInference.ts).
+   *
+   * Deliberately narrow and bounded: only `name`, only root objects, capped at
+   * `limit`. Reading whole rows here would pull source snippets across the wire
+   * and turn a 450 ms lookup into a slow one. Extension objects are included on
+   * purpose — a dot-notation extension states the model's infix outright.
+   */
+  getModelObjectNames(model: string, limit = 400): string[] {
+    if (!model) return [];
+    const rows = this.getReadDb()
+      .prepare(
+        `SELECT name FROM symbols
+         WHERE model = ?
+           AND parent_name IS NULL
+           AND type NOT IN ('method', 'field')
+         LIMIT ?`
+      )
+      .all(model, limit) as Array<{ name: string }>;
+    return rows.map(r => r.name);
+  }
+
   removeSymbolsByFile(filePath: string): { deletedCount: number; objectNames: string[] } {
     const forms = this.filePathForms(filePath);
     const placeholders = forms.map(() => '?').join(', ');
@@ -1026,7 +1149,7 @@ export class XppSymbolIndex {
    * Get symbol count.
    *
    * WARNING: without a warm cache this is a full index scan — 30-60 s on a
-   * large production DB with a cold file cache, and better-sqlite3 blocks the
+   * large production DB with a cold file cache, and node:sqlite blocks the
    * event loop for the whole scan. Server request paths must use
    * getSymbolCounts() (off-thread) or getCachedSymbolCounts() instead; the
    * synchronous form is for build scripts and post-indexing logging where the
@@ -1302,14 +1425,68 @@ export class XppSymbolIndex {
    *   - a model name   → index just that one model
    *   - an array       → index exactly those models in a SINGLE pass
    *
-   * Pass an array rather than calling this once per model: the FTS index is rebuilt from
-   * scratch ONCE at the end of the call (and the FTS triggers dropped/recreated once), both
-   * O(all symbols in the DB), so a per-model loop turns a scoped rebuild into N full-table
-   * rebuilds.
+   * Pass an array rather than calling this once per model: with the default
+   * `ftsStrategy: 'rebuild'` the FTS index is rebuilt from scratch ONCE at the end of the
+   * call, which is O(all symbols in the DB), so a per-model loop turns a scoped rebuild
+   * into N full-table rebuilds.
+   *
+   * `ftsStrategy` picks how symbols_fts is brought up to date:
+   *   - 'rebuild'     (default) drop the FTS triggers, bulk-insert, then re-tokenise the
+   *                   WHOLE symbols table. Cost is O(all symbols) regardless of scope —
+   *                   right for a full or near-full rebuild, where it beats per-row triggers.
+   *   - 'incremental' keep the FTS triggers live so only the touched rows are re-tokenised.
+   *                   Cost is O(scope). Use it when the scope is a small fraction of the
+   *                   database (a custom-model build: ~10K of ~1.2M symbols, where the full
+   *                   rebuild cost 327s against 5s of actual indexing work).
    */
-  async indexMetadataDirectory(metadataPath: string, modelNames?: string | string[]): Promise<void> {
+  /**
+   * Turn a write failure inside a model transaction into an error that names
+   * the database being written and, when the drive is the likely cause, how
+   * much room is left on it.
+   *
+   * A full disk makes SQLite roll the transaction back itself, so our transaction
+   * wrapper then fails to COMMIT and the only thing the user sees is
+   * "cannot commit - no transaction is active" with a stack inside the library —
+   * no path, no mention of space. That message sent at least one user hunting
+   * for a corrupt index when the index was simply being written to the wrong
+   * (and nearly full) drive.
+   */
+  private describeWriteFailure(err: unknown, model: string): Error {
+    const original = err instanceof Error ? err : new Error(String(err));
+    const message = original.message;
+    const diskRelated = /disk is full|SQLITE_FULL|disk I\/O error|no transaction is active/i.test(message);
+    if (!diskRelated) return original;
+
+    let space = '';
+    try {
+      const stat = fs.statfsSync(path.dirname(path.resolve(this.dbPath)));
+      const freeGb = (Number(stat.bavail) * Number(stat.bsize)) / 1024 ** 3;
+      space = ` (${freeGb.toFixed(1)} GB free there)`;
+    } catch {
+      // statfs is best-effort — the path advice below is the useful part.
+    }
+
+    const wrapped = new Error(
+      `Writing model '${model}' to ${this.dbPath} failed: ${message}\n` +
+      `The index is written to that path${space}. A full disk makes SQLite roll the write back on its own, ` +
+      `which is what surfaces as "cannot commit - no transaction is active".\n` +
+      `Point the installation at a drive with room (a full index needs several GB): ` +
+      `re-run 'd365fo-mcp setup' and choose another directory, or set index.dbPath / index.metadataPath in d365fo-mcp.json.`,
+    );
+    wrapped.cause = original;
+    return wrapped;
+  }
+
+  async indexMetadataDirectory(
+    metadataPath: string,
+    modelNames?: string | string[],
+    opts?: { ftsStrategy?: 'rebuild' | 'incremental' },
+  ): Promise<void> {
     const skipFts = process.env.SKIP_FTS === 'true';
     const resumable = process.env.RESUME === 'true';
+    // Incremental FTS only makes sense for a scoped pass; an unscoped one touches
+    // every row anyway, so the bulk rebuild is strictly cheaper.
+    const incrementalFts = opts?.ftsStrategy === 'incremental' && modelNames !== undefined && !skipFts;
 
     const requested = modelNames === undefined
       ? undefined
@@ -1337,10 +1514,22 @@ export class XppSymbolIndex {
 
     const startTime = Date.now();
 
-    // Disable FTS triggers during bulk insert — we rebuild FTS once at the end
-    this.db.exec('DROP TRIGGER IF EXISTS symbols_ai;');
-    this.db.exec('DROP TRIGGER IF EXISTS symbols_au;');
-    this.db.exec('DROP TRIGGER IF EXISTS symbols_ad;');
+    if (incrementalFts) {
+      // Keep the FTS triggers live so each touched row maintains symbols_fts itself.
+      // createFTSTriggers() is CREATE TRIGGER IF NOT EXISTS, so this also repairs a
+      // database left trigger-less by an interrupted SKIP_FTS build.
+      this.createFTSTriggers();
+      // Rows are written with INSERT OR REPLACE. SQLite fires delete triggers for the
+      // rows a REPLACE displaces ONLY when recursive triggers are enabled; without this
+      // the displaced row's symbols_fts entry would survive as an orphan pointing at a
+      // rowid that no longer exists in the content table.
+      this.db.pragma('recursive_triggers = ON');
+    } else {
+      // Disable FTS triggers during bulk insert — we rebuild FTS once at the end
+      this.db.exec('DROP TRIGGER IF EXISTS symbols_ai;');
+      this.db.exec('DROP TRIGGER IF EXISTS symbols_au;');
+      this.db.exec('DROP TRIGGER IF EXISTS symbols_ad;');
+    }
 
     // Prepare progress statement (executes inside each model's transaction)
     const markProgress = resumable
@@ -1485,7 +1674,11 @@ export class XppSymbolIndex {
         // Mark model as done atomically with its data (same transaction)
         markProgress?.run(model, Date.now());
       });
-      tx();
+      try {
+        tx();
+      } catch (err) {
+        throw this.describeWriteFailure(err, model);
+      }
 
       const modelDuration = ((Date.now() - modelStartTime) / 1000).toFixed(1);
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
@@ -1506,7 +1699,11 @@ export class XppSymbolIndex {
       console.log(''); // New line after progress
     }
 
-    if (skipFts) {
+    if (incrementalFts) {
+      // FTS was maintained row-by-row by the triggers — nothing left to do.
+      this.db.pragma('recursive_triggers = OFF');
+      log.ok(`Indexed ${models.length} model(s) in ${duration}s (FTS updated incrementally)`);
+    } else if (skipFts) {
       // Phase 1 of two-phase CI build: symbols only, FTS deferred to build-fts step
       log.info(`Skipping FTS rebuild (SKIP_FTS=true) - run 'npm run build-fts' to finish`);
       this.createFTSTriggers();
@@ -1628,13 +1825,12 @@ export class XppSymbolIndex {
         // Add method symbols with enhanced metadata
         if (classData.methods && Array.isArray(classData.methods)) {
           for (const method of classData.methods) {
-            const params = method.parameters?.map((p: any) => `${p.type} ${p.name}`).join(', ') || '';
             
             this.addSymbol({
               name: method.name,
               type: 'method',
               parentName: classData.name,
-              signature: `${method.returnType} ${method.name}(${params})`,
+              signature: renderMethodSignature(method),
               filePath: sourceFilePath,
               model,
               description: method.documentation,
@@ -1700,12 +1896,11 @@ export class XppSymbolIndex {
         // Add method symbols (parallel to indexClasses)
         if (tableData.methods && Array.isArray(tableData.methods)) {
           for (const method of tableData.methods) {
-            const params = method.parameters?.map((p: any) => `${p.type} ${p.name}`).join(', ') || '';
             this.addSymbol({
               name: method.name,
               type: 'method',
               parentName: tableData.name,
-              signature: `${method.returnType} ${method.name}(${params})`,
+              signature: renderMethodSignature(method),
               filePath: sourceFilePath,
               model,
               description: method.documentation,
@@ -1909,7 +2104,12 @@ export class XppSymbolIndex {
               node.patternVersion ?? null,
               JSON.stringify(node.childSequence ?? []),
             );
-            if (node.nodePath === 'Design') {
+            // form_patterns rows above are per-model FACTS and are stored for every model;
+            // property_stats is a corpus of "what the standard platform does", so the same
+            // gate as recordTablePropertyStats() applies here. Without it our own forms and
+            // ISV forms skew the mined pattern distribution that generateSmartForm's
+            // defaultFormPattern() picks from — on every environment, not just UDE.
+            if (node.nodePath === 'Design' && this.isMineableModel(model)) {
               this.recordPropertyStat('AxFormDesign', 'Pattern', node.pattern, model);
               this.recordPropertyStat(
                 'AxFormDesign',
@@ -2017,12 +2217,11 @@ export class XppSymbolIndex {
         // Add method symbols (views and data-entities can have display/computed methods)
         if (viewData.methods && Array.isArray(viewData.methods)) {
           for (const method of viewData.methods) {
-            const params = method.parameters?.map((p: any) => `${p.type} ${p.name}`).join(', ') || '';
             this.addSymbol({
               name: method.name,
               type: 'method',
               parentName: viewName,
-              signature: `${method.returnType} ${method.name}(${params})`,
+              signature: renderMethodSignature(method),
               filePath: sourceFilePath,
               model,
               description: method.documentation,
@@ -2070,7 +2269,7 @@ export class XppSymbolIndex {
         });
 
         for (const ep of entryPoints) {
-          // Skip malformed entry points — missing name causes "Too few parameter values" in better-sqlite3
+          // Skip malformed entry points — missing name causes a bind error in node:sqlite
           if (!ep.name) continue;
           // Safeguard: accessLevel may be an object in older JSONs extracted before
           // xmlParser normalisation was added. Serialize to string.
@@ -2547,12 +2746,82 @@ export class XppSymbolIndex {
   }
 
   /**
+   * Tell the index which models this run knows to be non-Microsoft, overriding the
+   * name-based `isStandardModel()` heuristic for the property-stats miners.
+   *
+   * `isStandardModel()` reads CUSTOM_MODELS/EXTENSION_PREFIX from the environment, and
+   * `build-database` runs as a separate process where CUSTOM_MODELS is deliberately empty
+   * on UDE (custom models are path-auto-detected during extract — see
+   * src/utils/extractManifest.ts). Without this, our own model and every third-party ISV
+   * model under the custom root are mined as if Microsoft had authored them, and the
+   * mined defaults that `prepare`/`generate_object`/`validate_code` present as platform
+   * convention are really our own past habits fed back to us.
+   *
+   * The list is additive: a model here is never mined, and models not listed still go
+   * through `isStandardModel()`. Pass an empty array to assert "the caller checked and
+   * found none" — that is different from never calling this at all.
+   */
+  setNonMicrosoftModels(models: string[]): void {
+    this.nonMicrosoftModels = new Set(models.map(m => m.toLowerCase()));
+    this.mineableModelCache.clear();
+  }
+
+  /**
+   * Single gate for every property-stats miner: may this model's metadata be mined as
+   * evidence of "what the standard Microsoft platform does"?
+   */
+  private isMineableModel(model: string): boolean {
+    const cached = this.mineableModelCache.get(model);
+    if (cached !== undefined) return cached;
+    const mineable = !this.nonMicrosoftModels?.has(model.toLowerCase()) && isStandardModel(model);
+    this.mineableModelCache.set(model, mineable);
+    return mineable;
+  }
+
+  /**
+   * Delete property_stats rows for models that today's gate would not mine.
+   *
+   * The counts are cumulative (`ON CONFLICT ... count + excluded.count`), so gating the
+   * miners only stops NEW pollution — rows written by an earlier build survive until
+   * something removes them. This is that something, and it is cheap enough to run on every
+   * build: the table is tiny (a few thousand rows, ~150 models on a full D365FO index)
+   * because it stores one row per node_type/property/value/model, not per object.
+   *
+   * Re-evaluates every model actually present in the table rather than only the models
+   * this run was told about, so it also clears historical pollution — e.g. rows mined
+   * before a model was added to CUSTOM_MODELS. It is therefore only as good as the current
+   * notion of "non-Microsoft": an ISV model that neither the extract manifest nor
+   * isStandardModel() knows about stays until it is declared.
+   *
+   * Returns the models purged (empty when the corpus is already clean). With
+   * `{ dryRun: true }` it returns the same list without deleting anything, so callers can
+   * report the damage without duplicating the predicate.
+   */
+  purgeNonMineableStats(opts: { dryRun?: boolean } = {}): string[] {
+    const models = (this.db.prepare('SELECT DISTINCT model FROM property_stats').all() as Array<{ model: string }>)
+      .map(r => r.model);
+    const toPurge = models.filter(m => !this.isMineableModel(m));
+    if (toPurge.length === 0 || opts.dryRun) return toPurge;
+
+    // Chunked to stay clear of SQLITE_MAX_VARIABLE_NUMBER on a pathological model count.
+    const purge = this.db.transaction((names: string[]) => {
+      for (let i = 0; i < names.length; i += 400) {
+        const chunk = names.slice(i, i + 400);
+        const placeholders = chunk.map(() => '?').join(',');
+        this.db.prepare(`DELETE FROM property_stats WHERE model IN (${placeholders})`).run(...chunk);
+      }
+    });
+    purge(toPurge);
+    return toPurge;
+  }
+
+  /**
    * Mine property statistics from one parsed table JSON. Only standard
    * (Microsoft) models are mined — the stats answer "what does the standard
    * platform do", not "what did our customizations do".
    */
   private recordTablePropertyStats(tableData: any, model: string): void {
-    if (!isStandardModel(model)) return;
+    if (!this.isMineableModel(model)) return;
     const presence = (v: unknown) => (v ? '(present)' : '(absent)');
     try {
       // xmlParser defaults label to the table name — same value means no real label
@@ -2673,8 +2942,14 @@ export class XppSymbolIndex {
   }
 
   /**
-   * Get list of custom models (non-standard models)
-   * Filters out Microsoft's standard D365 F&O models loaded from config
+   * Get list of custom models (non-standard models).
+   *
+   * Standard-model determination is delegated to `isStandardModel()` from
+   * modelClassifier (CUSTOM_MODELS / EXTENSION_PREFIX / configured target model).
+   * The legacy `this.standardModels` array is always empty (see
+   * `loadStandardModels()`), so filtering against it used to return EVERY model
+   * — including Microsoft's — as "custom". Filtering via `isStandardModel()`
+   * restores the intended custom-only result.
    */
   getCustomModels(): string[] {
     const stmt = this.db.prepare(`
@@ -2686,7 +2961,73 @@ export class XppSymbolIndex {
     const rows = stmt.all() as { model: string }[];
     return rows
       .map(row => row.model)
-      .filter(model => !this.standardModels.includes(model));
+      .filter(model => !isStandardModel(model));
+  }
+
+  /**
+   * Full-text symbol search restricted to CUSTOM/ISV models.
+   *
+   * Broad keyword searches routed through the C# bridge fill their fixed result
+   * window (`maxResults`) in provider-enumeration order, which is dominated by
+   * the far larger Microsoft standard corpus — so custom matches that enumerate
+   * later get truncated and the search looks like it "only returns Microsoft
+   * objects". The search tool probes this method in parallel and splices the
+   * custom hits back in, ranked directly after exact-name matches.
+   *
+   * Index-safe: the FTS5 MATCH drives the query and the `model IN (...)` filter
+   * (idx_symbols_model) narrows to the small custom set. The LIKE fallback (only
+   * reached on an FTS5 syntax error) is also model-scoped, so the selective
+   * `model IN` predicate keeps it off a full `%query%` scan of the whole corpus.
+   */
+  searchCustomModelSymbols(query: string, types?: string[], limit: number = 15): XppSymbol[] {
+    const customModels = this.getCustomModels();
+    if (customModels.length === 0) return [];
+
+    const modelPlaceholders = customModels.map(() => '?').join(',');
+    const ftsQuery = this.sanitizeFtsQuery(query);
+    const db = this.getReadDb();
+
+    let sql = `
+      SELECT s.id, s.name, s.type, s.parent_name, s.signature, s.file_path, s.model, s.description
+      FROM symbols_fts fts
+      JOIN symbols s ON s.id = fts.rowid
+      WHERE symbols_fts MATCH ?
+        AND s.model IN (${modelPlaceholders})
+    `;
+    const params: any[] = [ftsQuery, ...customModels];
+    if (types && types.length > 0) {
+      sql += ` AND s.type IN (${types.map(() => '?').join(',')})`;
+      params.push(...types);
+    }
+    sql += ` ORDER BY rank LIMIT ?`;
+    params.push(limit);
+
+    try {
+      const stmt = db.prepare(sql);
+      return (stmt.all(...params) as any[]).map(row => this.rowToSymbol(row));
+    } catch {
+      // FTS5 syntax error (query contains *, ", (, ), -) → LIKE fallback, still model-scoped.
+      const escapeLikePattern = (value: string): string =>
+        value.replace(/\\/g, '\\\\').replace(/[%_]/g, '\\$&');
+      let fb = `
+        SELECT s.id, s.name, s.type, s.parent_name, s.signature, s.file_path, s.model, s.description
+        FROM symbols s
+        WHERE s.name LIKE ? ESCAPE '\\'
+          AND s.model IN (${modelPlaceholders})
+      `;
+      const fbParams: any[] = [`%${escapeLikePattern(query)}%`, ...customModels];
+      if (types && types.length > 0) {
+        fb += ` AND s.type IN (${types.map(() => '?').join(',')})`;
+        fbParams.push(...types);
+      }
+      fb += ` ORDER BY s.name LIMIT ?`;
+      fbParams.push(limit);
+      try {
+        return (db.prepare(fb).all(...fbParams) as any[]).map(r => this.rowToSymbol(r));
+      } catch {
+        return [];
+      }
+    }
   }
 
   /**
@@ -2911,19 +3252,44 @@ export class XppSymbolIndex {
     }));
   }
   getApiUsagePatterns(className: string): any[] {
-    // Find all methods that reference this class in their used_types.
+    // Find methods that reference this class in their used_types.
     // Cap at 20 rows — fetching source_snippet for 50+ rows on a 584K-row table causes timeout.
+    //
+    // `used_types LIKE '%name%'` was wrong on both counts. used_types is a
+    // comma-separated list of exact type names, so a substring test answered
+    // "SalesTable" with methods that only use AxSalesTable or
+    // MCRSalesTableRefRecId. And it could not use an index: LIMIT 20 only stops
+    // the scan once 20 matches exist, so a name with no matches read used_types
+    // out of all 627 K method rows — each carrying source_snippet and source in
+    // overflow pages. Measured on the 2 GB index: over 7 minutes, synchronously,
+    // which blocks the whole server until the client gives up and kills it.
+    //
+    // The FTS pre-filter makes the candidate set small (an indexed token match on
+    // source_snippet), and exact membership in the list then decides. Same
+    // measurement: 0–230 ms, with the false positives gone.
+    //
+    // The pre-filter also narrows what can be returned: a method whose
+    // used_types names the class but whose stored snippet does not mention it is
+    // no longer reported. That is acceptable here specifically — this tool
+    // exists to show usage examples, and the caller reads initialization
+    // patterns straight out of source_snippet, so a row whose snippet lacks the
+    // name has no example to contribute.
+    const safe = className.replace(/["\(\)\\]/g, '').trim();
+    if (!safe) return [];
+
     let stmt = this.stmtCache.get('getApiUsagePatterns');
     if (!stmt) {
       stmt = this.db.prepare(
         `SELECT name, parent_name, method_calls, source_snippet
            FROM symbols
-          WHERE type = 'method' AND used_types LIKE ?
+          WHERE type = 'method'
+            AND id IN (SELECT rowid FROM symbols_fts WHERE symbols_fts MATCH ?)
+            AND ', ' || used_types || ', ' LIKE ? COLLATE NOCASE
           LIMIT 20`
       );
       this.stmtCache.set('getApiUsagePatterns', stmt);
     }
-    const methods = stmt.all(`%${className}%`) as any[];
+    const methods = stmt.all(`{source_snippet} : "${safe}"`, `%, ${className}, %`) as any[];
 
     if (methods.length === 0) {
       return [];
@@ -3065,6 +3431,11 @@ export class XppSymbolIndex {
     // parameterized binding via .run(...modelNames), so there is no injection risk.
     const placeholders = modelNames.map(() => '?').join(',');
     this.invalidateSymbolCounts();
+
+    // The symbols_ad trigger is what removes the cleared rows from symbols_fts. It is
+    // normally already in place, but an interrupted SKIP_FTS build can leave the database
+    // trigger-less — recreate it (IF NOT EXISTS) so a clear can never orphan FTS rows.
+    this.createFTSTriggers();
 
     // Wrap all deletes in a single transaction so the database never ends up
     // in a partially-cleared state if one statement fails mid-way.
@@ -3286,12 +3657,20 @@ export class XppSymbolIndex {
       comment?: string;
       filePath: string;
     }>,
-    opts?: { skipFtsRebuild?: boolean },
+    opts?: { skipFtsRebuild?: boolean; keepTriggers?: boolean },
   ): void {
-    // Disable FTS triggers during bulk insert
-    this.labelsDb.exec(`DROP TRIGGER IF EXISTS labels_ai`);
-    this.labelsDb.exec(`DROP TRIGGER IF EXISTS labels_ad`);
-    this.labelsDb.exec(`DROP TRIGGER IF EXISTS labels_au`);
+    if (opts?.keepTriggers) {
+      // Scoped/incremental insert: let the triggers maintain labels_fts per row instead of
+      // re-tokenising every en-US label afterwards. Recursive triggers are required so the
+      // rows displaced by INSERT OR REPLACE fire labels_ad and don't leave orphaned FTS
+      // entries pointing at dead rowids.
+      this.labelsDb.pragma('recursive_triggers = ON');
+    } else {
+      // Disable FTS triggers during bulk insert
+      this.labelsDb.exec(`DROP TRIGGER IF EXISTS labels_ai`);
+      this.labelsDb.exec(`DROP TRIGGER IF EXISTS labels_ad`);
+      this.labelsDb.exec(`DROP TRIGGER IF EXISTS labels_au`);
+    }
 
     const insert = this.labelsDb.prepare(`
       INSERT OR REPLACE INTO labels (label_id, label_file_id, model, language, text, comment, file_path)
@@ -3305,6 +3684,12 @@ export class XppSymbolIndex {
     });
 
     insertMany(entries);
+
+    if (opts?.keepTriggers) {
+      // labels_fts is already up to date — the triggers maintained it row by row.
+      this.labelsDb.pragma('recursive_triggers = OFF');
+      return;
+    }
 
     // Rebuild FTS unless the caller will do a single rebuild after all batches
     if (!opts?.skipFtsRebuild) {
@@ -3556,10 +3941,13 @@ export class XppSymbolIndex {
   /**
    * Remove all labels for the given models (used during incremental rebuild)
    */
-  clearLabelsForModels(models: string[]): void {
+  clearLabelsForModels(models: string[], opts?: { ftsStrategy?: 'rebuild' | 'incremental' }): void {
     const placeholders = models.map(() => '?').join(',');
     this.labelsDb.prepare(`DELETE FROM labels WHERE model IN (${placeholders})`).run(...models);
-    this.rebuildLabelsFts();
+    // 'incremental': the labels_ad trigger already dropped each deleted row from labels_fts,
+    // so the full delete-all + re-INSERT of every en-US label (O(all labels)) is pure waste
+    // when only a handful of models were cleared.
+    if (opts?.ftsStrategy !== 'incremental') this.rebuildLabelsFts();
   }
 
   /**

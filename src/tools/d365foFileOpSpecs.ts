@@ -47,6 +47,19 @@ export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description
     type: 'string',
     description: 'Replacement for the first occurrence of oldCode; pass "" to delete the snippet.',
   },
+  // table delete actions
+  deleteActionName: {
+    type: 'string',
+    description: 'Delete action name — conventionally the related table name.',
+  },
+  deleteActionTable: {
+    type: 'string',
+    description: 'Related table the delete action applies to (defaults to deleteActionName).',
+  },
+  deleteActionType: {
+    type: 'string (None | Restricted | Cascade | CascadeRestricted)',
+    description: 'Delete action to take on the related table. Defaults to Restricted.',
+  },
   // table fields
   fieldName: { type: 'string', description: 'Field name.' },
   fieldNewName: {
@@ -67,8 +80,26 @@ export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description
   fieldMandatory: { type: 'boolean', description: 'Mark the field Mandatory=Yes.' },
   fieldLabel: { type: 'string', description: 'Field label.' },
   fieldHelpText: { type: 'string', description: 'Field help text.' },
-  fieldEnumType: { type: 'string', description: 'Enum name to set on an enum-typed field.' },
+  fieldEnumType: {
+    type: 'string',
+    description:
+      'Enum name for an enum-typed field. On add-field this is all an enum field needs — ' +
+      'it writes AxTableFieldEnum + EnumType, no EDT.',
+  },
   fieldStringSize: { type: 'string', description: 'String size to set on a string-typed field.' },
+  dataField: {
+    type: 'string',
+    description:
+      'add-field on a data-entity-extension: source table field name for the mapped field ' +
+      '(e.g. "MyField"). Required alongside dataSource — used instead of fieldType/fieldBaseType, ' +
+      'since a data-entity mapped field (AxDataEntityViewMappedField) has no EDT/base-type of its own.',
+  },
+  dataSource: {
+    type: 'string',
+    description:
+      'add-field on a data-entity-extension: source data-source/table name on the entity for the ' +
+      'mapped field (e.g. "MyTable"). Required alongside dataField.',
+  },
   fields: {
     type: 'array of { name, edt?, type?, mandatory?, label? }',
     description:
@@ -164,17 +195,21 @@ export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description
     type: 'array of { fieldName, relatedFieldName }',
     description: 'Field constraints (local field = related field pairs).',
   },
+  // Value sets are the metamodel enums themselves (verified on platform 7.0.7858.27);
+  // anything outside them is rejected by the bridge with the legal list, not dropped.
   relationCardinality: {
     type: 'string',
-    description: 'Local-side cardinality: ZeroMore | ZeroOne | ExactlyOne (default: ZeroMore).',
+    description:
+      'Local-side cardinality: ZeroOne | ExactlyOne | ZeroMore | OneMore | NotSpecified (default: ZeroMore).',
   },
   relatedTableCardinality: {
     type: 'string',
-    description: 'Related-side cardinality: ZeroMore | ZeroOne | ExactlyOne (default: ExactlyOne).',
+    description: 'Related-side cardinality: ZeroOne | ExactlyOne | NotSpecified (default: ExactlyOne).',
   },
   relationshipType: {
     type: 'string',
-    description: 'Association | Composition | Aggregation | Link | Specialization (default: Association).',
+    description:
+      'Association | Composition | Aggregation | Link | Specialization | NotSpecified (default: Association).',
   },
   // field groups
   fieldGroupName: { type: 'string', description: 'Field group name.' },
@@ -188,6 +223,13 @@ export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description
     description:
       'table-extension only: true = extend an existing base-table group (<FieldGroupExtensions>); ' +
       'false = add to a group defined in the extension.',
+  },
+  // table mappings (AxMap membership)
+  mapName: { type: 'string', description: 'Name of the AxMap the table takes part in.' },
+  mappingTable: { type: 'string', description: 'Mapped table name (defaults to mapName).' },
+  mappingConnections: {
+    type: 'array of {mapField, mapFieldTo}',
+    description: 'Field pairings: mapField is on the MAP, mapFieldTo on this table. Both required.',
   },
   // form data sources
   dataSourceName: { type: 'string', description: 'Data source reference name (e.g. "MyTable_1").' },
@@ -204,8 +246,18 @@ export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description
   },
   // enum values
   enumValueName: { type: 'string', description: 'Enum value name (e.g. "Approved").' },
+  enumValueNewName: {
+    type: 'string',
+    description: 'modify-enum-value: rename the value located by enumValueName to this.',
+  },
   enumValueLabel: { type: 'string', description: 'Label reference (e.g. "@MyModel:Approved").' },
-  enumValueHelpText: { type: 'string', description: 'Help-text reference (optional).' },
+  enumValueHelpText: {
+    type: 'string',
+    description:
+      'NOT WRITABLE — an enum value has no help text in the metamodel (AxEnumValue has no ' +
+      'HelpText property). Kept only so passing it produces an explanation instead of a ' +
+      'spelling suggestion. Use enumValueLabel, or set HelpText on the enum.',
+  },
   enumValueInt: { type: 'number', description: 'Explicit integer value (omitted = next available).' },
   enumValueCountryRegionCodes: {
     type: 'string',
@@ -224,6 +276,14 @@ export interface D365FileOpSpec {
   required: string[];
   /** Params the operation understands beyond the required ones. */
   optional: string[];
+  /**
+   * Optional params of which AT LEAST ONE must be supplied for the operation to
+   * mutate anything. Without one of them the op writes nothing, so reporting
+   * success would be a lie (corpus finding #6: `modify-field {fieldName,
+   * mandatory:true}` returned "✅ Field 'Description' modified" while the wrong
+   * key meant nothing was written).
+   */
+  mutationOneOf?: string[];
   /** Op-level guidance that used to live in the published schema. */
   note?: string;
 }
@@ -254,12 +314,23 @@ export const D365FO_FILE_OP_SPECS: Record<string, D365FileOpSpec> = {
       'method. Form control overrides: methodName="ControlName.methodName".',
   },
   'add-field': {
-    required: ['fieldName', 'fieldType'],
-    optional: ['fieldBaseType', 'fieldMandatory', 'fieldLabel'],
+    required: ['fieldName'],
+    optional: ['fieldType', 'fieldBaseType', 'fieldEnumType', 'fieldMandatory', 'fieldLabel', 'dataField', 'dataSource', 'fieldGroupName'],
+    mutationOneOf: ['fieldType', 'fieldEnumType', 'dataField'],
+    note:
+      'Enum field: pass fieldEnumType="<enum name>" and NO fieldType — an enum-typed table field ' +
+      'is an AxTableFieldEnum with an EnumType and needs no EDT. (fieldType is the EDT name here, ' +
+      'never an XML element name like "AxTableFieldEnum".) ' +
+      'Table/table-extension: otherwise fieldType (EDT) is REQUIRED. data-entity-extension: pass dataField AND ' +
+      'dataSource instead — BOTH, or nothing is written; a mapped field has no EDT of its own, it points ' +
+      'at dataField on the entity data source dataSource. fieldGroupName is optional and only applies to ' +
+      'a data-entity-extension: it appends the field to that BASE-entity field group (shipped extensions ' +
+      'use AutoReport). It is not defaulted — a group the base entity does not have is a compile error.',
   },
   'modify-field': {
     required: ['fieldName'],
     optional: ['fieldType', 'fieldMandatory', 'fieldLabel', 'fieldHelpText', 'fieldEnumType', 'fieldStringSize'],
+    mutationOneOf: ['fieldType', 'fieldMandatory', 'fieldLabel', 'fieldHelpText', 'fieldEnumType', 'fieldStringSize'],
   },
   'rename-field': {
     required: ['fieldName', 'fieldNewName'],
@@ -291,11 +362,29 @@ export const D365FO_FILE_OP_SPECS: Record<string, D365FileOpSpec> = {
     optional: ['indexAllowDuplicates', 'indexAlternateKey', 'indexEnabled'],
   },
   'remove-index': { required: ['indexName'], optional: [] },
+  'add-full-text-index': {
+    required: ['indexName', 'indexFields'],
+    optional: [],
+    note: '<FullTextIndexes> is a separate collection from <Indexes> with its own element type — add-index cannot reach it. Table and table-extension.',
+  },
+  'remove-full-text-index': { required: ['indexName'], optional: [] },
+  'add-table-mapping': {
+    required: ['mapName'],
+    optional: ['mappingTable', 'mappingConnections'],
+    note: 'Records that the table takes part in an AxMap. mapName is the MAP; each connection pairs mapField (on the map) with mapFieldTo (on this table). Table and table-extension.',
+  },
+  'remove-table-mapping': { required: ['mapName'], optional: [] },
   'add-relation': {
     required: ['relationName', 'relatedTable'],
     optional: ['relationConstraints', 'relationCardinality', 'relatedTableCardinality', 'relationshipType'],
   },
   'remove-relation': { required: ['relationName'], optional: [] },
+  'add-delete-action': {
+    required: ['deleteActionName'],
+    optional: ['deleteActionTable', 'deleteActionType'],
+    note: 'objectType="table" only. deleteActionTable defaults to deleteActionName; deleteActionType defaults to Restricted.',
+  },
+  'remove-delete-action': { required: ['deleteActionName'], optional: [] },
   'add-field-group': {
     required: ['fieldGroupName'],
     optional: ['fieldGroupFields', 'fieldGroupLabel'],
@@ -321,6 +410,9 @@ export const D365FO_FILE_OP_SPECS: Record<string, D365FileOpSpec> = {
       'controlDataSource', 'controlDataField', 'controlType', 'controlLabel',
       'positionType', 'previousSibling', 'baseFormName',
     ],
+    note: 'objectType="form": parentControl="Design" adds the control at the TOP LEVEL of the '
+      + 'form design — use it for the first control on a form whose design is still empty. '
+      + 'Otherwise pass the exact name of an existing container (Tab, TabPage, Group, Grid).',
   },
   'add-enum-value': {
     required: ['enumValueName'],
@@ -328,7 +420,8 @@ export const D365FO_FILE_OP_SPECS: Record<string, D365FileOpSpec> = {
   },
   'modify-enum-value': {
     required: ['enumValueName'],
-    optional: ['enumValueLabel', 'enumValueInt'],
+    optional: ['enumValueNewName', 'enumValueLabel', 'enumValueInt'],
+    mutationOneOf: ['enumValueNewName', 'enumValueLabel', 'enumValueInt'],
   },
   'remove-enum-value': { required: ['enumValueName'], optional: [] },
   'add-menu-item-to-menu': {
@@ -337,6 +430,159 @@ export const D365FO_FILE_OP_SPECS: Record<string, D365FileOpSpec> = {
   },
   'modify-property': { required: ['propertyPath', 'propertyValue'], optional: [] },
 };
+
+/**
+ * Params every modify call accepts regardless of operation (routing, file
+ * resolution, project/backup handling). Anything outside this set and outside
+ * the operation's own spec is not consumed by the operation.
+ */
+export const D365FO_FILE_CORE_PARAMS: ReadonlySet<string> = new Set([
+  // routing / dispatch
+  'action', 'params', 'operation', 'objectType', 'objectName',
+  // file + model resolution
+  'filePath', 'workspacePath', 'modelName', 'model', 'packageName', 'packagePath',
+  // side options
+  'createBackup', 'addToProject', 'projectPath', 'solutionPath', 'groundingToken',
+]);
+
+/**
+ * Params an operation ADVERTISES but the write path does not actually serialise.
+ * They must never be accepted in silence — the caller has to learn that the
+ * value did not reach the XML (corpus cluster #35).
+ *
+ * Keep this list empty-by-default: an entry here is a confession, not a design.
+ * An entry is either a pending VM-side (C#) task or — as with the one below — a
+ * parameter the metamodel cannot express at all, in which case the note says so
+ * instead of promising a fix that will never come.
+ */
+export const OP_UNHONOURED_PARAMS: Record<string, Record<string, string>> = {
+  'add-enum-value': {
+    enumValueHelpText:
+      'an enum VALUE has no help text in the D365FO metamodel. Verified by reflection on this ' +
+      "platform (7.0.7858.27): AxEnumValue exposes Name, Tags, Label, ConfigurationKey, Value, " +
+      'CountryRegionCodes, FeatureClass — and no HelpText; only the AxEnum itself has Help/HelpText. ' +
+      'Real AOT enum XML agrees. Use enumValueLabel for the value, or set HelpText on the enum.',
+  },
+};
+
+/** One parameter the caller supplied that the operation will not consume. */
+export interface IgnoredParam {
+  name: string;
+  /**
+   * unknown      — not a parameter of ANY operation (usually a misspelling)
+   * other-op     — a real parameter, but not one this operation reads
+   * not-honoured — accepted by this operation, but never written (see OP_UNHONOURED_PARAMS)
+   */
+  reason: 'unknown' | 'other-op' | 'not-honoured';
+  /** Closest parameter of THIS operation, when the name looks like a near-miss. */
+  suggestion?: string;
+  /** Why the value is dropped (for 'not-honoured'). */
+  detail?: string;
+}
+
+/** Every parameter name known to any operation (plus aliases). */
+function allKnownParamNames(): Set<string> {
+  const names = new Set<string>(Object.keys(D365FO_FILE_PARAM_SPECS));
+  for (const spec of Object.values(D365FO_FILE_OP_SPECS)) {
+    for (const p of [...spec.required, ...spec.optional]) names.add(p);
+  }
+  for (const aliases of Object.values(OP_PARAM_ALIASES)) {
+    for (const a of aliases) names.add(a);
+  }
+  return names;
+}
+
+/** Params this operation reads, including aliases of its required params. */
+function opParamNames(operation: string): string[] {
+  const spec = D365FO_FILE_OP_SPECS[operation];
+  if (!spec) return [];
+  const names = [...spec.required, ...spec.optional];
+  for (const p of spec.required) names.push(...(OP_PARAM_ALIASES[p] ?? []));
+  return names;
+}
+
+/**
+ * Near-miss suggestion for an unrecognised key: `mandatory` → `fieldMandatory`,
+ * `allowDuplicates` → `indexAllowDuplicates`, `alternateKey` → `indexAlternateKey`.
+ * Only suffix/prefix containment is used — no fuzzy distance guessing.
+ */
+function suggestParam(operation: string, key: string): string | undefined {
+  const k = key.toLowerCase();
+  const candidates = opParamNames(operation);
+  return (
+    candidates.find(p => p.toLowerCase() === k) ??
+    candidates.find(p => p.toLowerCase().endsWith(k)) ??
+    candidates.find(p => k.endsWith(p.toLowerCase()))
+  );
+}
+
+/**
+ * Parameters the caller supplied that the operation will NOT consume.
+ *
+ * The wire schema advertises a free-form `params` object and the Zod schema
+ * strips unknown keys, so a misspelled or misplaced parameter used to vanish
+ * without a trace and the op still answered "✅". Everything this returns must
+ * be surfaced to the caller.
+ */
+export function findIgnoredParams(
+  operation: string,
+  providedKeys: readonly string[],
+): IgnoredParam[] {
+  if (!D365FO_FILE_OP_SPECS[operation]) return [];
+  const known = allKnownParamNames();
+  const mine = new Set(opParamNames(operation));
+  const unhonoured = OP_UNHONOURED_PARAMS[operation] ?? {};
+
+  const ignored: IgnoredParam[] = [];
+  for (const key of providedKeys) {
+    if (D365FO_FILE_CORE_PARAMS.has(key)) continue;
+    if (mine.has(key)) {
+      if (unhonoured[key]) ignored.push({ name: key, reason: 'not-honoured', detail: unhonoured[key] });
+      continue;
+    }
+    ignored.push({
+      name: key,
+      reason: known.has(key) ? 'other-op' : 'unknown',
+      suggestion: suggestParam(operation, key),
+    });
+  }
+  return ignored;
+}
+
+/** Human-readable warning block for ignored params (empty string when none). */
+export function renderIgnoredParamsWarning(operation: string, ignored: readonly IgnoredParam[]): string {
+  if (ignored.length === 0) return '';
+  const lines = ignored.map(p => {
+    if (p.reason === 'not-honoured') {
+      return `  ⚠️ ${p.name}: NOT WRITTEN — ${p.detail}`;
+    }
+    const what = p.reason === 'unknown'
+      ? 'not a recognised d365fo_file parameter'
+      : `not read by operation '${operation}'`;
+    const hint = p.suggestion ? ` — did you mean '${p.suggestion}'?` : '';
+    return `  ⚠️ ${p.name}: IGNORED (${what})${hint}`;
+  });
+  return [
+    `⚠️ ${ignored.length} parameter(s) did not reach the written XML:`,
+    ...lines,
+    `The value(s) above were NOT applied. Re-run with the correct parameter name(s).`,
+  ].join('\n');
+}
+
+/**
+ * Reports that an operation was called with none of the params that would make
+ * it mutate anything (see D365FileOpSpec.mutationOneOf). Returns the list of
+ * candidate params, or [] when the call is fine.
+ */
+export function findMissingMutationParams(
+  operation: string,
+  providedKeys: readonly string[],
+): string[] {
+  const oneOf = D365FO_FILE_OP_SPECS[operation]?.mutationOneOf;
+  if (!oneOf || oneOf.length === 0) return [];
+  const provided = new Set(providedKeys);
+  return oneOf.some(p => provided.has(p)) ? [] : [...oneOf];
+}
 
 /** Required params for an operation ([] for unknown ops — matches old paramHints). */
 export function getRequiredParams(operation: string): string[] {
@@ -358,7 +604,10 @@ export function renderOpSpec(operation: string): string {
   const op = D365FO_FILE_OP_SPECS[operation];
   if (!op) return `Unknown operation '${operation}'. Valid operations: ${Object.keys(D365FO_FILE_OP_SPECS).join(', ')}.`;
   const lines = [
-    `Parameter spec for operation '${operation}' (pass inside \`params\` or flat at top level):`,
+    `Parameter spec for operation '${operation}' — pass these NESTED inside \`params\`. ` +
+    `(Flat top-level keys still work for a few legacy names, but do not rely on it: strict MCP clients ` +
+    `validate against the base wire schema and drop anything undeclared before it reaches this server, ` +
+    `which then surfaces as a "required parameters missing" error that names the wrong cause.)`,
     ...op.required.map(p => renderParamLine(p, 'REQUIRED')),
     ...op.optional.map(p => renderParamLine(p, 'optional')),
   ];

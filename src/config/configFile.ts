@@ -81,12 +81,25 @@ function readJson(file: string): ConfigObject | null {
  * `allowEnvOverride` is what the running server wants (D365FO_CONFIG points it
  * at one specific instance); the CLI passes false, since it manages several
  * targets in one process and must not collapse them all onto that one file.
+ *
+ * `fallbackConfigPath` is where a not-yet-created config should be written when
+ * no candidate exists — and, like the candidates themselves, only when
+ * D365FO_CONFIG did not already name the file outright. It defaults to the repo
+ * layout (<baseDir>/config/…); an instance passes its top-level
+ * <baseDir>/d365fo-mcp.json so a freshly created instance lands in the instance
+ * layout listInstances() discovers, not under config/ (where it would be
+ * invisible to list/rebuild/run).
  */
-export function resolveConfigFiles(baseDir: string, opts?: { allowEnvOverride?: boolean }): ResolvedConfigFiles {
+export function resolveConfigFiles(
+  baseDir: string,
+  opts?: { allowEnvOverride?: boolean; fallbackConfigPath?: string },
+): ResolvedConfigFiles {
   const explicit = opts?.allowEnvOverride === false ? undefined : process.env.D365FO_CONFIG?.trim();
   const configPath = explicit
     ? resolve(explicit)
-    : configCandidates(baseDir).find(p => fs.existsSync(p)) ?? join(baseDir, 'config', 'd365fo-mcp.json');
+    : configCandidates(baseDir).find(p => fs.existsSync(p))
+      ?? opts?.fallbackConfigPath
+      ?? join(baseDir, 'config', 'd365fo-mcp.json');
 
   const dir = dirname(configPath);
   return {
@@ -124,6 +137,31 @@ export function toEnvRecord(files: Pick<ResolvedConfigFiles, 'baseDir' | 'config
     const value = serializeValue(setting, raw);
     if (value === null) continue;
     out[setting.env] = setting.type === 'path' && !isAbsolute(value) ? resolve(files.baseDir, value) : value;
+  }
+  return out;
+}
+
+/**
+ * The path settings the wizard never writes, resolved against `baseDir`.
+ *
+ * DB_PATH, LABELS_DB_PATH and METADATA_PATH are advanced settings with
+ * relative defaults, so a normal setup leaves them out of the config file
+ * entirely and every consumer falls back to its own `'./data/…'` literal —
+ * which resolves from process.cwd(). For a git checkout that is the repo, and
+ * the answer happens to be right. For an npm install it is the *package*
+ * directory: `d365fo-mcp index` spawns the build scripts with cwd = repoRoot,
+ * so a 2 GB index landed next to the installed package, on whatever drive npm
+ * lives on, instead of in the installation directory the user chose in setup
+ * (issue: build ran out of space on C: and SQLite aborted the transaction).
+ *
+ * Emitting the defaults here pins them to the installation directory instead.
+ * A checkout is its own data directory, so its paths do not move.
+ */
+export function defaultPathEnv(baseDir: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const setting of SETTINGS) {
+    if (setting.type !== 'path' || typeof setting.default !== 'string' || setting.default === '') continue;
+    out[setting.env] = isAbsolute(setting.default) ? setting.default : resolve(baseDir, setting.default);
   }
   return out;
 }

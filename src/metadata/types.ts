@@ -39,6 +39,12 @@ export interface XppMethodInfo {
   visibility: 'public' | 'private' | 'protected';
   returnType: string;
   parameters: XppParameterInfo[];
+  /**
+   * Declaration unparseable, so `parameters` is empty for lack of evidence
+   * rather than because the method takes none. Arity checks must skip, not
+   * assume zero.
+   */
+  parametersUnknown?: boolean;
   isStatic: boolean;
   source: string;
   documentation?: string;
@@ -54,6 +60,8 @@ export interface XppMethodInfo {
 export interface XppParameterInfo {
   name: string;
   type: string;
+  /** Default as declared; a dropped default makes an optional parameter look required. */
+  defaultValue?: string;
 }
 
 export interface XppTableInfo {
@@ -145,7 +153,7 @@ export interface XppSymbol {
       | 'security-duty-extension' | 'security-role-extension'
       | 'menu-item-display-extension' | 'menu-item-action-extension'
       | 'menu-item-output-extension'
-      | 'service' | 'service-group'
+      | 'menu' | 'service' | 'service-group'
       | 'map' | 'configuration-key' | 'license-code' | 'security-policy' | 'macro';
   parentName?: string;
   signature?: string;

@@ -1,5 +1,5 @@
 /**
- * Shared symbol-index lookup for the knowledge audit (ROADMAP P1).
+ * Shared symbol-index lookup for the knowledge audit.
  *
  * Extracted from knowledgeAuditCli so the CLI (`--capture`) and the CI test
  * (tests/knowledge/apiSymbols.test.ts) resolve knowledge references through the
@@ -30,7 +30,7 @@ export async function openSymbolLookup(
   if (!fs.existsSync(dbPath)) {
     throw new Error(`symbol index not found at ${dbPath} (set DB_PATH).`);
   }
-  const { default: Database } = await import('better-sqlite3');
+  const { default: Database } = await import('../../database/sqlite.js');
   const db = new Database(dbPath, { readonly: true });
 
   const byLower = new Map<string, { canonical: string; types: Set<string> }>();

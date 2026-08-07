@@ -11,11 +11,13 @@ import type { BridgeClient } from '../bridge/bridgeClient.js';
 import path from 'path';
 import fs from 'fs';
 import { getConfigManager } from '../utils/configManager.js';
+import { defaultPackagesRoot, describePackagesRootScan } from '../utils/packagesRoot.js';
 import { resolveObjectPrefix, applyObjectPrefix, getObjectSuffix, applyObjectSuffix } from '../utils/modelClassifier.js';
 import { ProjectFileManager } from './createD365File.js';
 import { extractModelFromProject, findProjectInSolution } from '../utils/projectUtils.js';
 import { normalizeD365Xml } from '../utils/d365XmlNormalizer.js';
 import { lookupSymbolNocase } from '../utils/symbolLookup.js';
+import { scaffoldWriteRefusalResult } from './writeAnchorGuard.js';
 
 interface GenerateSmartTableArgs {
   name: string;
@@ -32,8 +34,15 @@ interface GenerateSmartTableArgs {
   tableType?: string;
   copyFrom?: string;
   fieldsHint?: string;
+  /**
+   * Structured field specs. Takes priority over `fieldsHint`, which can only carry
+   * names and therefore cannot express enum-backed fields or an explicit EDT.
+   */
+  fields?: TableFieldSpec[];
   primaryKeyFields?: string[];
   generateCommonFields?: boolean;
+  /** Return the XML without touching disk. The default Windows path writes the file (eval #21). */
+  preview?: boolean;
   modelName?: string;
   projectPath?: string;
   solutionPath?: string;
@@ -170,8 +179,10 @@ export async function handleGenerateSmartTable(
     tableType,
     copyFrom,
     fieldsHint,
+    fields: fieldSpecs,
     primaryKeyFields,
     generateCommonFields,
+    preview,
     modelName,
     projectPath,
     solutionPath,
@@ -268,9 +279,11 @@ export async function handleGenerateSmartTable(
     }
   }
 
+  const explicitFields = Array.isArray(fieldSpecs) ? fieldSpecs.filter(f => f?.name) : [];
+
   // Strategy 2: Generate common fields based on table group patterns.
-  // Skipped when explicit fieldsHint is given (the caller stated the fields).
-  if (generateCommonFields && !copyFrom && !fieldsHint) {
+  // Skipped when the caller stated the fields (fields[] or fieldsHint).
+  if (generateCommonFields && !copyFrom && !fieldsHint && explicitFields.length === 0) {
     console.log(`[generateSmartTable] Analyzing patterns for table group: ${tableGroup}`);
     try {
       const db = symbolIndex.getReadDb();
@@ -331,16 +344,16 @@ export async function handleGenerateSmartTable(
     }
   }
 
-  // Strategy 3: Parse field hints and suggest EDTs
-  if (fieldsHint && !copyFrom) {
-    console.log(`[generateSmartTable] Parsing field hints: ${fieldsHint}`);
-    const hintFields = fieldsHint.split(',').map(s => s.trim()).filter(s => s.length > 0);
-
-    // Guard: reject reserved system field names before any generation attempt.
-    // Adding a field named e.g. "CreatedDateTime" produces a compiler error:
-    // "Invalid field name; 'CreatedDateTime' is reserved for system fields."
-    // The platform auto-provides these fields; users should NOT declare them.
-    const reservedHits = hintFields.filter(f => RESERVED_SYSTEM_FIELD_NAMES.has(f.toLowerCase()));
+  // Guard: reject reserved system field names before any generation attempt.
+  // Adding a field named e.g. "CreatedDateTime" produces a compiler error:
+  // "Invalid field name; 'CreatedDateTime' is reserved for system fields."
+  // The platform auto-provides these fields; users should NOT declare them.
+  {
+    const declaredNames = explicitFields.length > 0
+      ? explicitFields.map(f => f.name)
+      : (fieldsHint && !copyFrom ? fieldsHint.split(',').map(s => s.trim()).filter(s => s.length > 0) : []);
+    const sourceParam = explicitFields.length > 0 ? 'fields' : 'fieldsHint';
+    const reservedHits = declaredNames.filter(f => RESERVED_SYSTEM_FIELD_NAMES.has(f.toLowerCase()));
     if (reservedHits.length > 0) {
       return {
         content: [{
@@ -369,13 +382,33 @@ export async function handleGenerateSmartTable(
               return `  • "${f}" → ${suggestions[f.toLowerCase()] ?? '"CustomFieldName"'}`;
             }).join('\n')}`,
             ``,
-            `🔄 **Call generate again** with the corrected \`fieldsHint\`.`,
+            `🔄 **Call generate again** with the corrected \`${sourceParam}\`.`,
           ].join('\n'),
         }],
         isError: true,
       };
     }
+  }
 
+  // Strategy 3a: structured field specs. Preferred over fieldsHint — an enum-backed
+  // field or an explicit EDT cannot be expressed by a bare name (eval #21).
+  if (explicitFields.length > 0 && !copyFrom) {
+    const specDb = symbolIndex.getReadDb();
+    for (const spec of explicitFields) {
+      // enumType and an explicit type are authoritative; only resolve an EDT when
+      // neither was given and the caller did not name one.
+      const edt = spec.enumType || spec.type
+        ? spec.edt
+        : (spec.edt ?? resolveBestEdt(spec.name, specDb));
+      fields.push({ ...spec, edt });
+    }
+    console.log(`[generateSmartTable] Added ${explicitFields.length} fields from fields[]`);
+  }
+
+  // Strategy 3b: Parse field hints and suggest EDTs
+  if (fieldsHint && !copyFrom && explicitFields.length === 0) {
+    console.log(`[generateSmartTable] Parsing field hints: ${fieldsHint}`);
+    const hintFields = fieldsHint.split(',').map(s => s.trim()).filter(s => s.length > 0);
     const hintDb = symbolIndex.getReadDb();
 
     for (const hint of hintFields) {
@@ -532,12 +565,14 @@ export async function handleGenerateSmartTable(
   // Falls back to the standard PackagesLocalDirectory for traditional environments.
   const customPackagesRoot = await configManager.getCustomPackagesPath();
   const resolvedPackagePath = argPackagePath || customPackagesRoot || configManager.getPackagePath();
-  // getPackagePath() already probes C:\ and K:\ well-known locations before returning null,
+  // getPackagePath() already scans the machine's drives for AosService before returning null,
   // so reaching here with null means neither location exists on this machine.
-  if (!resolvedPackagePath && process.platform === 'win32') {
+  // preview never writes, so it must not require a write location — demanding one
+  // made "just show me the XML" fail on any machine without a D365FO install.
+  if (!resolvedPackagePath && process.platform === 'win32' && !preview) {
     throw new Error(
-      '\u274c Cannot determine PackagesLocalDirectory path.\n\n' +
-      'Neither C:\\AosService\\PackagesLocalDirectory nor K:\\AosService\\PackagesLocalDirectory were found.\n\n' +
+      '❌ Cannot determine PackagesLocalDirectory path.\n\n' +
+      `${describePackagesRootScan()}\n\n` +
       'If your D365FO installation is on a different drive, add one of the following to your .mcp.json:\n' +
       '  \u2022 "packagePath": "<drive>:\\\\AosService\\\\PackagesLocalDirectory"\n' +
       '  \u2022 "workspacePath": "<drive>:\\\\AosService\\\\PackagesLocalDirectory\\\\YourModel"\n' +
@@ -546,7 +581,7 @@ export async function handleGenerateSmartTable(
       'UDE environments: packagePath is not used — configure customPackagesPath/microsoftPackagesPath instead.'
     );
   }
-  const packagePath = resolvedPackagePath || 'K:\\AosService\\PackagesLocalDirectory';
+  const packagePath = resolvedPackagePath || defaultPackagesRoot();
 
   // Resolve project/solution path — fall back to configManager (from .mcp.json / auto-detection)
   let resolvedProjectPath = projectPath;
@@ -621,6 +656,16 @@ export async function handleGenerateSmartTable(
   if (finalName !== name) {
     console.log(`[generateSmartTable] Applied naming: ${name} → ${finalName}`);
   }
+
+  // Where this scaffold would land, checked before anything is written. The
+  // model above comes from the ACTIVE project, which a get_workspace_info switch
+  // moves; writes stay anchored to the model the workspace resolved on its own.
+  const anchorRefusal = scaffoldWriteRefusalResult({
+    objectName: finalName,
+    objectType: 'table',
+    targetModel: resolvedModel,
+  });
+  if (anchorRefusal) return anchorRefusal;
 
   // Generate standard methods (find, exist) based on primary key fields
   const generatedMethods: Array<{ name: string; source: string }> = [];
@@ -727,9 +772,9 @@ export async function handleGenerateSmartTable(
     };
   }
 
-  // On non-Windows (Azure/Linux): generate XML via SmartXmlBuilder and return as text
-  // The bridge is not available on non-Windows — file writing is handled by the local companion.
-  if (isNonWindows) {
+  // Text-only path: non-Windows (bridge unavailable, the local companion writes the file)
+  // or an explicit preview=true, which is the only way to scaffold without a disk write.
+  if (isNonWindows || preview) {
     const xml = builder.buildTableXml({
       name: finalName,
       label: label || finalName,
@@ -773,7 +818,9 @@ export async function handleGenerateSmartTable(
           edtWarningBlock,
           noModelNote,
           ``,
-          `ℹ️  MCP server is running on Azure/Linux — file writing is handled by the local Windows companion. This is the expected hybrid workflow.`,
+          preview && !isNonWindows
+            ? `ℹ️  preview=true — nothing was written to disk.`
+            : `ℹ️  MCP server is running on Azure/Linux — file writing is handled by the local Windows companion. This is the expected hybrid workflow.`,
           nextStep,
           ``,
           `\`\`\`xml`,

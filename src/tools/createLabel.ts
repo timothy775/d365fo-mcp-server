@@ -19,7 +19,9 @@ import type { XppSymbolIndex } from '../metadata/symbolIndex.js';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { getConfigManager } from '../utils/configManager.js';
+import { defaultPackagesRoot } from '../utils/packagesRoot.js';
 import { PackageResolver } from '../utils/packageResolver.js';
+import { crossModelWriteRefusal } from '../utils/crossModelWriteGuard.js';
 import { detectEol } from '../utils/eolUtils.js';
 import { isExtensionLabelFile } from '../metadata/labelParser.js';
 import { ProjectFileManager, ProjectFileFinder } from './createD365File.js';
@@ -508,9 +510,9 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
       resolvedPackageName = args.packageName;
       if (envType === 'ude') {
         const customPath = await configManager.getCustomPackagesPath();
-        resolvedPackagePath = packagePath || customPath || configManager.getPackagePath() || 'K:\\AosService\\PackagesLocalDirectory';
+        resolvedPackagePath = packagePath || customPath || configManager.getPackagePath() || defaultPackagesRoot();
       } else {
-        resolvedPackagePath = packagePath || configManager.getPackagePath() || 'K:\\AosService\\PackagesLocalDirectory';
+        resolvedPackagePath = packagePath || configManager.getPackagePath() || defaultPackagesRoot();
       }
     } else if (envType === 'ude') {
       // UDE mode: auto-resolve package name via descriptor scan
@@ -518,7 +520,7 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
       const msPath = await configManager.getMicrosoftPackagesPath();
       const roots = [customPath, msPath].filter(Boolean) as string[];
 
-      resolvedPackagePath = packagePath || customPath || 'K:\\AosService\\PackagesLocalDirectory';
+      resolvedPackagePath = packagePath || customPath || defaultPackagesRoot();
 
       const resolver = new PackageResolver(roots);
       const resolved = await resolver.resolve(model);
@@ -526,8 +528,29 @@ export async function createLabelTool(request: CallToolRequest, context: XppServ
       if (resolved?.rootPath) resolvedPackagePath = resolved.rootPath;
     } else {
       // Traditional mode without explicit packageName: assume package == model
-      resolvedPackagePath = packagePath || configManager.getPackagePath() || 'K:\\AosService\\PackagesLocalDirectory';
+      resolvedPackagePath = packagePath || configManager.getPackagePath() || defaultPackagesRoot();
       resolvedPackageName = model;
+    }
+
+    // Cross-model guard: a label file belongs to exactly one model, so writing a
+    // label into another model's file has the same consequences as editing that
+    // model's objects — and labels are usually the first thing an agent adds when
+    // it drifts into the wrong model. `model` is the model directory the write
+    // resolves to, so this compares the real target, not the caller's intent.
+    const crossModelLabelRefusal = crossModelWriteRefusal({
+      objectName: `@${args.labelFileId}:${args.labelId}`,
+      objectType: 'label',
+      owningModel: model,
+      owningPackage: resolvedPackageName,
+      activeModel: configManager.getWriteAnchorModel() ?? '',
+      toolSwitchedModel: configManager.getToolProjectSwitch()?.forcedModel ?? null,
+      action: 'create',
+    });
+    if (crossModelLabelRefusal) {
+      return {
+        content: [{ type: 'text', text: crossModelLabelRefusal }],
+        isError: true,
+      };
     }
 
     const modelDir = path.join(resolvedPackagePath, resolvedPackageName, model);

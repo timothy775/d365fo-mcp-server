@@ -1,15 +1,15 @@
 {
   "core": {
     "tier": "core",
-    "total": 43,
-    "covered": 34,
-    "percent": 79.1
+    "total": 44,
+    "covered": 44,
+    "percent": 100
   },
   "total": {
     "tier": "all",
-    "total": 77,
-    "covered": 37,
-    "percent": 48.1
+    "total": 78,
+    "covered": 78,
+    "percent": 100
   },
   "leaves": [
     {
@@ -23,7 +23,8 @@
       "t": true,
       "covered": true,
       "cases": [
-        "L1-table-basic"
+        "L1-table-basic",
+        "L2-table-modify-lifecycle"
       ]
     },
     {
@@ -61,10 +62,12 @@
       "tier": "total",
       "weight": 2,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L2-edt-extension-basic"
+      ]
     },
     {
       "id": "enum",
@@ -87,10 +90,12 @@
       "tier": "core",
       "weight": 4,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L2-enum-extension-empty-values"
+      ]
     },
     {
       "id": "view",
@@ -103,7 +108,8 @@
       "t": true,
       "covered": true,
       "cases": [
-        "L1-query-view-basic"
+        "L1-query-view-basic",
+        "L2-form-over-view"
       ]
     },
     {
@@ -159,6 +165,7 @@
       "t": true,
       "covered": true,
       "cases": [
+        "L2-table-modify-lifecycle",
         "L3-form-detailstransaction"
       ]
     },
@@ -187,7 +194,8 @@
       "t": true,
       "covered": true,
       "cases": [
-        "L1-class-basic"
+        "L1-class-basic",
+        "L2-class-method-ops"
       ]
     },
     {
@@ -202,6 +210,20 @@
       "covered": true,
       "cases": [
         "L2-interface-abstract-basic"
+      ]
+    },
+    {
+      "id": "class-inheritance",
+      "label": "Class inheritance (extends chain, virtual dispatch)",
+      "domain": "Code",
+      "tier": "core",
+      "weight": 4,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L2-coc-inherited-method"
       ]
     },
     {
@@ -252,11 +274,13 @@
       "domain": "Code",
       "tier": "total",
       "weight": 1,
-      "k": false,
-      "e": false,
-      "t": false,
-      "covered": false,
-      "cases": []
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L1-macro-library-flight"
+      ]
     },
     {
       "id": "transactions",
@@ -265,10 +289,16 @@
       "tier": "core",
       "weight": 5,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L2-class-method-ops",
+        "L2-form-modify-controls",
+        "L2-table-modify-lifecycle",
+        "L3-form-add-datasource-lines",
+        "L4-master-security-slice"
+      ]
     },
     {
       "id": "select-grammar",
@@ -306,10 +336,12 @@
       "tier": "total",
       "weight": 1,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L2-sysda-fluent-query"
+      ]
     },
     {
       "id": "error-handling",
@@ -318,10 +350,12 @@
       "tier": "core",
       "weight": 5,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L2-error-handling-infolog"
+      ]
     },
     {
       "id": "sysextension",
@@ -330,10 +364,12 @@
       "tier": "total",
       "weight": 2,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L2-sysextension-plugin"
+      ]
     },
     {
       "id": "performance",
@@ -342,10 +378,12 @@
       "tier": "core",
       "weight": 4,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L2-performance-set-based"
+      ]
     },
     {
       "id": "bp-rules",
@@ -369,17 +407,33 @@
         "L1-form-simplelistdetails",
         "L1-form-tableofcontents",
         "L1-form-workspace",
+        "L1-macro-library-flight",
         "L1-map-basic",
         "L1-table-basic",
         "L2-business-event-basic",
+        "L2-class-method-ops",
+        "L2-coc-inherited-method",
+        "L2-collections-map-list-container",
+        "L2-config-key-gated-table",
+        "L2-datetime-timezone-range",
         "L2-delegate-basic",
         "L2-dimension-basic",
+        "L2-direct-sql-connection",
+        "L2-dotnet-interop-clrerror",
+        "L2-edt-extension-basic",
+        "L2-feature-management-flight",
         "L2-interface-abstract-basic",
+        "L2-license-code-configkey",
         "L2-numberseq-basic",
         "L2-occ-retry-basic",
+        "L2-reflection-dict-fieldwalk",
+        "L2-sysda-fluent-query",
+        "L2-sysextension-plugin",
         "L2-table-caching-basic",
         "L2-table-extension",
         "L2-table-inheritance-basic",
+        "L2-table-modify-lifecycle",
+        "L3-custom-service-basic",
         "L3-form-detailstransaction"
       ]
     },
@@ -405,17 +459,33 @@
         "L1-form-simplelistdetails",
         "L1-form-tableofcontents",
         "L1-form-workspace",
+        "L1-macro-library-flight",
         "L1-map-basic",
         "L1-table-basic",
         "L2-business-event-basic",
+        "L2-class-method-ops",
+        "L2-coc-inherited-method",
+        "L2-collections-map-list-container",
+        "L2-config-key-gated-table",
+        "L2-datetime-timezone-range",
         "L2-delegate-basic",
         "L2-dimension-basic",
+        "L2-direct-sql-connection",
+        "L2-dotnet-interop-clrerror",
+        "L2-edt-extension-basic",
+        "L2-feature-management-flight",
         "L2-interface-abstract-basic",
+        "L2-license-code-configkey",
         "L2-numberseq-basic",
         "L2-occ-retry-basic",
+        "L2-reflection-dict-fieldwalk",
+        "L2-sysda-fluent-query",
+        "L2-sysextension-plugin",
         "L2-table-caching-basic",
         "L2-table-extension",
         "L2-table-inheritance-basic",
+        "L2-table-modify-lifecycle",
+        "L3-custom-service-basic",
         "L3-form-detailstransaction"
       ]
     },
@@ -453,11 +523,13 @@
       "domain": "Code",
       "tier": "total",
       "weight": 3,
-      "k": false,
-      "e": false,
+      "k": true,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L2-collections-map-list-container"
+      ]
     },
     {
       "id": "datetime-timezones",
@@ -465,11 +537,13 @@
       "domain": "Code",
       "tier": "total",
       "weight": 3,
-      "k": false,
-      "e": false,
+      "k": true,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L2-datetime-timezone-range"
+      ]
     },
     {
       "id": "dotnet-interop",
@@ -477,11 +551,13 @@
       "domain": "Code",
       "tier": "total",
       "weight": 2,
-      "k": false,
-      "e": false,
+      "k": true,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L2-dotnet-interop-clrerror"
+      ]
     },
     {
       "id": "reflection-dict",
@@ -489,11 +565,13 @@
       "domain": "Code",
       "tier": "total",
       "weight": 2,
-      "k": false,
-      "e": false,
+      "k": true,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L2-reflection-dict-fieldwalk"
+      ]
     },
     {
       "id": "form",
@@ -551,10 +629,13 @@
       "tier": "core",
       "weight": 5,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L2-form-modify-controls",
+        "L3-form-add-datasource-lines"
+      ]
     },
     {
       "id": "menu-item",
@@ -567,7 +648,8 @@
       "t": true,
       "covered": true,
       "cases": [
-        "L4-ssrs-report-advanced"
+        "L4-ssrs-report-advanced",
+        "L4-ssrs-report-multidataset"
       ]
     },
     {
@@ -577,10 +659,12 @@
       "tier": "core",
       "weight": 3,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L4-master-security-slice"
+      ]
     },
     {
       "id": "tiles-kpis",
@@ -588,11 +672,13 @@
       "domain": "UI",
       "tier": "total",
       "weight": 1,
-      "k": false,
-      "e": false,
+      "k": true,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L2-tile-cue-over-query"
+      ]
     },
     {
       "id": "ssrs-report",
@@ -616,10 +702,12 @@
       "tier": "total",
       "weight": 2,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L4-ssrs-report-multidataset"
+      ]
     },
     {
       "id": "print-management",
@@ -628,10 +716,12 @@
       "tier": "total",
       "weight": 2,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L3-print-management-report"
+      ]
     },
     {
       "id": "electronic-reporting",
@@ -640,10 +730,12 @@
       "tier": "total",
       "weight": 1,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L3-electronic-reporting-integration"
+      ]
     },
     {
       "id": "sysoperation",
@@ -666,10 +758,12 @@
       "tier": "total",
       "weight": 2,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L3-parallel-batch-tasks"
+      ]
     },
     {
       "id": "async-retryable-batch",
@@ -678,10 +772,12 @@
       "tier": "total",
       "weight": 2,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L3-batch-retryable-basic"
+      ]
     },
     {
       "id": "number-sequences",
@@ -718,10 +814,12 @@
       "tier": "total",
       "weight": 2,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L4-posting-ledgervoucher-slice"
+      ]
     },
     {
       "id": "workflow",
@@ -730,10 +828,12 @@
       "tier": "core",
       "weight": 3,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L3-workflow-document-submit"
+      ]
     },
     {
       "id": "business-events",
@@ -756,10 +856,12 @@
       "tier": "total",
       "weight": 2,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L2-feature-management-flight"
+      ]
     },
     {
       "id": "configuration-keys",
@@ -768,10 +870,12 @@
       "tier": "total",
       "weight": 2,
       "k": true,
-      "e": false,
-      "t": false,
-      "covered": false,
-      "cases": []
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L2-config-key-gated-table"
+      ]
     },
     {
       "id": "multi-company",
@@ -780,10 +884,12 @@
       "tier": "core",
       "weight": 3,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L2-multi-company-changecompany"
+      ]
     },
     {
       "id": "global-address-book",
@@ -792,10 +898,12 @@
       "tier": "total",
       "weight": 2,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L3-gab-party-postaladdress"
+      ]
     },
     {
       "id": "currency",
@@ -804,10 +912,12 @@
       "tier": "total",
       "weight": 2,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L3-currency-exchange-conversion"
+      ]
     },
     {
       "id": "inventory",
@@ -816,10 +926,12 @@
       "tier": "total",
       "weight": 3,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L3-inventory-inventdim-onhand"
+      ]
     },
     {
       "id": "warehouse",
@@ -828,10 +940,12 @@
       "tier": "total",
       "weight": 1,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L3-warehouse-work-slice"
+      ]
     },
     {
       "id": "trade-agreements",
@@ -840,10 +954,12 @@
       "tier": "total",
       "weight": 1,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L3-trade-agreement-price-lookup"
+      ]
     },
     {
       "id": "data-entity",
@@ -866,10 +982,12 @@
       "tier": "total",
       "weight": 2,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L3-data-entity-extension-field"
+      ]
     },
     {
       "id": "custom-service",
@@ -878,10 +996,12 @@
       "tier": "core",
       "weight": 3,
       "k": true,
-      "e": false,
-      "t": false,
-      "covered": false,
-      "cases": []
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L3-custom-service-basic"
+      ]
     },
     {
       "id": "dmf",
@@ -890,10 +1010,12 @@
       "tier": "total",
       "weight": 2,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L3-dmf-entity-import-slice"
+      ]
     },
     {
       "id": "dual-write",
@@ -902,10 +1024,12 @@
       "tier": "total",
       "weight": 2,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L3-dualwrite-entity-mapping"
+      ]
     },
     {
       "id": "power-platform",
@@ -914,10 +1038,12 @@
       "tier": "total",
       "weight": 1,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L2-virtual-entity-power-platform"
+      ]
     },
     {
       "id": "file-io",
@@ -926,10 +1052,12 @@
       "tier": "total",
       "weight": 2,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L3-file-csv-import"
+      ]
     },
     {
       "id": "direct-sql",
@@ -938,10 +1066,12 @@
       "tier": "total",
       "weight": 1,
       "k": true,
-      "e": false,
+      "e": true,
       "t": true,
-      "covered": false,
-      "cases": []
+      "covered": true,
+      "cases": [
+        "L2-direct-sql-connection"
+      ]
     },
     {
       "id": "aggregate-measurements",
@@ -949,11 +1079,13 @@
       "domain": "Integration",
       "tier": "total",
       "weight": 1,
-      "k": false,
-      "e": false,
-      "t": false,
-      "covered": false,
-      "cases": []
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L3-aggregate-measurement-basic"
+      ]
     },
     {
       "id": "security-privilege",
@@ -966,7 +1098,8 @@
       "t": true,
       "covered": true,
       "cases": [
-        "L4-entity-security"
+        "L4-entity-security",
+        "L4-master-security-slice"
       ]
     },
     {
@@ -980,7 +1113,8 @@
       "t": true,
       "covered": true,
       "cases": [
-        "L4-entity-security"
+        "L4-entity-security",
+        "L4-master-security-slice"
       ]
     },
     {
@@ -994,7 +1128,8 @@
       "t": true,
       "covered": true,
       "cases": [
-        "L4-entity-security"
+        "L4-entity-security",
+        "L4-master-security-slice"
       ]
     },
     {
@@ -1018,10 +1153,12 @@
       "tier": "total",
       "weight": 1,
       "k": true,
-      "e": false,
-      "t": false,
-      "covered": false,
-      "cases": []
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L3-xds-policy-constrained-table"
+      ]
     },
     {
       "id": "license-code",
@@ -1029,11 +1166,13 @@
       "domain": "Security",
       "tier": "total",
       "weight": 0,
-      "k": false,
-      "e": false,
-      "t": false,
-      "covered": false,
-      "cases": []
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L2-license-code-configkey"
+      ]
     },
     {
       "id": "unit-testing",
@@ -1073,17 +1212,33 @@
         "L1-form-simplelistdetails",
         "L1-form-tableofcontents",
         "L1-form-workspace",
+        "L1-macro-library-flight",
         "L1-map-basic",
         "L1-table-basic",
         "L2-business-event-basic",
+        "L2-class-method-ops",
+        "L2-coc-inherited-method",
+        "L2-collections-map-list-container",
+        "L2-config-key-gated-table",
+        "L2-datetime-timezone-range",
         "L2-delegate-basic",
         "L2-dimension-basic",
+        "L2-direct-sql-connection",
+        "L2-dotnet-interop-clrerror",
+        "L2-edt-extension-basic",
+        "L2-feature-management-flight",
         "L2-interface-abstract-basic",
+        "L2-license-code-configkey",
         "L2-numberseq-basic",
         "L2-occ-retry-basic",
+        "L2-reflection-dict-fieldwalk",
+        "L2-sysda-fluent-query",
+        "L2-sysextension-plugin",
         "L2-table-caching-basic",
         "L2-table-extension",
         "L2-table-inheritance-basic",
+        "L2-table-modify-lifecycle",
+        "L3-custom-service-basic",
         "L3-form-detailstransaction"
       ]
     }
@@ -1092,8 +1247,8 @@
     "knowledge": [],
     "cases": [
       "L2-oracle-discriminator-random-wrapper-name",
-      "L4-headerlines-document-slice",
-      "L4-master-security-slice"
+      "L3-enum-field-form-downgrade-guard",
+      "L4-headerlines-document-slice"
     ]
   }
 }

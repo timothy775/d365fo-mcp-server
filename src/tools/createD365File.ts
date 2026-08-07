@@ -9,8 +9,10 @@ import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { Parser, Builder } from 'xml2js';
 import { getConfigManager, fallbackPackagePath } from '../utils/configManager.js';
+import { describePackagesRootScan } from '../utils/packagesRoot.js';
 import { registerCustomModel, resolveObjectPrefix, applyObjectPrefix, getObjectSuffix, applyObjectSuffix, getExtensionNamingStyle } from '../utils/modelClassifier.js';
 import { PackageResolver } from '../utils/packageResolver.js';
+import { crossModelWriteRefusal } from '../utils/crossModelWriteGuard.js';
 import { ensureXppDocComment, ensureBlankLineBeforeClosingBrace } from '../utils/xppDocGen.js';
 import { reindentXppSource } from '../utils/xppFormat.js';
 import { decodeXmlEntitiesFromXppSource } from './modifyD365File.js';
@@ -21,11 +23,21 @@ import { validateFormExtensionControlShape, buildFormExtensionShapeError } from 
 import { FormPatternTemplates } from '../utils/formPatternTemplates.js';
 import { gateOnReferenceErrors } from './resolveReferences.js';
 import { normalizeD365Xml } from '../utils/d365XmlNormalizer.js';
+import { renderAxTableProperties } from '../utils/axTablePropertyOrder.js';
 import { buildAxSecurityPrivilegeXml } from './securityPrivilegeXml.js';
-import { buildAxDataEntityXml } from './dataEntityXml.js';
+import { buildAxDataEntityXml, isYes } from './dataEntityXml.js';
 import { resolveEdtBaseType, resolveEdtEnumType, heuristicEdtBaseType, isEnumName, bridgeEdtBaseType } from './generateSmartTable.js';
 import { buildAxQueryXml, buildAxViewXml } from './queryViewXml.js';
 import { buildAxMapXml } from './mapXml.js';
+import { buildAxEdtExtensionXml } from './edtExtensionXml.js';
+import { buildAxDataEntityViewExtensionXml } from './dataEntityViewExtensionXml.js';
+import { buildAxMenuItemExtensionXml, type AxMenuItemExtensionRootElement } from './menuItemExtensionXml.js';
+import { buildAxServiceXml, buildAxServiceGroupXml } from './serviceXml.js';
+import { recordCreatedArtifact, recordCreatedProjectFolder, takeCreatedProjectFolder } from './createdArtifactLedger.js';
+import {
+  reconcileTableCreateProperties,
+  renderTableCreateHonestyReport,
+} from './createTablePropertyHonesty.js';
 
 /**
  * Per-project-file mutex to serialise concurrent addToProject calls.
@@ -52,6 +64,38 @@ async function withProjectFileLock<T>(projectPath: string, fn: () => Promise<T>)
   }
 }
 
+/**
+ * Builds the "no projectPath could be resolved" warning shown when
+ * addToProject=true but neither projectPath/solutionPath nor auto-detection
+ * produced a usable path. When multiple .rnrproj files exist in the workspace,
+ * auto-detection deliberately refuses to guess between them (see
+ * workspaceDetector.ts detectD365Project) — list the candidates so the caller
+ * knows to pass projectPath explicitly instead of silently landing on the
+ * wrong project.
+ */
+function buildNoProjectPathWarning(): string {
+  // The WORKSPACE candidates, not getAllDetectedProjects(): under
+  // D365FO_SOLUTIONS_PATH the latter lists every project across every solution,
+  // which would put a wrong count behind "in this workspace" and can run to
+  // dozens of lines in what should be a short, actionable warning.
+  const candidates = getConfigManager().getWorkspaceProjectCandidates();
+  if (candidates.length > 1) {
+    return `\n⚠️ addToProject=true but no projectPath could be resolved: ${candidates.length} .rnrproj ` +
+      `files were found in this workspace and none matched unambiguously.\n` +
+      `The file was created on disk but was NOT added to any Visual Studio project.\n\n` +
+      `Pass projectPath explicitly to target the right one:\n` +
+      candidates.map(c => `   - ${c.modelName}: ${c.projectPath ?? '(no .rnrproj)'}`).join('\n') + '\n';
+  }
+  return `\n⚠️ addToProject=true but no projectPath could be resolved.\n` +
+    `The file was created on disk but was NOT added to any Visual Studio project.\n\n` +
+    `Pass projectPath as a parameter, or add it to your .mcp.json:\n` +
+    `  {\n` +
+    `    "servers": { "context": {\n` +
+    `      "projectPath": "K:\\\\VSProjects\\\\YourSolution\\\\YourModel\\\\YourModel.rnrproj"\n` +
+    `    } }\n` +
+    `  }\n`;
+}
+
 const CreateD365FileArgsSchema = z.object({
   objectType: z
     .enum([
@@ -64,6 +108,8 @@ const CreateD365FileArgsSchema = z.object({
       'security-privilege', 'security-duty', 'security-role',
       'security-duty-extension', 'security-role-extension',
       'business-event', 'tile', 'kpi', 'map',
+      'service', 'service-group',
+      'macro', 'configuration-key', 'security-policy', 'aggregate-measurement', 'license-code',
     ])
     .describe('Type of D365FO object to create'),
   objectName: z
@@ -80,7 +126,7 @@ const CreateD365FileArgsSchema = z.object({
   packagePath: z
     .string()
     .optional()
-    .describe('Base package path (default: auto-detected from .mcp.json or well-known locations: C:\\, J:\\, K:\\AosService\\PackagesLocalDirectory)'),
+    .describe('Base package path (default: auto-detected from .mcp.json, or from the <drive>:\\AosService\\PackagesLocalDirectory found on this machine)'),
   sourceCode: z
     .string()
     .optional()
@@ -97,7 +143,11 @@ const CreateD365FileArgsSchema = z.object({
   projectPath: z
     .string()
     .optional()
-    .describe('Path to .rnrproj file. Required for addToProject to work. If not specified, auto-detected from .mcp.json or workspace context.'),
+    .describe(
+      'Path to .rnrproj file. Required for addToProject in any workspace holding more than one .rnrproj: ' +
+      'auto-detection resolves a project only when there is exactly one, or one whose folder matches the ' +
+      'workspace name, and otherwise refuses to guess. Call get_workspace_info to list the candidates.'
+    ),
   solutionPath: z
     .string()
     .optional()
@@ -445,6 +495,12 @@ export class XmlTemplateGenerator {
 
     const methods: Array<{ name: string; source: string }> = [];
     const memberVarLines: string[] = [];
+    // Macro directives (#Library include, #define, #localmacro/#endmacro) live in the
+    // class declaration but have no trailing ';', so the member-var rule below would
+    // drop them — leaving the class referencing an undefined macro and failing to
+    // compile. Collected separately and emitted FIRST, before the member vars that
+    // may use them. Regression: eval/corpus/runs/2026-07-23T18__L1-macro-library-flight.
+    const macroDirectiveLines: string[] = [];
 
     let pos = 0;
     while (pos < classBody.length) {
@@ -453,7 +509,9 @@ export class XmlTemplateGenerator {
         // No more braces — collect any trailing member-variable declarations
         for (const line of classBody.substring(pos).split('\n')) {
           const t = line.trim();
-          if (t.length > 0 && t.endsWith(';') && !t.includes('(') &&
+          if (t.startsWith('#')) {
+            macroDirectiveLines.push(t);
+          } else if (t.length > 0 && t.endsWith(';') && !t.includes('(') &&
               !t.startsWith('//') && !t.startsWith('*')) {
             memberVarLines.push(t);
           }
@@ -481,7 +539,9 @@ export class XmlTemplateGenerator {
         // Collect member-variable lines that appeared before the method signature.
         for (const line of sigText.split('\n')) {
           const t = line.trim();
-          if (t.length > 0 && t.endsWith(';') && !t.includes('(') &&
+          if (t.startsWith('#')) {
+            macroDirectiveLines.push(t);
+          } else if (t.length > 0 && t.endsWith(';') && !t.includes('(') &&
               !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('[')) {
             memberVarLines.push(t);
           }
@@ -523,7 +583,9 @@ export class XmlTemplateGenerator {
         // Not a method (no '(' in sigText) — collect member-variable declarations
         for (const line of sigText.split('\n')) {
           const t = line.trim();
-          if (t.length > 0 && t.endsWith(';') && !t.includes('(') &&
+          if (t.startsWith('#')) {
+            macroDirectiveLines.push(t);
+          } else if (t.length > 0 && t.endsWith(';') && !t.includes('(') &&
               !t.startsWith('//') && !t.startsWith('*')) {
             memberVarLines.push(t);
           }
@@ -536,14 +598,16 @@ export class XmlTemplateGenerator {
 
     if (methods.length === 0) return null;
 
-    // Rebuild the declaration as: class header + member variable declarations only
+    // Rebuild the declaration as: class header + macro directives + member variables.
+    // Macro includes/#define must precede any member var that references them.
     const classHeader = classDeclaration.substring(0, classOpenIdx + 1);
-    const memberVarsXpp = memberVarLines.length > 0
-      ? '\n' + memberVarLines.map(v => '    ' + v).join('\n') + '\n\n'
+    const declLines = [...macroDirectiveLines, ...memberVarLines];
+    const declBodyXpp = declLines.length > 0
+      ? '\n' + declLines.map(v => '    ' + v).join('\n') + '\n\n'
       : '\n';
 
     return {
-      declaration: classHeader + memberVarsXpp + '}',
+      declaration: classHeader + declBodyXpp + '}',
       methods,
     };
   }
@@ -570,7 +634,17 @@ export class XmlTemplateGenerator {
     declaration: string,
     methods: T[],
   ): { declaration: string; methods: T[] } {
-    const declaredName = declaration.match(/\b(?:class|interface)\s+(\w+)/)?.[1];
+    // Match the class/interface header on CODE lines only. Matching the raw text
+    // let a doc comment win: "/// The <c>Foo</c> class is the workflow document"
+    // yields declaredName="is", and the rename then replaced every standalone "is"
+    // in the declaration and in every method body with the class name
+    // ("class is the workflow document" → "class Foo the workflow document").
+    // Reproduced from docs/eval-sweep-findings-2026-07-21.md #22.
+    const codeOnly = declaration
+      .split('\n')
+      .filter(l => !l.trim().startsWith('///') && !l.trim().startsWith('//'))
+      .join('\n');
+    const declaredName = codeOnly.match(/\b(?:class|interface)\s+(\w+)/)?.[1];
     if (!declaredName || declaredName === className) return { declaration, methods };
 
     const re = new RegExp(`\\b${declaredName}\\b`, 'g');
@@ -695,36 +769,45 @@ ${methodsXml}\t</SourceCode>
    */
   static generateAxTableXml(
     tableName: string,
-    properties?: Record<string, any>
+    properties?: Record<string, any>,
+    sourceCode?: string,
   ): string {
-    const label = properties?.label || tableName;
-    const tableGroup = properties?.tableGroup || 'Main';
-    const tableType = properties?.tableType || '';
-    const titleField1 = properties?.titleField1 || '';
-    const titleField2 = properties?.titleField2 || '';
-    const configKey = properties?.configurationKey || '';
     const primaryIndex = properties?.primaryIndex || '';
-    const cacheLookup = properties?.cacheLookup || '';
 
-    // Build optional configuration key
-    const configKeyXml = configKey
-      ? `\t<ConfigurationKey>${configKey}</ConfigurationKey>\n`
-      : '';
-
-    // Build optional cache lookup (only if explicitly set)
-    const cacheLookupXml = cacheLookup
-      ? `\t<CacheLookup>${cacheLookup}</CacheLookup>\n`
-      : '';
-
-    // Build optional primary index (NOTE: ClusteredIndex is NOT in real D365FO files)
-    const primaryIndexXml = primaryIndex
-      ? `\t<PrimaryIndex>${primaryIndex}</PrimaryIndex>\n\t<ReplacementKey>${primaryIndex}</ReplacementKey>\n`
-      : '';
-
-    // Build optional TableType (TempDB, InMemory; omit for Regular — it's the default)
-    const tableTypeXml = tableType
-      ? `\t<TableType>${tableType}</TableType>\n`
-      : '';
+    // Property block, emitted in CANONICAL ORDER. AxTable XML is order-sensitive
+    // and a misordered property is dropped without a word — see
+    // src/utils/axTablePropertyOrder.ts and findings #13. Empty values are omitted
+    // rather than written as <TitleField1></TitleField1>, matching the shipped
+    // tables and the VM-captured golden eval/goldens/L1-table-basic.
+    const propertiesXml = renderAxTableProperties({
+      ConfigurationKey: properties?.configurationKey,
+      DeveloperDocumentation: properties?.developerDocumentation,
+      FormRef: properties?.formRef,
+      Label: properties?.label || tableName,
+      TableGroup: properties?.tableGroup || 'Main',
+      TitleField1: properties?.titleField1,
+      TitleField2: properties?.titleField2,
+      // Dual-write's table-side prerequisite; without it the entity syncs once
+      // and then stops seeing changes.
+      AllowRowVersionChangeTracking:
+        isYes(properties?.allowRowVersionChangeTracking) ? 'Yes' : undefined,
+      CacheLookup: properties?.cacheLookup,
+      // Audit system fields — NoYes, ranked but previously unreachable.
+      CreatedBy: isYes(properties?.createdBy) ? 'Yes' : undefined,
+      CreatedDateTime: isYes(properties?.createdDateTime) ? 'Yes' : undefined,
+      CreatedTransactionId: isYes(properties?.createdTransactionId) ? 'Yes' : undefined,
+      ModifiedBy: isYes(properties?.modifiedBy) ? 'Yes' : undefined,
+      ModifiedDateTime: isYes(properties?.modifiedDateTime) ? 'Yes' : undefined,
+      ModifiedTransactionId: isYes(properties?.modifiedTransactionId) ? 'Yes' : undefined,
+      ClusteredIndex: properties?.clusteredIndex,
+      PrimaryIndex: primaryIndex,
+      // ReplacementKey mirrors PrimaryIndex unless the caller says otherwise.
+      ReplacementKey: properties?.replacementKey || primaryIndex,
+      SaveDataPerCompany: properties?.saveDataPerCompany,
+      SupportInheritance: properties?.supportInheritance,
+      // TableType: TempDB / InMemory; omitted for Regular, which is the default.
+      TableType: properties?.tableType,
+    });
 
     // Build <Fields> block from properties.fields array (TableFieldSpec[]).
     // Copilot may pass field definitions via properties.fields or via sourceCode JSON —
@@ -758,22 +841,38 @@ ${methodsXml}\t</SourceCode>
       fieldsXml += '\t</Fields>\n';
     }
 
+    // X++ passed in `sourceCode` used to be discarded outright: the caller got a ✅
+    // and an empty <Methods /> on disk, discoverable only by reading the file back
+    // (findings #19). Table source is class-shaped (`public class X extends common`
+    // + methods), so the class splitter handles it; when the caller passed only
+    // method bodies the splitter still returns them as methods.
+    const parsedSource = sourceCode?.trim()
+      ? XmlTemplateGenerator.parseSourceForBridge(sourceCode, tableName)
+      : undefined;
+    const declarationXpp =
+      parsedSource?.declaration?.trim()
+      && /\bclass\s+\w+/.test(parsedSource.declaration)
+        ? parsedSource.declaration.trim()
+        : `public class ${tableName} extends common\n{\n}`;
+    const methodsFromSource = parsedSource?.methods ?? [];
+    const methodsXml = methodsFromSource.length === 0
+      ? '\t\t<Methods />'
+      : `\t\t<Methods>\n${methodsFromSource
+          .map(m =>
+            `\t\t\t<Method>\n\t\t\t\t<Name>${m.name}</Name>\n` +
+            `\t\t\t\t<Source><![CDATA[\n${m.source ?? ''}\n\n]]></Source>\n\t\t\t</Method>`)
+          .join('\n')}\n\t\t</Methods>`;
+
     return `<?xml version="1.0" encoding="utf-8"?>
 <AxTable xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
 \t<Name>${tableName}</Name>
 \t<SourceCode>
 \t\t<Declaration><![CDATA[
-public class ${tableName} extends common
-{
-}
+${declarationXpp}
 ]]></Declaration>
-\t\t<Methods />
+${methodsXml}
 \t</SourceCode>
-${configKeyXml}\t<Label>${label}</Label>
-\t<TableGroup>${tableGroup}</TableGroup>
-${tableTypeXml}\t<TitleField1>${titleField1}</TitleField1>
-\t<TitleField2>${titleField2}</TitleField2>
-${cacheLookupXml}${primaryIndexXml}\t<DeleteActions />
+${propertiesXml}\t<DeleteActions />
 \t<FieldGroups>
 \t\t<AxTableFieldGroup>
 \t\t\t<Name>AutoReport</Name>
@@ -1468,8 +1567,10 @@ ${defaultParamGroupXml}
       case 'class-extension':
         return this.generateAxClassExtensionXml(objectName, sourceCode, properties);
       case 'table': {
-        // sourceCode is not used for tables directly, but Copilot may pass field
-        // definitions as a JSON string in sourceCode. Try to parse and merge into properties.
+        // sourceCode carries either X++ (declaration + methods — see
+        // generateAxTableXml, findings #19) or, from some callers, a JSON blob of
+        // field definitions. Parse the JSON shape into properties; anything else is
+        // treated as X++ and handed to the table generator as source.
         let mergedProperties = properties;
         if (sourceCode && sourceCode.trim().startsWith('{')) {
           try {
@@ -1482,7 +1583,10 @@ ${defaultParamGroupXml}
             // Not valid JSON — ignore
           }
         }
-        return this.generateAxTableXml(objectName, mergedProperties);
+        const tableSource = sourceCode && !sourceCode.trim().startsWith('{')
+          ? sourceCode
+          : undefined;
+        return this.generateAxTableXml(objectName, mergedProperties, tableSource);
       }
       case 'enum':
         return this.generateAxEnumXml(objectName, properties);
@@ -1494,8 +1598,20 @@ ${defaultParamGroupXml}
         return this.generateAxViewXml(objectName, properties);
       case 'map':
         return this.generateAxMapXml(objectName, properties);
-      case 'data-entity':
-        return this.generateAxDataEntityXml(objectName, properties);
+      case 'data-entity': {
+        // X++ passed for a data entity used to be dropped on the floor: the
+        // caller got a ✅ and an entity with no <SourceCode> at all. Split it
+        // here (the builder deliberately does no X++ parsing) so validateWrite /
+        // postLoad overrides survive. Accepts the top-level sourceCode arg or
+        // properties.sourceCode; explicit declaration/methods still win.
+        const entitySource = sourceCode ?? (properties as any)?.sourceCode;
+        let entityProps = properties;
+        if (typeof entitySource === 'string' && entitySource.trim()) {
+          const parsed = XmlTemplateGenerator.parseSourceForBridge(entitySource, objectName);
+          entityProps = { declaration: parsed.declaration, methods: parsed.methods, ...properties };
+        }
+        return this.generateAxDataEntityXml(objectName, entityProps);
+      }
       case 'report':
         return this.generateAxReportXml(objectName, properties);
       case 'edt':
@@ -1505,21 +1621,21 @@ ${defaultParamGroupXml}
       case 'form-extension':
         return this.generateAxFormExtensionXml(objectName);
       case 'edt-extension':
-        return this.generateAxSimpleExtensionXml('AxEdtExtension', objectName);
+        return this.generateAxEdtExtensionXml(objectName, properties);
       case 'enum-extension':
         return this.generateAxEnumExtensionXml(objectName, properties);
       case 'data-entity-extension':
-        return this.generateAxSimpleExtensionXml('AxDataEntityViewExtension', objectName);
+        return this.generateAxDataEntityViewExtensionXml(objectName, properties);
       case 'menu-item-display':
       case 'menu-item-action':
       case 'menu-item-output':
         return this.generateAxMenuItemXml(objectType, objectName, properties);
       case 'menu-item-display-extension':
-        return this.generateAxSimpleExtensionXml('AxMenuItemDisplayExtension', objectName);
+        return this.generateAxMenuItemExtensionXml('AxMenuItemDisplayExtension', objectName, properties);
       case 'menu-item-action-extension':
-        return this.generateAxSimpleExtensionXml('AxMenuItemActionExtension', objectName);
+        return this.generateAxMenuItemExtensionXml('AxMenuItemActionExtension', objectName, properties);
       case 'menu-item-output-extension':
-        return this.generateAxSimpleExtensionXml('AxMenuItemOutputExtension', objectName);
+        return this.generateAxMenuItemExtensionXml('AxMenuItemOutputExtension', objectName, properties);
       case 'menu':
         return this.generateAxMenuXml(objectName, properties);
       case 'menu-extension':
@@ -1540,6 +1656,20 @@ ${defaultParamGroupXml}
         return XmlTemplateGenerator.generateAxTileXml(objectName, properties);
       case 'kpi':
         return XmlTemplateGenerator.generateAxKpiXml(objectName, properties);
+      case 'service':
+        return buildAxServiceXml(objectName, properties);
+      case 'service-group':
+        return buildAxServiceGroupXml(objectName, properties);
+      case 'macro':
+        return XmlTemplateGenerator.generateAxMacroXml(objectName, sourceCode, properties);
+      case 'configuration-key':
+        return XmlTemplateGenerator.generateAxConfigurationKeyXml(objectName, properties);
+      case 'security-policy':
+        return XmlTemplateGenerator.generateAxSecurityPolicyXml(objectName, properties);
+      case 'aggregate-measurement':
+        return XmlTemplateGenerator.generateAxAggregateMeasurementXml(objectName, properties);
+      case 'license-code':
+        return XmlTemplateGenerator.generateAxLicenseCodeXml(objectName, properties);
       default:
         throw new Error(`Unsupported object type: ${objectType}`);
     }
@@ -2403,17 +2533,37 @@ ${defaultParamGroupXml}
   }
 
   /**
-   * Generate a minimal extension XML for AxEdtExtension,
-   * AxDataEntityViewExtension, AxMenuItemDisplayExtension, AxMenuItemActionExtension,
-   * AxMenuItemOutputExtension.
-   * Name convention: BaseObjectName.ExtensionName  (e.g. CustTable.MyExtension)
+   * Extension XML. Name convention throughout: BaseObjectName.ExtensionName
+   * (e.g. CustTable.ConExtension). Each of these delegates to a shared builder so
+   * this class cannot drift from generateD365Xml.ts's mirrored copy.
    */
-  static generateAxSimpleExtensionXml(rootElement: string, name: string): string {
-    return `<?xml version="1.0" encoding="utf-8"?>
-<${rootElement} xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
-\t<Name>${name}</Name>
-\t<PropertyModifications />
-</${rootElement}>`;
+
+  /**
+   * Generate AxEdtExtension XML — see edtExtensionXml.ts for the property
+   * contract and why <ArrayElements /> is unconditional.
+   */
+  static generateAxEdtExtensionXml(name: string, properties?: Record<string, any>): string {
+    return buildAxEdtExtensionXml(name, properties);
+  }
+
+  /**
+   * Generate AxDataEntityViewExtension XML — see dataEntityViewExtensionXml.ts
+   * for the fields / fieldGroupExtensions / propertyModifications contract.
+   */
+  static generateAxDataEntityViewExtensionXml(name: string, properties?: Record<string, any>): string {
+    return buildAxDataEntityViewExtensionXml(name, properties);
+  }
+
+  /**
+   * Generate AxMenuItem{Display,Action,Output}Extension XML — see
+   * menuItemExtensionXml.ts for the property-modification contract.
+   */
+  static generateAxMenuItemExtensionXml(
+    rootElement: AxMenuItemExtensionRootElement,
+    name: string,
+    properties?: Record<string, any>
+  ): string {
+    return buildAxMenuItemExtensionXml(rootElement, name, properties);
   }
 
   /**
@@ -2676,7 +2826,16 @@ ${relationsXml}
 
   /**
    * Render a security reference container: a self-closing tag when empty, or the
-   * wrapped child references (e.g. <AxSecurityRolePermissionSet><Name>…</Name></…>).
+   * wrapped child references (e.g. <AxSecurityPrivilegeReference><Name>…</Name></…>).
+   *
+   * The child element name matters: a duty/role that lists its privileges under
+   * `AxSecurityRolePermissionSet` / `AxSecurityRoleDutyPermission` deserializes into
+   * an EMPTY reference list, so the whole duty→privilege→role chain is dead —
+   * xppbp then reports BPErrorDutyHasNoPrivileges / BPErrorPrivilegeNotCoveredByDuty /
+   * BPErrorDutyNotCoveredByRole for references that are physically in the file.
+   * The correct names are AxSecurityPrivilegeReference / AxSecurityDutyReference
+   * (the same ones the *Extension writers below and generateD365Xml.ts already use).
+   * Evidence: docs/eval-sweep-findings-2026-07-21.md #31 (L4-master-security-slice run).
    */
   private static securityRefContainer(container: string, childTag: string, names: string[]): string {
     if (names.length === 0) return `\t<${container} />`;
@@ -2697,7 +2856,7 @@ ${relationsXml}
 <AxSecurityDuty xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
 \t<Name>${name}</Name>
 \t<Label>${label}</Label>
-${this.securityRefContainer('Privileges', 'AxSecurityRolePermissionSet', privileges)}
+${this.securityRefContainer('Privileges', 'AxSecurityPrivilegeReference', privileges)}
 </AxSecurityDuty>`;
   }
 
@@ -2715,8 +2874,8 @@ ${this.securityRefContainer('Privileges', 'AxSecurityRolePermissionSet', privile
 \t<Name>${name}</Name>
 \t<Label>${label}</Label>
 \t<DirectAccessPermissions />
-${this.securityRefContainer('Duties', 'AxSecurityRoleDutyPermission', duties)}
-${this.securityRefContainer('Privileges', 'AxSecurityRolePermissionSet', privileges)}
+${this.securityRefContainer('Duties', 'AxSecurityDutyReference', duties)}
+${this.securityRefContainer('Privileges', 'AxSecurityPrivilegeReference', privileges)}
 \t<SubRoles />
 </AxSecurityRole>`;
   }
@@ -2850,6 +3009,209 @@ public final class ${contractName} extends BusinessEventsContract
 \t<GoalType>None</GoalType>
 \t<Trend>None</Trend>
 </AxKPI>`;
+  }
+
+  /**
+   * Generate macro-library XML (AxMacroDictionary).
+   *
+   * The whole library body is ONE property (`Source`) — there is no per-macro
+   * sub-element in the metadata, so the caller's sourceCode is emitted verbatim
+   * (XML-escaped) exactly the way the platform's own flight libraries do it.
+   *
+   * Line breaks are written as CRLF with the CR escaped (`&#xD;` + newline),
+   * which is what the MS serializer emits (see ApplicationFoundationFlights.xml).
+   * A literal CRLF also compiles — an XML parser normalises it to LF — but it
+   * does not round-trip: the CR is lost on re-serialization, so a golden frozen
+   * on the unescaped form would churn the first time the element is rewritten
+   * by Visual Studio. Verified on the VM by L1-macro-library-flight.
+   */
+  static generateAxMacroXml(name: string, sourceCode?: string, properties?: Record<string, any>): string {
+    const source = (sourceCode ?? properties?.source ?? `#define.${name}Placeholder('${name}')`)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\r\n|\r|\n/g, '&#xD;\r\n');
+
+    return `<?xml version="1.0" encoding="utf-8"?>
+<AxMacroDictionary xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+\t<Name>${name}</Name>
+\t<Source>${source}</Source>
+\t<Macros />
+</AxMacroDictionary>`;
+  }
+
+  /**
+   * Generate configuration-key XML (AxConfigurationKey).
+   * ParentKey nests the key under an existing one; LicenseCode ties it to an
+   * ISV licence (both optional — an omitted element means "no parent/licence").
+   */
+  static generateAxConfigurationKeyXml(name: string, properties?: Record<string, any>): string {
+    const label       = properties?.label       || `@TODO:${name}Label`;
+    const parentKey   = properties?.parentKey   || '';
+    const licenseCode = properties?.licenseCode || '';
+    const tags        = properties?.tags        || '';
+
+    return `<?xml version="1.0" encoding="utf-8"?>
+<AxConfigurationKey xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+\t<Name>${name}</Name>
+\t<Label>${label}</Label>${parentKey ? `\n\t<ParentKey>${parentKey}</ParentKey>` : ''}${licenseCode ? `\n\t<LicenseCode>${licenseCode}</LicenseCode>` : ''}${tags ? `\n\t<Tags>${tags}</Tags>` : ''}
+</AxConfigurationKey>`;
+  }
+
+  /**
+   * Generate XDS security-policy XML (AxSecurityPolicy).
+   * A policy constrains PrimaryTable through Query; every constrained table is
+   * an AxSecurityPolicyConstrainedTable entry carrying its TableRelation.
+   */
+  static generateAxSecurityPolicyXml(name: string, properties?: Record<string, any>): string {
+    const label            = properties?.label            || `@TODO:${name}Label`;
+    const primaryTable     = properties?.primaryTable     || '';
+    const query            = properties?.query            || '';
+    const enabled          = properties?.enabled === false ? 'No' : 'Yes';
+    const constrainedTable = properties?.constrainedTable === false ? 'No' : 'Yes';
+    const contextType      = properties?.contextType      || '';
+    const roleName         = properties?.roleName         || '';
+    const constrained: Array<{ name: string; tableRelation?: string }> =
+      Array.isArray(properties?.constrainedTables) ? properties!.constrainedTables : [];
+
+    const constrainedXml = constrained.length
+      ? constrained.map(t => `\t\t<AxSecurityPolicyConstrainedEntity xmlns=""
+\t\t\ti:type="AxSecurityPolicyConstrainedTable">
+\t\t\t<Name>${t.name}</Name>
+\t\t\t<ConstrainedTables />
+\t\t\t<TableRelation>${t.tableRelation ?? t.name}</TableRelation>
+\t\t</AxSecurityPolicyConstrainedEntity>`).join('\n')
+      : '';
+
+    return `<?xml version="1.0" encoding="utf-8"?>
+<AxSecurityPolicy xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+\t<Name>${name}</Name>
+\t<ConstrainedTable>${constrainedTable}</ConstrainedTable>
+\t<Enabled>${enabled}</Enabled>
+\t<Label>${label}</Label>${contextType ? `\n\t<ContextType>${contextType}</ContextType>` : ''}${roleName ? `\n\t<RoleName>${roleName}</RoleName>` : ''}${primaryTable ? `\n\t<PrimaryTable>${primaryTable}</PrimaryTable>` : ''}${query ? `\n\t<Query>${query}</Query>` : ''}
+\t<ConstrainedTables>${constrainedXml ? `\n${constrainedXml}\n\t` : ''}</ConstrainedTables>
+</AxSecurityPolicy>`;
+  }
+
+  /**
+   * The aggregation of an <AxMeasure>, as the contract actually spells it.
+   *
+   * The element is <DefaultAggregate> — `AggregateFunction` appears NOWHERE in
+   * PackagesLocalDirectory, and an unknown child element is DROPPED SILENTLY by
+   * the deserializer: the L3-aggregate-measurement-basic run built green while
+   * the measure fell back to Sum, with nothing anywhere reporting the loss.
+   *
+   * The enum is not the SQL vocabulary either — the platform's 531 measures use
+   * only Sum (495), DistinctCount (23), AverageOfChildren (10), Max (2), Min (1).
+   * "Avg" and "Count" are accepted as aliases because that is what a caller
+   * (and every BI doc) reaches for; anything else is refused rather than written
+   * out to be dropped.
+   */
+  static resolveDefaultAggregate(value: string | undefined, measureName: string): string {
+    const LEGAL = ['Sum', 'DistinctCount', 'AverageOfChildren', 'Max', 'Min'];
+    const ALIASES: Record<string, string> = {
+      avg: 'AverageOfChildren',
+      average: 'AverageOfChildren',
+      averageofchildren: 'AverageOfChildren',
+      count: 'DistinctCount',
+      distinctcount: 'DistinctCount',
+      sum: 'Sum',
+      max: 'Max',
+      min: 'Min',
+    };
+    if (value === undefined || value === null || value === '') return 'Sum';
+    const resolved = ALIASES[String(value).trim().toLowerCase()];
+    if (!resolved) {
+      throw new Error(
+        `Measure "${measureName}": DefaultAggregate "${value}" is not a legal aggregation. ` +
+        `Use one of ${LEGAL.join(', ')} (Avg/Average map to AverageOfChildren, Count to DistinctCount).`
+      );
+    }
+    return resolved;
+  }
+
+  /**
+   * Generate aggregate-measurement XML (AxAggregateMeasurement).
+   * One measure group per fact table/entity: Attributes are the slicing keys,
+   * Measures the aggregated fields (see resolveDefaultAggregate for the enum).
+   */
+  static generateAxAggregateMeasurementXml(name: string, properties?: Record<string, any>): string {
+    const usage = properties?.usage || 'StagedEntityStore';
+    const groups: Array<{
+      name: string;
+      table: string;
+      attributes?: Array<{ name: string; field?: string; nameField?: string }>;
+      measures?: Array<{ name: string; field: string; defaultAggregate?: string; aggregateFunction?: string }>;
+    }> = Array.isArray(properties?.measureGroups) ? properties!.measureGroups : [];
+
+    const groupXml = groups.map(group => {
+      const attributes = (group.attributes ?? []).map(attr => {
+        const field = attr.field ?? attr.name;
+        return `\t\t\t\t<AxDimensionAttribute>
+\t\t\t\t\t<Name>${attr.name}</Name>${attr.nameField ? `\n\t\t\t\t\t<NameField>${attr.nameField}</NameField>` : ''}
+\t\t\t\t\t<KeyFields>
+\t\t\t\t\t\t<AxDimensionFieldReference>
+\t\t\t\t\t\t\t<DimensionField>${field}</DimensionField>
+\t\t\t\t\t\t</AxDimensionFieldReference>
+\t\t\t\t\t</KeyFields>
+\t\t\t\t</AxDimensionAttribute>`;
+      }).join('\n');
+
+      const measures = (group.measures ?? []).map(measure => `\t\t\t\t<AxMeasure>
+\t\t\t\t\t<Name>${measure.name}</Name>
+\t\t\t\t\t<DefaultAggregate>${XmlTemplateGenerator.resolveDefaultAggregate(
+        measure.defaultAggregate ?? measure.aggregateFunction,
+        measure.name,
+      )}</DefaultAggregate>
+\t\t\t\t\t<Field>${measure.field}</Field>
+\t\t\t\t</AxMeasure>`).join('\n');
+
+      return `\t\t<AxMeasureGroup xmlns="">
+\t\t\t<Name>${group.name}</Name>
+\t\t\t<Table>${group.table}</Table>
+\t\t\t<Attributes>${attributes ? `\n${attributes}\n\t\t\t` : ''}</Attributes>
+\t\t\t<Measures>${measures ? `\n${measures}\n\t\t\t` : ''}</Measures>
+\t\t</AxMeasureGroup>`;
+    }).join('\n');
+
+    return `<?xml version="1.0" encoding="utf-8"?>
+<AxAggregateMeasurement xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns="Microsoft.Dynamics.AX.Metadata.V2">
+\t<Name>${name}</Name>
+\t<Usage>${usage}</Usage>
+\t<MeasureGroups>${groupXml ? `\n${groupXml}\n\t` : ''}</MeasureGroups>
+</AxAggregateMeasurement>`;
+  }
+
+  /**
+   * Generate license-code XML (AxLicenseCode) — the ISV licensing anchor a
+   * configuration key points at through its LicenseCode property.
+   */
+  static generateAxLicenseCodeXml(name: string, properties?: Record<string, any>): string {
+    const label     = properties?.label     || `@TODO:${name}Label`;
+    const group     = properties?.group     || 'Module';
+    const pkg       = properties?.package   || 'BusinessEssential';
+    // PublicKey is a GLOBALLY unique ISV key slot: xppc fails the build with
+    // "Duplicate value 'N' detected" if any other installed model already owns
+    // the slot (all 74 platform license codes hold 74 distinct slots). There is
+    // therefore no safe default — defaulting to a literal collided with
+    // ApplicationFoundation/LogisticsBasic in the L2-license-code-configkey run.
+    const publicKey = properties?.publicKey;
+    if (publicKey === undefined || publicKey === null || publicKey === '') {
+      throw new Error(
+        'license-code requires properties.publicKey — the ISV key slot, which must be globally unique ' +
+        'across every installed model (the build fails with "Duplicate value \'N\' detected" otherwise). ' +
+        'Slots in use on a standard install: 1-11, 13, 14, 18, 19, 24-234 (sparse), 603-605, 634, 635, 654, 655.'
+      );
+    }
+
+    return `<?xml version="1.0" encoding="utf-8"?>
+<AxLicenseCode xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
+\t<Name>${name}</Name>
+\t<Group>${group}</Group>
+\t<Label>${label}</Label>
+\t<Package>${pkg}</Package>
+\t<PublicKey>${publicKey}</PublicKey>
+</AxLicenseCode>`;
   }
 
   /**
@@ -3009,26 +3371,36 @@ export class ProjectFileManager {
       'form-extension': 'Form Extensions',
       'data-entity-extension': 'Data Entity Extensions',
       report: 'Reports',
-      'menu-item-display': 'Menu Items Display',
-      'menu-item-action': 'Menu Items Action',
-      'menu-item-output': 'Menu Items Output',
-      'menu-item-display-extension': 'Menu Item Display Extensions',
-      'menu-item-action-extension': 'Menu Item Action Extensions',
-      'menu-item-output-extension': 'Menu Item Output Extensions',
+      // VS names these "<Kind> Menu Items", not "Menu Items <Kind>".
+      'menu-item-display': 'Display Menu Items',
+      'menu-item-action': 'Action Menu Items',
+      'menu-item-output': 'Output Menu Items',
+      'menu-item-display-extension': 'Display Menu Item Extensions',
+      'menu-item-action-extension': 'Action Menu Item Extensions',
+      'menu-item-output-extension': 'Output Menu Item Extensions',
       edt: 'Extended Data Types',
       'edt-extension': 'EDT Extensions',
-      'enum-extension': 'Enum Extensions',
+      // "Base Enum Extensions" (matches the "Base Enums" base node), but
+      // "EDT Extensions" — VS abbreviates only the EDT one.
+      'enum-extension': 'Base Enum Extensions',
       menu: 'Menus',
       'menu-extension': 'Menu Extensions',
       'security-privilege': 'Security Privileges',
       'security-duty': 'Security Duties',
       'security-role': 'Security Roles',
-      'security-duty-extension': 'Security Duties',
-      'security-role-extension': 'Security Roles',
+      'security-duty-extension': 'Security Duty Extensions',
+      'security-role-extension': 'Security Role Extensions',
       'business-event': 'Classes',
       tile: 'Tiles',
       kpi: 'KPIs',
       map: 'Maps',
+      service: 'Services',
+      'service-group': 'Service Groups',
+      macro: 'Macros',
+      'configuration-key': 'Configuration Keys',
+      'security-policy': 'Security Policies',
+      'aggregate-measurement': 'Aggregate Measurements',
+      'license-code': 'License Codes',
     };
     return folderMap[objectType] || 'Classes';
   }
@@ -3071,6 +3443,13 @@ export class ProjectFileManager {
       tile: 'AxTile',
       kpi: 'AxKPI',
       map: 'AxMap',
+      service: 'AxService',
+      'service-group': 'AxServiceGroup',
+      macro: 'AxMacroDictionary',
+      'configuration-key': 'AxConfigurationKey',
+      'security-policy': 'AxSecurityPolicy',
+      'aggregate-measurement': 'AxAggregateMeasurement',
+      'license-code': 'AxLicenseCode',
     };
     return prefixMap[objectType] || 'AxClass';
   }
@@ -3175,6 +3554,8 @@ export class ProjectFileManager {
       folderGroup.Folder.push({
         $: { Include: `${displayFolderName}\\` },
       });
+      // Only an entry WE added may be pruned again on undo — see the ledger.
+      recordCreatedProjectFolder(projectPath, displayFolderName);
     }
 
     // D365FO .rnrproj standard:
@@ -3227,6 +3608,105 @@ export class ProjectFileManager {
 
     console.error(`[ProjectFileManager] Project file saved successfully`);
     return true; // File successfully added
+  }
+
+  /**
+   * Reverse of {@link addToProject}: remove the <Content Include> entry that
+   * addToProject wrote for `objectName`, and drop the <Folder Include> it added when
+   * no other Content of the same AOT type remains. A folder entry that was already in
+   * the project is left alone. Used by undo_last_modification to clean the .rnrproj
+   * after deleting a file it created in a non-git sandbox.
+   * Returns true when an entry was removed, false when nothing matched.
+   */
+  async removeFromProject(
+    projectPath: string,
+    objectType: string,
+    objectName: string,
+  ): Promise<boolean> {
+    return withProjectFileLock(projectPath, () => this._removeFromProjectLocked(projectPath, objectType, objectName));
+  }
+
+  private async _removeFromProjectLocked(
+    projectPath: string,
+    objectType: string,
+    objectName: string,
+  ): Promise<boolean> {
+    let projectXml = '';
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        projectXml = await fs.readFile(projectPath, 'utf-8');
+        break;
+      } catch (err: any) {
+        if ((err.code === 'EBUSY' || err.code === 'EPERM' || err.code === 'EACCES') && attempt < 4) {
+          await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
+          continue;
+        }
+        throw err;
+      }
+    }
+    let hadBom = false;
+    if (projectXml.charCodeAt(0) === 0xFEFF) {
+      projectXml = projectXml.slice(1);
+      hadBom = true;
+    }
+    const project = await this.parser.parseStringPromise(projectXml);
+    if (!project.Project || !project.Project.ItemGroup) return false;
+
+    const itemGroups = Array.isArray(project.Project.ItemGroup)
+      ? project.Project.ItemGroup
+      : [project.Project.ItemGroup];
+
+    const displayFolderName = this.getFolderName(objectType);
+    const axFolderPrefix = this.getAxFolderPrefix(objectType);
+    const contentInclude = `${axFolderPrefix}\\${objectName}`;
+
+    let removed = false;
+    for (const group of itemGroups) {
+      if (group.Content === undefined) continue;
+      const contents = Array.isArray(group.Content) ? group.Content : [group.Content];
+      const kept = contents.filter((c: any) => c?.$?.Include !== contentInclude);
+      if (kept.length !== contents.length) {
+        removed = true;
+        group.Content = kept;
+      }
+    }
+
+    if (!removed) return false;
+
+    // Drop the "<Type>\" folder entry only when THIS session added it and no
+    // remaining Content of this AOT type references it. Both conditions matter:
+    // the second protects folders still hosting siblings, the first protects
+    // orphan entries that were in the project before we touched it.
+    const weAddedFolder = takeCreatedProjectFolder(projectPath, displayFolderName);
+    const stillUsesFolder = itemGroups.some((group: any) => {
+      if (group.Content === undefined) return false;
+      const contents = Array.isArray(group.Content) ? group.Content : [group.Content];
+      return contents.some((c: any) => typeof c?.$?.Include === 'string' && c.$.Include.startsWith(`${axFolderPrefix}\\`));
+    });
+    if (weAddedFolder && !stillUsesFolder) {
+      for (const group of itemGroups) {
+        if (group.Folder === undefined) continue;
+        const folders = Array.isArray(group.Folder) ? group.Folder : [group.Folder];
+        group.Folder = folders.filter((f: any) => f?.$?.Include !== `${displayFolderName}\\`);
+      }
+    }
+
+    const updatedXml = this.builder.buildObject(project);
+    const output = hadBom ? '\uFEFF' + updatedXml : updatedXml;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        await fs.writeFile(projectPath, output, 'utf-8');
+        break;
+      } catch (err: any) {
+        if ((err.code === 'EBUSY' || err.code === 'EPERM' || err.code === 'EACCES') && attempt < 4) {
+          await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
+          continue;
+        }
+        throw err;
+      }
+    }
+    console.error(`[ProjectFileManager] Removed '${objectName}' from project ${path.basename(projectPath)}`);
+    return true;
   }
 
   /**
@@ -3422,6 +3902,30 @@ export class ProjectFileManager {
 }
 
 /**
+ * Bring a bridge-written artifact to the line endings the MS serializer uses.
+ *
+ * The bridge writes the XML skeleton with CRLF but leaves the X++ inside
+ * `<![CDATA[ ]]>` on bare LF, so a freshly created class is mixed-EOL (34 CRLF /
+ * 98 LF when the L2-collections-map-list-container run measured it) while every
+ * AxClass on disk is pure CRLF. It compiles either way, but the first
+ * `modify` re-serialises the whole file to CRLF — so the artifact CHANGES
+ * without anyone editing it, and a golden captured from a create churns on the
+ * next touch. Every modify path already writes through normalizeD365Xml; this
+ * closes the create half.
+ *
+ * Best-effort by design: a normalization failure must not fail a successful create.
+ */
+async function normalizeCreatedArtifactEol(filePath: string): Promise<void> {
+  try {
+    const raw = await fs.readFile(filePath, 'utf-8');
+    const normalized = normalizeD365Xml(raw);
+    if (normalized !== raw) await fs.writeFile(filePath, normalized, 'utf-8');
+  } catch (err) {
+    console.error(`[create_d365fo_file] EOL normalization skipped for ${filePath}: ${err}`);
+  }
+}
+
+/**
  * Returns a BP warning string when a `label` property is raw text (not a @File:Id reference).
  * xppbp raises BPErrorLabelIsText for any object-level label that is not a label ID.
  * Use the `labels` tool to find or create a label ID before writing the object.
@@ -3435,6 +3939,35 @@ function rawLabelBpWarning(properties: unknown, objectName: string): string {
       `or \`labels(action="create", ...)\` to create one, then re-create with the @reference.`;
   }
   return '';
+}
+
+/**
+ * Post-write parameter honesty for a table create (cluster #35).
+ *
+ * The metadata writer — bridge or template — accepts `properties` it does not know
+ * how to write and reports ✅ anyway: `configurationKey` reached neither the smart
+ * nor the generic bridge create because C# SetAxTableProperty() has no case for it
+ * (corpus run 2026-07-22T16__L2-config-key-gated-table). Re-read what actually
+ * landed on disk, write back anything repairable in canonical element order, and
+ * return a report for whatever still could not be honoured. Best-effort by design:
+ * a read/write failure here must never turn a successful create into an error.
+ */
+async function reconcileCreatedTableProperties(
+  filePath: string | undefined,
+  properties: unknown,
+): Promise<string> {
+  if (!filePath || !properties || typeof properties !== 'object') return '';
+  try {
+    const onDisk = await fs.readFile(filePath, 'utf-8');
+    const reconciled = reconcileTableCreateProperties(onDisk, properties as Record<string, unknown>);
+    if (reconciled.patched.length > 0) {
+      await fs.writeFile(filePath, normalizeD365Xml(reconciled.xml), 'utf-8');
+    }
+    return renderTableCreateHonestyReport(reconciled);
+  } catch (e) {
+    console.error(`[create_d365fo_file] table property reconcile skipped: ${e}`);
+    return '';
+  }
 }
 
 /**
@@ -3661,6 +4194,26 @@ export async function handleCreateD365File(
       };
     }
 
+    // Cross-model guard: creating INTO a custom model other than the one this
+    // workspace targets is the same mistake as modifying one — the object lands
+    // outside this project's version control and inside code other models inherit.
+    // `actualModelName` is what the write will actually use (caller's modelName, or
+    // the workspace's), so the check sits after every fallback has been applied.
+    const crossModelCreateRefusal = crossModelWriteRefusal({
+      objectName: args.objectName,
+      objectType: args.objectType,
+      owningModel: actualModelName,
+      activeModel: getConfigManager().getWriteAnchorModel() ?? '',
+      toolSwitchedModel: getConfigManager().getToolProjectSwitch()?.forcedModel ?? null,
+      action: 'create',
+    });
+    if (crossModelCreateRefusal) {
+      return {
+        content: [{ type: 'text', text: crossModelCreateRefusal }],
+        isError: true,
+      };
+    }
+
     // Apply extension prefix to object name
     const objectPrefix = resolveObjectPrefix(actualModelName);
     const namingStyle = getExtensionNamingStyle();
@@ -3806,6 +4359,13 @@ export async function handleCreateD365File(
       tile: 'AxTile',
       kpi: 'AxKPI',
       map: 'AxMap',
+      service: 'AxService',
+      'service-group': 'AxServiceGroup',
+      macro: 'AxMacroDictionary',
+      'configuration-key': 'AxConfigurationKey',
+      'security-policy': 'AxSecurityPolicy',
+      'aggregate-measurement': 'AxAggregateMeasurement',
+      'license-code': 'AxLicenseCode',
     };
 
     const objectFolder = objectFolderMap[args.objectType];
@@ -3924,10 +4484,7 @@ export async function handleCreateD365File(
           `Attempting to create: ${directory}\n\n` +
           `The packagePath in your .mcp.json points to a drive that is not accessible.\n` +
           `Update "packagePath" in .mcp.json to match your actual D365FO installation:\n\n` +
-          `Common paths:\n` +
-          `  C:\\AosService\\PackagesLocalDirectory\n` +
-          `  K:\\AosService\\PackagesLocalDirectory\n` +
-          `  J:\\AosService\\PackagesLocalDirectory\n\n` +
+          `${describePackagesRootScan()}\n\n` +
           `Current packagePath: ${basePath}\n` +
           `Current drive checked: ${driveOrRoot}${nonWindowsHint}`
         );
@@ -4084,7 +4641,28 @@ export async function handleCreateD365File(
               source: m.source !== undefined ? reindentXppSource(m.source) : m.source,
             }));
           }
+        }
 
+        // X++ handed to a table create via `sourceCode` reached NOBODY: only
+        // `properties.methods` was forwarded, so a full method body was answered with
+        // ✅ and an empty <Methods /> on disk (findings #19). Parse it the same way the
+        // class path does; an explicit properties.methods still wins.
+        if (
+          (args.objectType === 'table' || args.objectType === 'table-extension') &&
+          args.sourceCode &&
+          !args.sourceCode.trim().startsWith('{') &&
+          !bridgeParams.methods
+        ) {
+          const parsedTableSource = XmlTemplateGenerator.parseSourceForBridge(
+            args.sourceCode,
+            finalObjectName,
+          );
+          if (parsedTableSource.methods.length > 0) {
+            bridgeParams.methods = parsedTableSource.methods;
+          }
+        }
+
+        if ((args.objectType === 'table' || args.objectType === 'table-extension') && args.properties) {
           // Resolve each field's base type from its EDT when the caller only gave
           // `edt` (the documented usage — the tool schema says "EDT auto-resolved
           // when omitted"). Without this, C# CreateTableField() defaults ANY field
@@ -4204,6 +4782,7 @@ export async function handleCreateD365File(
 
             if (smartResult?.success && smartResult.filePath) {
               console.error(`[create_d365fo_file] ✅ Created via C# bridge (BP-smart): ${smartResult.filePath}`);
+              await normalizeCreatedArtifactEol(smartResult.filePath);
 
               let projectMsg = '';
               if (args.addToProject !== false) {
@@ -4242,8 +4821,7 @@ export async function handleCreateD365File(
                     projectMsg = `\n⚠️ Could not add to project: ${projErr}`;
                   }
                 } else {
-                  projectMsg = `\n⚠️ addToProject=true but no projectPath could be resolved.\n` +
-                    `Add projectPath to .mcp.json or pass it as a parameter.`;
+                  projectMsg = buildNoProjectPathWarning();
                 }
               }
 
@@ -4252,6 +4830,12 @@ export async function handleCreateD365File(
               try { await bridgeRefreshProvider(context.bridge); } catch { /* best-effort */ }
 
               const rawLabelWarning = rawLabelBpWarning(args.properties, finalObjectName);
+              // #35: CreateSmartTable ignores every property its C# switch does not
+              // know (configurationKey, formRef, …) — repair or report, never drop.
+              const honestyReport = await reconcileCreatedTableProperties(
+                smartResult.filePath,
+                args.properties,
+              );
               const bp = smartResult.bpDefaults;
               const bpSummary = bp
                 ? `\n📋 BP defaults: CacheLookup=${bp.cacheLookup ?? '(n/a)'}, TitleField1=${bp.titleField1 ?? '(none)'}, ` +
@@ -4259,13 +4843,24 @@ export async function handleCreateD365File(
                   `ClusteredIndex=${bp.clusteredIndex ?? '(none)'}`
                 : '';
 
+              // Record the freshly-created file so undo_last_modification can roll
+              // it back even in a non-git sandbox (PackagesLocalDirectory).
+              if (!fileExisted) {
+                recordCreatedArtifact({
+                  filePath: smartResult.filePath,
+                  objectType: args.objectType,
+                  objectName: finalObjectName,
+                  projectPath: projectPathToUse,
+                });
+              }
+
               return {
                 content: [
                   {
                     type: 'text',
                     text: `✅ Created ${args.objectType} '${finalObjectName}' via IMetadataProvider.Create() (Smart)\n` +
                       `📁 ${smartResult.filePath}${projectMsg}\n` +
-                      `🔧 API: ${smartResult.api ?? 'IMetaTableProvider.Create (Smart)'}${bpSummary}${rawLabelWarning}`,
+                      `🔧 API: ${smartResult.api ?? 'IMetaTableProvider.Create (Smart)'}${bpSummary}${honestyReport}${rawLabelWarning}`,
                   },
                 ],
               };
@@ -4281,6 +4876,7 @@ export async function handleCreateD365File(
         const bridgeResult = await bridgeCreateObject(context.bridge, bridgeParams);
         if (bridgeResult?.success && bridgeResult.filePath) {
           console.error(`[create_d365fo_file] ✅ Created via C# bridge: ${bridgeResult.filePath}`);
+          await normalizeCreatedArtifactEol(bridgeResult.filePath);
 
           // Add to .rnrproj if requested
           let projectMsg = '';
@@ -4321,8 +4917,7 @@ export async function handleCreateD365File(
                 projectMsg = `\n⚠️ Could not add to project: ${projErr}`;
               }
             } else {
-              projectMsg = `\n⚠️ addToProject=true but no projectPath could be resolved.\n` +
-                `Add projectPath to .mcp.json or pass it as a parameter.`;
+              projectMsg = buildNoProjectPathWarning();
             }
           }
 
@@ -4331,6 +4926,21 @@ export async function handleCreateD365File(
           try { await bridgeRefreshProvider(context.bridge); } catch { /* best-effort */ }
 
           const rawLabelWarning = rawLabelBpWarning(args.properties, finalObjectName);
+          // #35: C# CreateTable() runs the same SetAxTableProperty() switch as the
+          // smart path and ignores its return value just as thoroughly.
+          const honestyReport = args.objectType === 'table'
+            ? await reconcileCreatedTableProperties(bridgeResult.filePath, args.properties)
+            : '';
+
+          // Record the freshly-created file for non-git undo (see smart-table path).
+          if (!fileExisted) {
+            recordCreatedArtifact({
+              filePath: bridgeResult.filePath,
+              objectType: args.objectType,
+              objectName: finalObjectName,
+              projectPath: projectPathToUse,
+            });
+          }
 
           return {
             content: [
@@ -4338,7 +4948,7 @@ export async function handleCreateD365File(
                 type: 'text',
                 text: `✅ Created ${args.objectType} '${finalObjectName}' via IMetadataProvider.Create()\n` +
                   `📁 ${bridgeResult.filePath}${projectMsg}\n` +
-                  `🔧 API: ${bridgeResult.message}${rawLabelWarning}`,
+                  `🔧 API: ${bridgeResult.message}${honestyReport}${rawLabelWarning}`,
               },
             ],
           };
@@ -4350,6 +4960,37 @@ export async function handleCreateD365File(
       }
     }
 
+    // A view's <DataSource> must name the referenced QUERY'S ROOT DATASOURCE, not
+    // the query. Neither `query` nor `view` is a bridge create type, so this
+    // template is the only writer for them — read the query off disk (same model
+    // folder) and hand its XML to the builder, which extracts the root name
+    // (docs/eval-sweep-findings-2026-07-21.md #38).
+    let effectiveProperties = args.properties;
+    if (
+      args.objectType === 'view' &&
+      args.properties?.query &&
+      !args.properties?.dataSource &&
+      !args.properties?.queryRootDataSource &&
+      !args.properties?.queryXml
+    ) {
+      const queryFile = path.join(
+        path.dirname(modelPath),
+        'AxQuery',
+        `${String(args.properties.query)}.xml`,
+      );
+      try {
+        const queryXml = await fs.readFile(queryFile, 'utf-8');
+        effectiveProperties = { ...args.properties, queryXml };
+        console.error(`[create_d365fo_file] Resolved view datasource from ${queryFile}`);
+      } catch {
+        console.error(
+          `[create_d365fo_file] ⚠️ Could not read query '${args.properties.query}' at ${queryFile} — ` +
+          `the view's <DataSource> falls back to the query name, which is usually wrong. ` +
+          `Pass properties.dataSource explicitly.`,
+        );
+      }
+    }
+
     // Generate (or use provided) XML content
     let xmlContent = args.xmlContent
       ? args.xmlContent
@@ -4357,7 +4998,7 @@ export async function handleCreateD365File(
           args.objectType,
           finalObjectName,
           args.sourceCode,
-          args.properties
+          effectiveProperties
         );
 
     // Guard against HTML-entity-escaped xmlContent (e.g. "&lt;?xml..." instead of "<?xml...").
@@ -4449,6 +5090,16 @@ export async function handleCreateD365File(
       /<\/Method>\n(\t*)<Method>/g,
       '</Method>\n\n$1<Method>'
     );
+
+    // #35: the template writer knows a FIXED property list too — anything else the
+    // caller passed lands nowhere. Reconcile before the write so a repairable
+    // property is emitted in canonical order and the rest is reported, not dropped.
+    let tableHonestyReport = '';
+    if (args.objectType === 'table') {
+      const reconciled = reconcileTableCreateProperties(xmlContent, args.properties);
+      xmlContent = reconciled.xml;
+      tableHonestyReport = renderTableCreateHonestyReport(reconciled);
+    }
 
     // Form pattern gate: structural pattern violations (FP001-FP005, FP007)
     // block the write when FORM_PATTERN_ENFORCE is enabled (default).
@@ -4620,15 +5271,8 @@ export async function handleCreateD365File(
         }
       } else if (!projectMessage) {
         // No projectPath found from any source — surface this in the response so AI and user see it
-        projectMessage = `\n⚠️ addToProject=true but no projectPath could be resolved.\n` +
-          `The file was created on disk but was NOT added to the Visual Studio project.\n\n` +
-          `To fix this, add projectPath to your .mcp.json:\n` +
-          `  {\n` +
-          `    "servers": { "context": {\n` +
-          `      "projectPath": "K:\\\\VSProjects\\\\YourSolution\\\\YourModel\\\\YourModel.rnrproj"\n` +
-          `    } }\n` +
-          `  }\n` +
-          `Until then, add the file manually in Visual Studio: right-click project → Add Existing Item → ${normalizedFullPath}\n`;
+        projectMessage = buildNoProjectPathWarning() +
+          `\nUntil resolved, add the file manually in Visual Studio: right-click project → Add Existing Item → ${normalizedFullPath}\n`;
       }
     }
 
@@ -4643,6 +5287,16 @@ export async function handleCreateD365File(
         `2. Build the project to synchronize the object\n` +
         `3. Refresh AOT in Visual Studio to see the new object\n`;
 
+    // Record the freshly-created file for non-git undo (see the bridge paths above).
+    if (!fileExisted) {
+      recordCreatedArtifact({
+        filePath: normalizedFullPath,
+        objectType: args.objectType,
+        objectName: finalObjectName,
+        projectPath: args.addToProject ? projectPathToUse : undefined,
+      });
+    }
+
     // Return success message with file path
     return {
       content: [
@@ -4655,6 +5309,7 @@ export async function handleCreateD365File(
             `🔧 Type: ${objectFolder}\n` +
             bridgeValidation +
             formPatternWarnings +
+            tableHonestyReport +
             rawLabelBpWarning(args.properties, finalObjectName) +
             projectMessage +
             `\n${nextSteps}\n` +

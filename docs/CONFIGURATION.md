@@ -47,7 +47,7 @@ Which developer box this is and where its X++ packages live.
 | Key | Asked | Env var | Default | Description |
 | --- | --- | --- | --- | --- |
 | `environment.type` | setup | `D365FO_DEV_ENVIRONMENT_TYPE` | — | Classic AOSService VM ("traditional") or Unified Developer Experience / Power Platform Tools ("ude"). The wizard preselects the one it detects — UDE when XPP config files exist in %LOCALAPPDATA%\\Microsoft\\Dynamics365\\XPPConfig. Left unset, the server falls back to that same detection. Values: `traditional` — classic AOSService VM with PackagesLocalDirectory; `ude` — Unified Developer Experience / Power Platform Tools. |
-| `environment.packagePath` | setup | `D365FO_PACKAGE_PATH` | — | Root folder of all D365FO packages — the read-only reference the index is built from. Machine-wide on a traditional VM; UDE resolves it from the XPP config instead. |
+| `environment.packagePath` | setup | `D365FO_PACKAGE_PATH` | — | AOT packages folder (PackagesLocalDirectory) used as the read-only source for indexing. Machine-wide on a traditional VM; UDE resolves it from the XPP config instead. Left empty, the server scans the machine's drives for AosService\\PackagesLocalDirectory — which volume that is depends on the VM image (K:, C:, J:, …). |
 | `environment.customModels` | setup | `CUSTOM_MODELS` | — | Your own (non-Microsoft) models, comma-separated. They are indexed with priority and treated as writable. Find them in VS → Dynamics 365 → Model Management → View models. UDE detects these automatically. |
 | `environment.xppConfigName` | setup | `XPP_CONFIG_NAME` | — | Name of a config file in %LOCALAPPDATA%\\Microsoft\\Dynamics365\\XPPConfig. Pinning one keeps the server on a specific environment/version; leave empty to always use the newest config. |
 | `environment.customPackagesPath` | advanced | `D365FO_CUSTOM_PACKAGES_PATH` | — | Where custom model XML is written and tracked by git. Normally read from the XPP config — override only when your working tree lives somewhere else. |
@@ -71,7 +71,10 @@ How generated objects, extensions and fields are named.
 
 | Key | Asked | Env var | Default | Description |
 | --- | --- | --- | --- | --- |
-| `naming.prefix` | setup | `EXTENSION_PREFIX` | — | Your ISV/customer prefix. Prepended to every generated object, field and method name and enforced by the naming validator, so BP checks pass on the first build. |
+| `naming.prefix` | setup | `EXTENSION_PREFIX` | — | Your ISV/customer prefix. Prepended to every generated object, field and method name and enforced by the naming validator, so BP checks pass on the first build. Used as the **fallback**: when the active model's existing objects already show a prefix, that one wins — see [Where the prefix comes from](CUSTOM_EXTENSIONS.md#where-the-prefix-comes-from). |
+| — | — | `EXTENSION_PREFIX_SOURCE` | — | Set to `config` to make `EXTENSION_PREFIX` authoritative again instead of learning each model's prefix from its own objects. |
+| — | — | `D365FO_CROSS_MODEL_WRITE_MODELS` | — | Comma-separated models this workspace may write into besides its own. By default any create/modify/label write into another custom model is refused and the extension route in the active model is offered instead — see [Objects owned by another model](CUSTOM_EXTENSIONS.md#objects-owned-by-another-model). Consent lives here, in configuration, because a tool parameter is something the agent can grant itself. Re-read from `.env` before every decision, so an edit applies to the next attempt without a restart. |
+| — | — | `D365FO_ALLOW_CROSS_MODEL_WRITE` | `false` | Set to `true` to allow writes into **any** other custom model — the blanket form of the setting above. |
 | `naming.suffix` | advanced | `EXTENSION_SUFFIX` | — | Optional suffix appended to new object names (MyTableZZ with suffix "ZZ"). Most projects use only a prefix — leave empty unless your convention requires one. |
 | `naming.extensionStyle` | advanced | `EXTENSION_NAMING_STYLE` | `prefix` | Whether extension classes/elements embed the prefix (per the Microsoft prefix guideline) or the model name (the Visual Studio default). Use model-name when your model name is long but your prefix is a short abbreviation. Values: `prefix` — CustTable.CrExtension — embeds the extension prefix; `model-name` — CustTable.ContosoRobotics — embeds the model name (VS default). |
 
@@ -121,6 +124,7 @@ The metadata-provider child process — the only write path to the AOT.
 | `bridge.maxRetries` | advanced | `BRIDGE_MAX_RETRIES` | `2` | Read calls are retried after a health-checked restart of the child process. Writes are never retried — a timed-out write may already have been applied. 0 disables retries. |
 | `bridge.healthcheckMs` | advanced | `BRIDGE_HEALTHCHECK_MS` | `0` | Proactively detects a wedged bridge while idle. 0 disables the ping. |
 | `bridge.maxRestarts` | advanced | `BRIDGE_MAX_RESTARTS` | `3` | Circuit breaker: after this many respawns within 60 s the server stops trying. |
+| `bridge.exePath` | advanced | `D365FO_BRIDGE_EXE_PATH` | — | Absolute path to D365MetadataBridge.exe. Leave empty to auto-detect inside the installation — the setup wizard fills this in for an npm install, where the binary is built outside the package so that updating the package does not delete it. |
 | `bridge.logFile` | advanced | `D365FO_BRIDGE_LOG_FILE` | — | Absolute path the C# bridge appends its own diagnostics to. |
 | `bridge.fsScanTimeoutMs` | advanced | `D365FO_FS_SCAN_TIMEOUT_MS` | `3000` | Budget for the filesystem scan used when the bridge cannot answer an extension lookup (minimum 500). |
 | `bridge.disableFsFallback` | advanced | `D365FO_DISABLE_FS_FALLBACK` | `false` | Makes extension lookups bridge-only. Turn on to diagnose stale-index issues — results get stricter, not faster. |
@@ -204,6 +208,7 @@ Downloading a pre-built index from blob storage instead of building it locally.
     "maxRetries": 2,
     "healthcheckMs": 0,
     "maxRestarts": 3,
+    "exePath": "",
     "logFile": "",
     "fsScanTimeoutMs": 3000,
     "disableFsFallback": false

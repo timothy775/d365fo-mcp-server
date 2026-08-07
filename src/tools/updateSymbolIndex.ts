@@ -4,7 +4,9 @@ import { XppMetadataParser } from '../metadata/xmlParser.js';
 import { parseLabelFile } from '../metadata/labelParser.js';
 import type { XppServerContext } from '../types/context.js';
 import type { XppSymbol } from '../metadata/types.js';
+import { renderMethodSignature } from '../metadata/xppDeclaration.js';
 import { bridgeRefreshProvider } from '../bridge/index.js';
+import { getLastRefreshStartedAt } from '../bridge/debouncedRefresh.js';
 
 // Tool registration (name, description, inputSchema) lives inline in
 // src/server/mcpServer.ts - the single source of truth for tool instructions.
@@ -30,6 +32,9 @@ const AOT_FOLDER_TYPE_MAP: Record<string, XppSymbol['type']> = {
   'axreport': 'report',
   'axmap': 'map',
   'axmapextension': 'map-extension',
+  // #34: AxMenu was missing here, so a menu was indexed as type=class (the `?? 'class'`
+  // default below) AND model=Unknown (extractModelFromPath only recognised MAPPED folders).
+  'axmenu': 'menu',
   'axmenuextension': 'menu-extension',
   'axservice': 'service',
   'axservicegroup': 'service-group',
@@ -55,10 +60,21 @@ const AOT_FOLDER_TYPE_MAP: Record<string, XppSymbol['type']> = {
  * Pattern: {packagesRoot}\{package}\{model}\Ax{Type}\{Name}.xml
  * or:      {packagesRoot}\{model}\{model}\Ax{Type}\{Name}.xml
  */
+/** Any AOT element folder, mapped or not (AxMenu, AxWorkflowType, …). */
+const AOT_FOLDER_PATTERN = /^ax[a-z]/i;
+
+/** True for an AOT element folder segment — mapped types plus everything else Ax*. */
+export function isAotFolder(segment: string): boolean {
+  return segment.toLowerCase() in AOT_FOLDER_TYPE_MAP || AOT_FOLDER_PATTERN.test(segment);
+}
+
 function extractModelFromPath(filePath: string): string | null {
   const parts = filePath.replace(/\//g, '\\').split('\\');
-  // Find the AOT folder index (e.g. AxClass, AxTable)
-  const aotIdx = parts.findIndex(p => p.toLowerCase() in AOT_FOLDER_TYPE_MAP);
+  // Find the AOT folder index (e.g. AxClass, AxTable).
+  // #34: this used to accept only folders present in AOT_FOLDER_TYPE_MAP, so an
+  // AxMenu path yielded model="Unknown" purely because the type map had a hole.
+  // Any Ax* element folder identifies the model, whether or not we can type it.
+  const aotIdx = parts.findIndex(p => isAotFolder(p));
   if (aotIdx >= 2) {
     return parts[aotIdx - 1]; // folder immediately before the AOT folder = model name
   }
@@ -70,6 +86,28 @@ function extractModelFromPath(filePath: string): string | null {
   }
 
   return null;
+}
+
+/**
+ * Symbol type for an AOT folder segment.
+ *
+ * #34: the old expression was `AOT_FOLDER_TYPE_MAP[folder] ?? 'class'`, which
+ * turned every unmapped AOT folder into a CLASS — an AxMenu was indexed as
+ * `type=class`, poisoning search and every type-scoped lookup. A folder we can
+ * name but not map now yields its own derived type (`AxWorkflowType` →
+ * `workflowtype`) instead of a confident lie; `class` remains the fallback only
+ * when the path carries no AOT folder at all.
+ */
+export function classifyAotFolder(aotFolder: string): XppSymbol['type'] {
+  const key = aotFolder.toLowerCase();
+  const mapped = AOT_FOLDER_TYPE_MAP[key];
+  if (mapped) return mapped;
+  if (AOT_FOLDER_PATTERN.test(aotFolder)) {
+    // Derived, deliberately outside the curated union — it is a truthful label
+    // for a type this server does not model, and stays searchable.
+    return key.replace(/^ax/, '') as XppSymbol['type'];
+  }
+  return 'class';
 }
 
 function isLabelTextFile(filePath: string): boolean {
@@ -100,50 +138,154 @@ function parseLabelFileName(filePath: string): { labelFileId: string; language: 
   };
 }
 
+/**
+ * Accept one path or many. Callers that just created a handful of objects used to
+ * have to make one tool call per file, and each of those calls paid for its own
+ * full DiskProvider rebuild — the batch form pays for one.
+ */
+function normalizeFilePaths(filePath: unknown): string[] {
+  const raw = Array.isArray(filePath) ? filePath : [filePath];
+  return raw
+    .filter((p): p is string => typeof p === 'string')
+    .map(p => p.trim())
+    .filter(p => p.length > 0);
+}
+
+/**
+ * Newest mtime across the batch; 0 when nothing exists on disk (pure deletions).
+ * Used to decide whether the bridge provider is already new enough.
+ */
+function newestMtimeMs(filePaths: string[]): number {
+  let newest = 0;
+  for (const fp of filePaths) {
+    try {
+      const { mtimeMs } = fs.statSync(fp);
+      if (mtimeMs > newest) newest = mtimeMs;
+    } catch { /* deleted or unreadable — nothing to date */ }
+  }
+  return newest;
+}
+
+/**
+ * Refresh the C# provider once for the whole batch — and only when it could
+ * actually learn something.
+ *
+ * d365fo_file's create/modify paths already refresh the provider on their way
+ * out, so the update_symbol_index call that conventionally follows them was
+ * rebuilding a provider that had been rebuilt moments earlier and could not see
+ * anything new. A refresh that STARTED after the newest file was written has, by
+ * definition, already read every file in this batch.
+ */
+async function refreshBridgeForBatch(
+  context: XppServerContext,
+  filePaths: string[],
+): Promise<string> {
+  const newest = newestMtimeMs(filePaths);
+  if (newest > 0 && getLastRefreshStartedAt() > newest) {
+    return 'Bridge provider already refreshed after these files were written — skipped.';
+  }
+  try {
+    const result = await bridgeRefreshProvider(context.bridge);
+    return result
+      ? `Bridge provider refreshed in ${result.elapsedMs}ms.`
+      : 'Bridge provider not available (skipped).';
+  } catch (e: any) {
+    return `Bridge refresh skipped: ${e?.message ?? e}`;
+  }
+}
+
 export const updateSymbolIndexTool = async (params: any, context: XppServerContext) => {
-  const { filePath } = params;
+  const filePaths = normalizeFilePaths(params?.filePath);
+
+  // Refresh mode (no filePath): refreshes the bridge provider and drops workspace
+  // caches, lighter than a full reindex. Per-object SQLite indexing still needs filePath.
+  if (filePaths.length === 0) {
+    return refreshOnly(context);
+  }
+
+  // A file just changed on disk — drop the workspace scan cache so the
+  // context pipeline (recently-edited / active object) reflects it at once.
+  context.workspaceScanner?.invalidate?.();
+
+  // One refresh for the batch, before indexing, so a per-file failure cannot
+  // leave the provider stale.
+  const bridgeNote = await refreshBridgeForBatch(context, filePaths);
+
+  const results: Array<{ text: string; isError: boolean }> = [];
+  for (const fp of filePaths) {
+    results.push(await indexOneFile(fp, context));
+  }
+
+  // Single file keeps its original single-message shape; only a real batch gets
+  // the roll-up, so existing callers and their assertions see no change.
+  if (results.length === 1) {
+    return {
+      content: [{ type: 'text', text: `${results[0].text}\n\n${bridgeNote}` }],
+      ...(results[0].isError ? { isError: true } : {}),
+    };
+  }
+
+  const failed = results.filter(r => r.isError).length;
+  return {
+    content: [{
+      type: 'text',
+      text:
+        `Indexed ${results.length - failed}/${results.length} file(s) in one pass. ${bridgeNote}\n\n` +
+        results.map(r => r.text).join('\n\n'),
+    }],
+    ...(failed === results.length ? { isError: true } : {}),
+  };
+};
+
+/** Bridge/cache refresh with no file to index. */
+async function refreshOnly(context: XppServerContext) {
+  context.workspaceScanner?.invalidate?.();
+  let bridgeNote = 'Bridge provider not available (skipped).';
+  try {
+    const refreshResult = await bridgeRefreshProvider(context.bridge);
+    if (refreshResult) {
+      bridgeNote = `Bridge provider refreshed in ${refreshResult.elapsedMs}ms — newly created objects are now resolvable by bridge-backed operations.`;
+    }
+  } catch (e: any) {
+    bridgeNote = `Bridge refresh skipped: ${e?.message ?? e}`;
+  }
+  // Note: deliberately no touchLastIndexed() here — nothing was reindexed in
+  // SQLite, and bumping the timestamp would make get_workspace_info report a
+  // possibly stale index as fresh (see src/utils/indexStaleness.ts).
+  return {
+    content: [{
+      type: 'text',
+      text:
+        `🔄 **Bridge/cache refresh** (no filePath supplied).\n\n` +
+        `${bridgeNote}\n` +
+        `Workspace scan cache invalidated.\n\n` +
+        `ℹ️ The SQLite symbol index itself was NOT reindexed. To fully index a specific new ` +
+        `object into the searchable symbol DB (so scaffolding resolves its EDTs/enums and ` +
+        `references work), call this tool again with \`filePath\` pointing at the created ` +
+        `\`.xml\` (e.g. the new AxEnum/AxEdt/AxTable file).`,
+    }],
+  };
+}
+
+/**
+ * Index (or clean up after) exactly ONE file. The bridge refresh is the caller's
+ * job — it is per-batch, not per-file, which is what made a multi-object update
+ * cost one full DiskProvider rebuild per object.
+ */
+async function indexOneFile(
+  filePath: string,
+  context: XppServerContext,
+): Promise<{ text: string; isError: boolean }> {
+  const ok = (text: string) => ({ text, isError: false });
+  const err = (text: string) => ({ text, isError: true });
   try {
     const { symbolIndex } = context;
-
-    // Refresh mode (no filePath): refreshes the bridge provider and drops workspace
-    // caches, lighter than a full reindex. Per-object SQLite indexing still needs filePath.
-    if (!filePath || (typeof filePath === 'string' && filePath.trim().length === 0)) {
-      context.workspaceScanner?.invalidate?.();
-      let bridgeNote = 'Bridge provider not available (skipped).';
-      try {
-        const refreshResult = await bridgeRefreshProvider(context.bridge);
-        if (refreshResult) {
-          bridgeNote = `Bridge provider refreshed in ${refreshResult.elapsedMs}ms — newly created objects are now resolvable by bridge-backed operations.`;
-        }
-      } catch (e: any) {
-        bridgeNote = `Bridge refresh skipped: ${e?.message ?? e}`;
-      }
-      // Note: deliberately no touchLastIndexed() here — nothing was reindexed in
-      // SQLite, and bumping the timestamp would make get_workspace_info report a
-      // possibly stale index as fresh (see src/utils/indexStaleness.ts).
-      return {
-        content: [{
-          type: 'text',
-          text:
-            `🔄 **Bridge/cache refresh** (no filePath supplied).\n\n` +
-            `${bridgeNote}\n` +
-            `Workspace scan cache invalidated.\n\n` +
-            `ℹ️ The SQLite symbol index itself was NOT reindexed. To fully index a specific new ` +
-            `object into the searchable symbol DB (so scaffolding resolves its EDTs/enums and ` +
-            `references work), call this tool again with \`filePath\` pointing at the created ` +
-            `\`.xml\` (e.g. the new AxEnum/AxEdt/AxTable file).`,
-        }],
-      };
-    }
-    // A file just changed on disk — drop the workspace scan cache so the
-    // context pipeline (recently-edited / active object) reflects it at once.
-    context.workspaceScanner?.invalidate?.();
     const pathParts = filePath.split(/[\\/]/);
     const fileName = pathParts[pathParts.length - 1] ?? filePath;
     const objectName = fileName.replace(/\.[^.]+$/, '');
     const parts = filePath.replace(/\//g, '\\').split('\\');
-    const aotFolder = parts.find((p: string) => p.toLowerCase() in AOT_FOLDER_TYPE_MAP) ?? '';
-    const objectType: XppSymbol['type'] = AOT_FOLDER_TYPE_MAP[aotFolder.toLowerCase()] ?? 'class';
+    const aotFolder = parts.find((p: string) => isAotFolder(p)) ?? '';
+    const objectType: XppSymbol['type'] = classifyAotFolder(aotFolder);
 
     // File deleted: clean up stale index entries
     if (!fs.existsSync(filePath)) {
@@ -155,11 +297,8 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
       // 2. Remove labels from labels DB (label files live alongside XML)
       const labelCount = symbolIndex.removeLabelsByFile(filePath);
 
-      // 3. Refresh bridge so it no longer sees the deleted file
-      try {
-        await bridgeRefreshProvider(context.bridge);
-      } catch { /* bridge not available */ }
-
+      // The bridge refresh that stops it seeing the deleted file is the caller's
+      // per-batch one.
       symbolIndex.touchLastIndexed?.();
 
       const parts_cleaned: string[] = [];
@@ -167,13 +306,7 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
       if (labelCount > 0) parts_cleaned.push(`${labelCount} label(s)`);
       const summary = parts_cleaned.length > 0 ? parts_cleaned.join(' + ') : 'no stale entries found';
 
-      return {
-        content: [{
-          type: 'text',
-          text: `🗑️ File deleted — cleaned up ${summary} for **${objectName}** (${objectType}).\n` +
-            `Bridge refreshed.`
-        }]
-      };
+      return ok(`🗑️ File deleted — cleaned up ${summary} for **${objectName}** (${objectType}).`);
     }
 
     // File exists: re-index
@@ -183,13 +316,9 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
     if (isLabelTextFile(filePath)) {
       const parsedFileName = parseLabelFileName(filePath);
       if (!parsedFileName) {
-        return {
-          content: [{
-            type: 'text',
-            text: `❌ Error updating label index: invalid label filename format for ${path.basename(filePath)} (expected {LabelFileId}.{locale}.label.txt).`,
-          }],
-          isError: true,
-        };
+        return err(
+          `❌ Error updating label index: invalid label filename format for ${path.basename(filePath)} (expected {LabelFileId}.{locale}.label.txt).`
+        );
       }
 
       const { labelFileId, language } = parsedFileName;
@@ -212,23 +341,16 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
           insertedCount = labels.length;
         }
       } catch (e: any) {
-        return {
-          content: [{ type: 'text', text: `❌ Error updating label index: ${e.message}` }],
-          isError: true,
-        };
+        return err(`❌ Error updating label index: ${e.message}`);
       }
 
       symbolIndex.touchLastIndexed?.();
 
-      return {
-        content: [{
-          type: 'text',
-          text: `✅ Label index updated for **${path.basename(filePath)}** (model: ${model}, language: ${language}).\n\n` +
-            `Removed: ${removedCount} stale entr${removedCount === 1 ? 'y' : 'ies'}\n` +
-            `Inserted: ${insertedCount} label${insertedCount !== 1 ? 's' : ''}`,
-
-        }],
-      };
+      return ok(
+        `✅ Label index updated for **${path.basename(filePath)}** (model: ${model}, language: ${language}).\n\n` +
+        `Removed: ${removedCount} stale entr${removedCount === 1 ? 'y' : 'ies'}\n` +
+        `Inserted: ${insertedCount} label${insertedCount !== 1 ? 's' : ''}`
+      );
     }
 
     const parser = new XppMetadataParser();
@@ -240,15 +362,7 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
     // or PackagesLocalDirectory-relative, either slash style) — see symbolIndex.ts.
     const { deletedCount } = symbolIndex.removeSymbolsByFile(filePath);
 
-    // 1b. Refresh C# bridge metadata provider so it picks up the updated file
-    try {
-      const refreshResult = await bridgeRefreshProvider(context.bridge);
-      if (refreshResult) {
-        console.error(`[update_symbol_index] Bridge provider refreshed in ${refreshResult.elapsedMs}ms`);
-      }
-    } catch (e) {
-      console.error(`[update_symbol_index] Bridge refresh skipped: ${e}`);
-    }
+    // The C# bridge provider refresh happens once per batch in the caller.
 
     // 2. Re-parse the XML and insert fresh symbols
     let insertedCount = 0;
@@ -275,21 +389,29 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
             signature: classData.extends ? `extends ${classData.extends}` : undefined,
             filePath,
             model,
-            description: classData.documentation,
+            description: classData.description || classData.documentation,
+            tags: classData.tags?.join(', '),
             extendsClass: classData.extends,
             implementsInterfaces: classData.implements?.join(', '),
+            usedTypes: classData.usedTypes?.join(', '),
           });
           insertedCount++;
           for (const method of classData.methods ?? []) {
-            const params = method.parameters?.map((p: any) => `${p.type} ${p.name}`).join(', ') ?? '';
             symbolIndex.addSymbol({
               name: method.name,
               type: 'method',
               parentName: classData.name,
-              signature: `${method.returnType} ${method.name}(${params})`,
+              signature: renderMethodSignature(method),
               filePath,
               model,
+              description: method.documentation,
+              tags: method.tags?.join(', '),
+              sourceSnippet: method.sourceSnippet,
               source: method.source,
+              complexity: method.complexity,
+              usedTypes: method.usedTypes?.join(', '),
+              methodCalls: method.methodCalls?.join(', '),
+              inlineComments: method.inlineComments,
             });
             insertedCount++;
           }
@@ -307,6 +429,7 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
           symbolIndex.addSymbol({
             name: tableData.name,
             type: 'table',
+            signature: tableData.label || undefined,
             filePath,
             model,
           });
@@ -329,16 +452,74 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
           // them, and the delete above just removed them; skipping them here
           // would silently drop a table's methods on every incremental reindex.
           for (const method of tableData.methods ?? []) {
-            const params = method.parameters?.map((p: any) => `${p.type} ${p.name}`).join(', ') ?? '';
             symbolIndex.addSymbol({
               name: method.name,
               type: 'method',
               parentName: tableData.name,
-              signature: `${method.returnType} ${method.name}(${params})`,
+              signature: renderMethodSignature(method),
               filePath,
               model,
-              source: method.source,
+              description: method.documentation,
+              tags: method.tags?.join(', '),
               sourceSnippet: method.sourceSnippet,
+              source: method.source,
+              complexity: method.complexity,
+              usedTypes: method.usedTypes?.join(', '),
+              methodCalls: method.methodCalls?.join(', '),
+              inlineComments: method.inlineComments,
+            });
+            insertedCount++;
+          }
+        });
+        insert();
+      } else {
+        tx();
+      }
+    } else if (objectType === 'view') {
+      // #801: views/data entities (axview and axdataentityview both classify as
+      // 'view', see AOT_FOLDER_TYPE_MAP above) had no rebuild branch, so a resync
+      // deleted every field/method symbol and re-inserted a single bare object
+      // row — silently reporting success. Mirrors indexViews (the full build).
+      const result = await parser.parseViewFile(filePath, model);
+      if (result.success && result.data) {
+        const viewData = result.data;
+        const insert = symbolIndex.db.transaction(() => {
+          symbolIndex.addSymbol({
+            name: viewData.name,
+            type: 'view',
+            signature: viewData.type || undefined,
+            filePath,
+            model,
+            description: viewData.label,
+          });
+          insertedCount++;
+          for (const field of viewData.fields ?? []) {
+            symbolIndex.addSymbol({
+              name: field.name,
+              type: 'field',
+              parentName: viewData.name,
+              signature: field.dataMethod || field.dataField || undefined,
+              filePath,
+              model,
+            });
+            insertedCount++;
+          }
+          for (const method of viewData.methods ?? []) {
+            symbolIndex.addSymbol({
+              name: method.name,
+              type: 'method',
+              parentName: viewData.name,
+              signature: renderMethodSignature(method),
+              filePath,
+              model,
+              description: method.documentation,
+              tags: method.tags?.join(', '),
+              sourceSnippet: method.sourceSnippet,
+              source: method.source,
+              complexity: method.complexity,
+              usedTypes: method.usedTypes?.join(', '),
+              methodCalls: method.methodCalls?.join(', '),
+              inlineComments: method.inlineComments,
             });
             insertedCount++;
           }
@@ -532,19 +713,13 @@ export const updateSymbolIndexTool = async (params: any, context: XppServerConte
 
     symbolIndex.touchLastIndexed?.();
 
-    return {
-      content: [{
-        type: 'text',
-        text: `✅ Symbol index updated for **${objectName}** (${objectType}, model: ${model}).\n\n` +
-          `Removed: ${deletedCount} stale entr${deletedCount === 1 ? 'y' : 'ies'}\n` +
-          `Inserted: ${insertedCount} symbol${insertedCount !== 1 ? 's' : ''}`
-      }]
-    };
+    return ok(
+      `✅ Symbol index updated for **${objectName}** (${objectType}, model: ${model}).\n\n` +
+      `Removed: ${deletedCount} stale entr${deletedCount === 1 ? 'y' : 'ies'}\n` +
+      `Inserted: ${insertedCount} symbol${insertedCount !== 1 ? 's' : ''}`
+    );
   } catch (error: any) {
     console.error('Error updating symbol index:', error);
-    return {
-      content: [{ type: 'text', text: `❌ Error updating symbol index: ${error.message}` }],
-      isError: true
-    };
+    return err(`❌ Error updating symbol index (${path.basename(filePath)}): ${error.message}`);
   }
-};
+}
