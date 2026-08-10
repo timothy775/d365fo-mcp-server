@@ -8,19 +8,19 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { codeGenTool } from '../../src/tools/codeGen';
-import { completionTool } from '../../src/tools/completion';
-import { handleGenerateD365Xml, XmlTemplateGenerator as generateGenerator } from '../../src/tools/generateD365Xml';
-import { XmlTemplateGenerator, XmlTemplateGenerator as createGenerator } from '../../src/tools/createD365File';
-import { handleGenerateSmartTable, selectUnbuildableEdts } from '../../src/tools/generateSmartTable';
-import { handleGenerateSmartForm } from '../../src/tools/generateSmartForm';
-import { handleSuggestEdt } from '../../src/tools/suggestEdt';
-import { analyzeCodePatternsTool } from '../../src/tools/analyzePatterns';
-import { suggestMethodImplementationTool } from '../../src/tools/suggestImplementation';
-import { analyzeClassCompletenessTool } from '../../src/tools/analyzeCompleteness';
-import { getApiUsagePatternsTool } from '../../src/tools/apiUsagePatterns';
-import { handleGetTablePatterns } from '../../src/tools/getTablePatterns';
-import { handleGetFormPatterns } from '../../src/tools/getFormPatterns';
+import { codeGenTool } from '../../src/tools/smart/codeGen';
+import { completionTool } from '../../src/tools/readers/completion';
+import { handleGenerateD365Xml, XmlTemplateGenerator as generateGenerator } from '../../src/tools/xml/generateD365Xml';
+import { XmlTemplateGenerator, XmlTemplateGenerator as createGenerator } from '../../src/tools/write/createD365File';
+import { handleGenerateSmartTable, selectUnbuildableEdts } from '../../src/tools/smart/generateSmartTable';
+import { handleGenerateSmartForm } from '../../src/tools/smart/generateSmartForm';
+import { handleSuggestEdt } from '../../src/tools/smart/suggestEdt';
+import { analyzeCodePatternsTool } from '../../src/tools/knowledge/analyzePatterns';
+import { suggestMethodImplementationTool } from '../../src/tools/smart/suggestImplementation';
+import { analyzeClassCompletenessTool } from '../../src/tools/analysis/analyzeCompleteness';
+import { getApiUsagePatternsTool } from '../../src/tools/knowledge/apiUsagePatterns';
+import { handleGetTablePatterns } from '../../src/tools/knowledge/getTablePatterns';
+import { handleGetFormPatterns } from '../../src/tools/knowledge/getFormPatterns';
 import type { XppServerContext } from '../../src/types/context';
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 
@@ -336,11 +336,17 @@ describe('generate_d365fo_xml', () => {
 // ─── XmlTemplateGenerator.generateAxDataEntityXml ───────────────────────────
 
 describe('XmlTemplateGenerator.generateAxDataEntityXml', () => {
-  it('emits an inert skeleton (no query) when primaryTable/fields are omitted — backward compat', () => {
-    const xml = XmlTemplateGenerator.generateAxDataEntityXml('MyEntity', { label: 'My entity' });
-    expect(xml).toContain('<Fields />');
-    expect(xml).toContain('<ViewMetadata />');
-    expect(xml).not.toContain('AxQuerySimpleRootDataSource');
+  it('REFUSES the inert skeleton when primaryTable/fields are omitted (audit 15)', () => {
+    // Used to return a well-formed but non-functional entity (<Fields />, no
+    // ViewMetadata query) which the create tool reported as ✅ created. The raw
+    // builder still emits that skeleton — it is the pinned element-order baseline
+    // in dataEntityXml.test.ts — but this entry point writes what it returns.
+    expect(() => XmlTemplateGenerator.generateAxDataEntityXml('MyEntity', { label: 'My entity' }))
+      .toThrow(/missing primaryTable and fields/);
+    expect(() => XmlTemplateGenerator.generateAxDataEntityXml('MyEntity', { primaryTable: 'T' }))
+      .toThrow(/missing fields/);
+    expect(() => XmlTemplateGenerator.generateAxDataEntityXml('MyEntity', { fields: [{ name: 'A' }] }))
+      .toThrow(/missing primaryTable/);
   });
 
   it('populates Fields/Keys/ViewMetadata when primaryTable + fields are given (TOOL_DEFECT fix)', () => {

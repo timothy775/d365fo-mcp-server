@@ -34,7 +34,7 @@ export function clearAutoDetectedModels(): void {
 /**
  * Check if a model is registered as auto-detected custom
  */
-export function isAutoDetectedCustomModel(modelName: string): boolean {
+function isAutoDetectedCustomModel(modelName: string): boolean {
   return autoDetectedCustomModels.has(modelName);
 }
 
@@ -61,7 +61,7 @@ export function getExtensionPrefix(): string {
  *
  * Returns empty string when not configured.
  */
-export function getConfiguredModelName(): string {
+function getConfiguredModelName(): string {
   return process.env.D365FO_MODEL_NAME?.trim() || '';
 }
 
@@ -251,6 +251,16 @@ export function resolveRegularObjectPrefixToken(modelName?: string): string {
  * so it strips any existing suffix-prefix and replaces it with the current one.
  *
  * Case-insensitive check prevents double-prefixing.
+ *
+ * ALWAYS pass `modelName` when you know it. Omitting it does not merely lose the
+ * model-name naming style — it changes the regular-object result, because the raw
+ * prefix then falls back to EXTENSION_PREFIX and the model's own separator is
+ * invisible: a model whose objects are "ConSK_*" yields "ConSK_QualityTier"
+ * with the argument and "ConSKQualityTier" without it. prepare(mode="create")
+ * predicted names through the 2-arg form while d365fo_file(action="create") wrote
+ * them through the 3-arg form, so the two disagreed on every underscore-style model.
+ * Prefer normalizeObjectName() (utils/objectNaming.ts), which is the one path
+ * create/modify already share.
  */
 export function applyObjectPrefix(objectName: string, prefix: string, modelName?: string): string {
   if (!prefix) return objectName;
@@ -338,46 +348,6 @@ export function applyObjectPrefix(objectName: string, prefix: string, modelName?
   return `${regularPrefix}${normalizedName}`;
 }
 
-/**
- * Build the name of an EXTENSION ELEMENT (table extension, form extension, etc.)
- * Format: {BaseElementName}.{Prefix}Extension
- * Example: HCMWorker.WHSExtension, ContactPerson.ContosoCustomizations
- *
- * Never use just {BaseElement}.Extension — the prefix/infix is required to avoid conflicts.
- */
-export function buildExtensionElementName(baseElement: string, prefix: string): string {
-  if (!prefix) {
-    throw new Error(
-      `Extension element name requires a prefix. ` +
-      `Set EXTENSION_PREFIX in .env or pass modelName. ` +
-      `Bad pattern: "${baseElement}.Extension" (too generic, risk of conflicts).`
-    );
-  }
-  const infix = deriveExtensionInfix(prefix);
-  return `${baseElement}.${infix}Extension`;
-}
-
-/**
- * Build the name of an EXTENSION CLASS (Chain of Command / augmentation class).
- * Format: {BaseElement}{Prefix}_Extension
- * Example: ContactPersonWHS_Extension, CustTableForm{Prefix}_Extension
- *
- * Never use just {BaseClass}_Extension — the infix is required.
- */
-export function buildExtensionClassName(baseClass: string, prefix: string): string {
-  if (!prefix) {
-    throw new Error(
-      `Extension class name requires a prefix/infix. ` +
-      `Set EXTENSION_PREFIX in .env or pass modelName. ` +
-      `Bad pattern: "${baseClass}_Extension" (too generic, risk of conflicts).`
-    );
-  }
-  // Derive the PascalCase infix form (e.g. "XY_" env → "Xy" infix, "Contoso" → "Contoso")
-  const infix = deriveExtensionInfix(prefix);
-  // Avoid double infix if baseClass already contains the infix
-  const infixToAdd = baseClass.toLowerCase().includes(infix.toLowerCase()) ? '' : infix;
-  return `${baseClass}${infixToAdd}_Extension`;
-}
 
 /**
  * Check if a pattern matches a model name (supports wildcards)
@@ -461,17 +431,4 @@ function matchesExtensionPrefix(extensionPrefix: string, modelName: string): boo
  */
 export function isStandardModel(modelName: string): boolean {
   return !isCustomModel(modelName);
-}
-
-/**
- * Filter models by type
- * @param models - Array of model names
- * @param type - 'custom' or 'standard'
- * @returns Filtered array of model names
- */
-export function filterModelsByType(models: string[], type: 'custom' | 'standard'): string[] {
-  if (type === 'custom') {
-    return models.filter(m => isCustomModel(m));
-  }
-  return models.filter(m => isStandardModel(m));
 }

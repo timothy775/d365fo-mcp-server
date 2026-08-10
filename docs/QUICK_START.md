@@ -6,7 +6,7 @@ Two very different jobs share this page. Pick yours — each path is self-contai
 |---|---|---|
 | You are setting up your own D365FO VM — **the usual case** | [**B–E — Install**](#paths-be--install-on-your-d365fo-vm) | 10 min, or ~25 with a local index |
 | Your team already runs a deployed server | [**A — Connect**](#path-a--connect-to-a-server-someone-else-deployed) | ~2 min, nothing installed |
-| One machine serving several D365FO environments | **F — Multi-instance** | [SETUP.md](SETUP.md#scenario-f-multiple-instances--one-machine-multiple-d365fo-environments) |
+| One machine serving several D365FO environments | **F — Multi-instance** | [SETUP.md](SETUP.md#scenario-f--multiple-instances) |
 
 Both paths finish with the [instruction file](#the-instruction-file-required) and [verification](#verify) at the bottom — those two are shared.
 
@@ -147,8 +147,8 @@ Using Claude Code instead? [SETUP.md § Claude Code CLI](SETUP.md#claude-code-cl
 |----------|----------------|----------|
 | [**B** — Hybrid](#b--hybrid--azure-search--local-writes) | Azure search + local writes | **teams (recommended)** |
 | [**C** — Local HTTP](#c--local-http) | `npm run dev` on the VM | single developer |
-| [**D** — Local stdio](#d--local-stdio) | VS spawns the process | single developer, zero-config |
-| **E** — UDE | stdio + XPP config auto-detection | UDE / Power Platform Tools — [SETUP.md](SETUP.md#scenario-d-ude-unified-developer-experience) |
+| **D** — UDE | stdio + XPP config auto-detection | UDE / Power Platform Tools — [SETUP.md](SETUP.md#scenario-d--ude-unified-developer-experience) |
+| [**E** — Local stdio](#e--local-stdio) | VS spawns the process | single developer, zero-config |
 
 #### B — Hybrid — Azure search + local writes
 
@@ -181,7 +181,7 @@ Using Claude Code instead? [SETUP.md § Claude Code CLI](SETUP.md#claude-code-cl
 
 Start the server with `npx d365fo-mcp start` (or `npm run dev`) in the install directory.
 
-#### D — Local stdio
+#### E — Local stdio
 
 ```json
 {
@@ -232,7 +232,7 @@ Restart the editor, open the AI chat, and ask:
 
 The first prompt should trigger a `search` tool call returning results from **your** metadata — including ISV models no training data has ever seen. That is the signal that grounding works, not just that the server is reachable.
 
-On an installed server, `npx d365fo-mcp doctor` checks the same ground from the other side: Node version, build, native binding, index size, bridge, and any stale configuration.
+On an installed server, `npx d365fo-mcp doctor` checks the same ground from the other side: Node version, build, native binding, index size, bridge, and any stale configuration. It also names the source that resolves your workspace — the workspace path, the packages path, `D365FO_SOLUTIONS_PATH`, or `workspace.modelName` in the config — and flags a prefix conflict when the model's own objects use a different prefix from `naming.prefix` (the model's own naming wins; `EXTENSION_PREFIX_SOURCE=config` pins the configured value).
 
 
 # Logging & diagnostics
@@ -257,11 +257,25 @@ A healthy startup logs `✅ C# bridge initialized (metadataAvailable: true, xref
 | `xrefAvailable: false` | `DYNAMICSXREFDB` unreachable — non-critical, tools fall back to SQLite |
 
 
+## What a session cost
+
+`npx d365fo-mcp session <log>` reads an agent host's debug log and reports where the money went: the fitted price of cached / uncached / output tokens, how much of the total was context re-read on every round trip, and — the number that matters most — how many tool-turns issued exactly **one** tool call. Each of those is a full round trip paying the whole prompt again before it does any work.
+
+```powershell
+$log = Get-ChildItem "$env:APPDATA\Code\User\workspaceStorage\*\GitHub.copilot-chat\debug-logs\*\main.jsonl" |
+       Sort-Object LastWriteTime -Descending | Select-Object -First 1
+npx d365fo-mcp session $log.FullName          # human-readable
+npx d365fo-mcp session $log.FullName --json   # for tracking across releases
+```
+
+GitHub Copilot Chat's `main.jsonl` is the format it reads today; the log only exists while chat debug logging is on. The command fits the host's own billing to the token counts and **refuses to print any attribution when that fit is poor** — a bad residual means the log is not what the tool assumes, and it exits 1 rather than printing a confident number. Round-trip counts do not depend on the fit and are printed either way.
+
+
 # What's next
 
 | Topic | Documentation |
 |-------|--------------|
-| All 26 tools | [MCP_TOOLS.md](MCP_TOOLS.md) |
+| All 23 tools | [MCP_TOOLS.md](MCP_TOOLS.md) |
 | Real-world tool chains (CoC, forms, security, reports) | [USAGE_EXAMPLES.md](USAGE_EXAMPLES.md) |
 | Full `.mcp.json` reference | [MCP_CONFIG.md](MCP_CONFIG.md) |
 | Every setting and its environment variable | [CONFIGURATION.md](CONFIGURATION.md) |

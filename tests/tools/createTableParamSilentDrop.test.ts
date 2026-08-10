@@ -23,11 +23,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { handleCreateD365File } from '../../src/tools/createD365File';
+import { handleCreateD365File } from '../../src/tools/write/createD365File';
 import {
   reconcileTableCreateProperties,
   renderTableCreateHonestyReport,
-} from '../../src/tools/createTablePropertyHonesty';
+} from '../../src/tools/xml/createTablePropertyHonesty';
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 
 // ─── In-memory filesystem ────────────────────────────────────────────────────
@@ -51,6 +51,10 @@ vi.mock('fs/promises', () => ({
   }),
   stat: vi.fn(async () => ({ isFile: () => true, isDirectory: () => false, size: 1024 })),
   readdir: vi.fn(async () => []),
+  // The direct-XML writes go through writeFileAtomic: a temp sibling written with
+  // writeFile, then renamed over the target (rm cleans the temp up on failure).
+  rename: vi.fn(async () => {}),
+  rm: vi.fn(async () => {}),
 }));
 
 vi.mock('../../src/bridge/bridgeAdapter', async (orig) => {
@@ -342,6 +346,8 @@ describe('reconcileTableCreateProperties', () => {
   });
 
   it('renders nothing when there is nothing to say', () => {
-    expect(renderTableCreateHonestyReport({ xml: base, patched: [], unhonoured: [] })).toBe('');
+    expect(renderTableCreateHonestyReport({
+      xml: base, patched: [], unhonoured: [], droppedCollections: [],
+    })).toBe('');
   });
 });

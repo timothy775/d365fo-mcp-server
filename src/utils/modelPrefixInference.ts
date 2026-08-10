@@ -93,13 +93,13 @@ function leadingTokenCandidates(name: string): string[] {
  *
  * Coverage cannot tell a real third segment from a domain word: a model whose
  * objects are all ConDemoNoteHeader / …Line / …Text offers "ConDemoNote" with
- * exactly the same 100 % coverage that makes "AslFinSK" right for AslFinanceSK,
+ * exactly the same 100 % coverage that makes "DemoFinSK" right for DemoFinanceSK,
  * and the longest-wins tie-break then takes the domain word. Both shapes are
  * indistinguishable from the names alone, so a candidate spanning three segments
  * has to be corroborated from OUTSIDE the object names:
  *
- *   - the model's own extensions state it ("VendTable.AslFinSKExtension"), or
- *   - the model NAME contains its segments in order ("Asl|Fin|SK" ⊂ AslFinanceSK,
+ *   - the model's own extensions state it ("VendTable.DemoFinSKExtension"), or
+ *   - the model NAME contains its segments in order ("Demo|Fin|SK" ⊂ DemoFinanceSK,
  *     while "Note" is nowhere in "ConDemo").
  *
  * Uncorroborated, the candidate is dropped and the two-segment token — the
@@ -124,7 +124,7 @@ function tokenAllowed(
 /**
  * Do the token's segments appear in the model name, in order, starting at its
  * first character? Gaps between them are allowed, which is what makes
- * "Asl|Fin|SK" match "AslFinanceSK" — the model spells a segment out where the
+ * "Demo|Fin|SK" match "DemoFinanceSK" — the model spells a segment out where the
  * prefix abbreviates it.
  */
 function modelNameCarries(modelName: string, segs: string[]): boolean {
@@ -140,15 +140,30 @@ function modelNameCarries(modelName: string, segs: string[]): boolean {
   return true;
 }
 
-/** Pick the candidate covering the most names; ties go to the longer token. */
+/**
+ * Pick the candidate to trust: the LONGEST token that still clears
+ * MIN_COVERAGE, not the one with the highest raw coverage count.
+ *
+ * A shorter candidate is always a prefix of every longer one, so it always
+ * covers at least as many names — one stray object off-convention (a typo, a
+ * differently-cased legacy name, an old object from before the prefix went
+ * compound) drops the three-segment count below the two-segment count and,
+ * under a raw-coverage race, the two-segment token wins EVERY time real data
+ * has any exception at all. That is exactly how "DemoFinSK" (26/28 objects, a
+ * couple of others spelled "DemoFinSk_") lost to "DemoFin" (28/28) despite being
+ * the model's actual, corroborated convention.
+ * Once a token clears the coverage bar it is trusted; among those, the longest
+ * is the most specific answer and wins outright, not merely on a tie.
+ */
 function bestCovering(names: string[], candidates: Iterable<string>): { token: string; coverage: number } | null {
   let best: { token: string; coverage: number } | null = null;
   for (const token of new Set(candidates)) {
     const coverage = names.filter(n => n.startsWith(token)).length;
+    if (coverage / names.length < MIN_COVERAGE) continue;
     if (
       !best ||
-      coverage > best.coverage ||
-      (coverage === best.coverage && token.length > best.token.length)
+      token.length > best.token.length ||
+      (token.length === best.token.length && coverage > best.coverage)
     ) {
       best = { token, coverage };
     }
@@ -178,6 +193,49 @@ function inferInfixFromDotExtensions(dotNames: string[]): string | null {
   }
   if (!winner || total === 0) return null;
   return winner.n / total >= MIN_COVERAGE ? winner.token : null;
+}
+
+/**
+ * How the model itself SPELLS `token` in the extension position — the casing taken
+ * from evidence rather than derived.
+ *
+ * Both extension shapes are read, because a model may use only one of them:
+ *   "CustTable.ConSKExtension"        → ConSK
+ *   "CustInvoiceJourConSK_Extension"  → ConSK
+ *
+ * Only spellings that case-insensitively equal `token` are counted, so this decides
+ * casing and never the token itself; the most frequent literal spelling wins. Without
+ * it, a model whose 35 extensions all say "ConSK" could still be handed a derived
+ * "ConSk" — toExtensionInfixCase lowercases each segment, which is right for the
+ * acronym prefix the MS rule was written for ("XY_" → "Xy") and wrong for a token
+ * ending in a country code. The model's own files outrank the rule.
+ */
+function observedInfixCasing(names: string[], token: string): string | null {
+  if (!token) return null;
+  const needle = token.toLowerCase();
+  const counts = new Map<string, number>();
+  const bump = (spelling: string) => {
+    if (spelling.toLowerCase() !== needle) return;
+    counts.set(spelling, (counts.get(spelling) ?? 0) + 1);
+  };
+
+  for (const name of names) {
+    if (name.includes('.')) {
+      const suffix = name.slice(name.lastIndexOf('.') + 1);
+      if (/extension$/i.test(suffix)) bump(suffix.slice(0, -'Extension'.length));
+      continue;
+    }
+    if (name.endsWith('_Extension')) {
+      const base = name.slice(0, -'_Extension'.length);
+      if (base.length >= token.length) bump(base.slice(-token.length));
+    }
+  }
+
+  let winner: { spelling: string; n: number } | null = null;
+  for (const [spelling, n] of counts) {
+    if (!winner || n > winner.n) winner = { spelling, n };
+  }
+  return winner ? winner.spelling : null;
 }
 
 /**
@@ -246,7 +304,10 @@ export function inferPrefixFromObjectNames(
   // Each token is preferred from direct evidence and derived from the other only
   // when its own evidence is missing.
   let regular = regularOk ? best!.token : infixFromElements!;
-  const infix = infixFromElements ?? deriveInfixFrom(regular);
+  // Which token, then how the model spells it. The derivation is only the fallback
+  // for a model that states the token nowhere in an extension name.
+  const infixToken = infixFromElements ?? deriveInfixFrom(regular);
+  const infix = observedInfixCasing(clean, infixToken) ?? infixToken;
 
   // Cross-check the two, because a truncated leading token is invisible on its
   // own: "ConFin" looks like a perfectly good prefix until the model's own
