@@ -13,6 +13,7 @@ import { XppMetadataParser, buildClassExtensionRecord } from '../src/metadata/xm
 import type { XppClassInfo } from '../src/metadata/types.js';
 import { isCustomModel as checkIsCustomModel, getCustomModels } from '../src/utils/modelClassifier.js';
 import { writeExtractManifest } from '../src/utils/extractManifest.js';
+import { readBlobDownloadMarker } from '../src/utils/blobDownloadMarker.js';
 import { XppConfigProvider } from '../src/utils/xppConfigProvider.js';
 import { defaultPackagesRoot } from '../src/utils/packagesRoot.js';
 import { box, kv, sectionTitle, statusLine, spread, c, glyph, log, shortPath, supportsUnicode, sanitize } from '../src/utils/terminalUi.js';
@@ -35,7 +36,6 @@ if (!supportsUnicode) {
 
 const PACKAGES_PATH = process.env.D365FO_PACKAGE_PATH || defaultPackagesRoot();
 const OUTPUT_PATH = process.env.METADATA_PATH || './extracted-metadata';
-const CUSTOM_MODELS_PATH = process.env.CUSTOM_MODELS_PATH; // Optional: separate path for custom extensions
 
 // Custom models defined in .env - these are YOUR extensions
 const CUSTOM_MODELS = getCustomModels();
@@ -96,6 +96,107 @@ function sourcePathReplacer(key: string, value: unknown): unknown {
   return key === 'sourcePath' && typeof value === 'string'
     ? normalizeSourcePath(value)
     : value;
+}
+
+/**
+ * Absolute paths of every metadata JSON this run wrote, keyed by model.
+ *
+ * Extraction is additive — each extractor writes one JSON per XML file it finds — so on
+ * its own it can only ever ADD to OUTPUT_PATH. Deleting an object from
+ * PackagesLocalDirectory therefore left its JSON behind in every mode except `all` (the
+ * only mode that wipes OUTPUT_PATH first), and build-database faithfully re-inserted it:
+ * clearModels() emptied the model's rows and the very next pass read the orphan back in.
+ * The symptom was a phantom object that survived a delete + full re-extract + rebuild,
+ * complete with stale metadata, served to callers as if it were on disk.
+ *
+ * Recording the writes lets pruneOrphanedMetadata() sweep whatever a model's extraction
+ * did NOT touch, which is exactly the set of objects that disappeared from the AOT.
+ */
+const writtenByModel = new Map<string, Set<string>>();
+
+/** Write one metadata JSON and record it as live for this run's orphan sweep. */
+async function writeMetadataJson(
+  outputFile: string,
+  data: unknown,
+  isCustom: boolean,
+  modelName: string,
+): Promise<void> {
+  await fs.writeFile(outputFile, JSON.stringify(data, isCustom ? sourcePathReplacer : undefined, 2));
+  let written = writtenByModel.get(modelName);
+  if (!written) {
+    written = new Set<string>();
+    writtenByModel.set(modelName, written);
+  }
+  written.add(path.resolve(outputFile));
+}
+
+/**
+ * Delete every .json under OUTPUT_PATH/<modelName> that this run did not write, then
+ * remove the directories left empty.
+ *
+ * Only ever called for a model whose extraction completed without a single error — a
+ * transient parse failure means "no JSON written", which is indistinguishable here from
+ * "object deleted", and pruning on that signal would delete good metadata.
+ *
+ * INTERACTION WITH BLOB-DOWNLOADED METADATA: scripts/azure-blob-manager.ts downloads
+ * into this same OUTPUT_PATH/<model>/… layout. For a model that is BOTH downloaded and
+ * re-extracted here, "the blob had it, this disk does not" is indistinguishable from
+ * "it was deleted from the AOT", and the sweep removes it. That precedence is intended —
+ * local disk is authoritative for a model you just extracted — but on a machine with a
+ * partial PackagesLocalDirectory it reads as data loss, so the run summary says so
+ * whenever a blob-download marker is present (see src/utils/blobDownloadMarker.ts).
+ *
+ * Exported for tests.
+ */
+export async function pruneOrphanedMetadata(
+  outputPath: string,
+  modelName: string,
+  written: ReadonlySet<string>,
+): Promise<string[]> {
+  const modelDir = path.join(outputPath, modelName);
+  const removed: string[] = [];
+
+  const sweep = async (dir: string): Promise<boolean> => {
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return false; // unreadable — leave it alone
+    }
+    let keptAnything = false;
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const keptBelow = await sweep(full);
+        if (keptBelow) {
+          keptAnything = true;
+        } else {
+          // rmdir, not rm -rf: an empty dir is all that can be left, and a
+          // non-empty one (racing writer, unreadable child) must survive.
+          await fs.rmdir(full).catch(() => { keptAnything = true; });
+        }
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.endsWith('.json')) {
+        keptAnything = true; // never touch anything we did not put there
+        continue;
+      }
+      if (written.has(path.resolve(full))) {
+        keptAnything = true;
+        continue;
+      }
+      try {
+        await fs.unlink(full);
+        removed.push(path.relative(modelDir, full).replace(/\\/g, '/'));
+      } catch {
+        keptAnything = true;
+      }
+    }
+    return keptAnything;
+  };
+
+  await sweep(modelDir);
+  return removed;
 }
 
 let MODELS_TO_EXTRACT: string[] = [];
@@ -519,7 +620,7 @@ async function extractMetadata() {
     try {
       await fs.rm(OUTPUT_PATH, { recursive: true, force: true });
       log.step('Cleaned up existing metadata directory');
-    } catch (error) {
+    } catch {
       // Ignore errors if directory doesn't exist
     }
   } else {
@@ -679,6 +780,15 @@ async function extractMetadata() {
   let processedModels = 0;
   let cumulativeModelDuration = 0;
 
+  // `all` already wiped OUTPUT_PATH, so nothing there can be an orphan and the sweep would
+  // only cost a second directory walk over every model. Every other mode preserves
+  // OUTPUT_PATH by design (blob-downloaded metadata for out-of-scope models), which is
+  // exactly the case that needs the sweep for the models it DID re-extract.
+  const shouldPrune = EXTRACT_MODE !== 'all';
+  let prunedFiles = 0;
+  const prunedByModel = new Map<string, string[]>();
+  const pruneSkippedModels: string[] = [];
+
   for (const modelItem of modelWorkItems) {
     if (currentPackage !== modelItem.packageName) {
       currentPackage = modelItem.packageName;
@@ -696,11 +806,41 @@ async function extractMetadata() {
     // the denominator cover exactly the same folders.
     const ctx: ModelContext = { parser, modelName, stats, isCustom };
     const dirsByLowerName = await mapModelDirs(modelPath);
+    const errorsBefore = stats.errors;
 
     for (const extractor of AOT_EXTRACTORS) {
       const dirPaths = resolveDirs(dirsByLowerName, extractor.dirs);
       if (dirPaths.length === 0) continue;
       await extractor.run(ctx, dirPaths);
+    }
+
+    // Sweep the JSON this model's extraction did not write — the objects that were
+    // deleted from the AOT since the last run. Models run one at a time, so bracketing
+    // stats.errors around the extractors attributes every failure to this model: a file
+    // that failed to parse produced no JSON, which the sweep cannot tell apart from a
+    // deleted object, so one error is enough to skip the model entirely.
+    //
+    // The second guard is the one that matters when the extractors themselves are
+    // broken rather than the data: a bug that makes EVERY write throw leaves an empty
+    // write set, and an empty write set means "delete everything under this model".
+    // A model that had XML files to read and produced no JSON is a bug in this script,
+    // never a model whose objects were all deleted at once — refuse the sweep and say so.
+    const wroteNothing = (writtenByModel.get(modelName)?.size ?? 0) === 0;
+    if (shouldPrune) {
+      if (stats.errors > errorsBefore || (wroteNothing && modelItem.expectedXmlFiles > 0)) {
+        pruneSkippedModels.push(modelName);
+      } else {
+        const removed = await pruneOrphanedMetadata(
+          OUTPUT_PATH,
+          modelName,
+          writtenByModel.get(modelName) ?? new Set<string>(),
+        );
+        if (removed.length > 0) {
+          prunedFiles += removed.length;
+          prunedByModel.set(modelName, removed);
+          log.detail(`pruned ${formatCount(removed.length)} orphaned JSON file(s): ${removed.slice(0, 5).join(', ')}${removed.length > 5 ? ` (+${removed.length - 5} more)` : ''}`);
+        }
+      }
     }
 
     const modelDuration = Date.now() - modelStart;
@@ -787,6 +927,50 @@ async function extractMetadata() {
     if (value === 0) continue;
     console.log(kv(label, c.cyan(formatCount(value)), statLabelWidth));
   }
+  // The sweep is the only thing standing between a deleted AOT object and a phantom that
+  // survives every rebuild, so say what it did rather than letting it work in silence.
+  if (shouldPrune) {
+    console.log('');
+    if (prunedFiles > 0) {
+      console.log(statusLine('ok', `Pruned ${formatCount(prunedFiles)} orphaned JSON file(s) across ${formatCount(prunedByModel.size)} model(s)`));
+      for (const [modelName, removed] of prunedByModel) {
+        log.detail(`${modelName}: ${removed.slice(0, 10).join(', ')}${removed.length > 10 ? ` (+${removed.length - 10} more)` : ''}`);
+      }
+      log.detail('These objects are gone from PackagesLocalDirectory. Run build-database to drop them from the symbol index.');
+      // "Gone from PackagesLocalDirectory" is the whole story only when this machine
+      // is the sole source of what lives under OUTPUT_PATH. The blob manager downloads
+      // into the same layout, and for a model that is both downloaded and re-extracted
+      // here the sweep cannot tell "the blob had it, this disk does not" apart from a
+      // delete. Naming that is the difference between intended precedence and apparent
+      // data loss.
+      const blobMarker = readBlobDownloadMarker(OUTPUT_PATH);
+      if (blobMarker) {
+        const overlap = [...prunedByModel.keys()].filter(
+          m => blobMarker.models.length === 0 || blobMarker.models.includes(m),
+        );
+        if (overlap.length > 0) {
+          console.log(statusLine('warn', c.yellow(
+            `${formatCount(overlap.length)} of these model(s) also hold metadata downloaded from blob storage ` +
+            `on ${blobMarker.downloadedAt} (${blobMarker.modelType}): ${overlap.slice(0, 10).join(', ')}` +
+            `${overlap.length > 10 ? ` (+${overlap.length - 10} more)` : ''}`
+          )));
+          log.detail(
+            'Local disk is authoritative for a model this run re-extracted, so JSON the blob copy had and this ' +
+            "machine's PackagesLocalDirectory does not was removed as an orphan. That is the intended precedence, " +
+            'not a bug — but if this machine holds only part of the AOT, re-run the blob download afterwards or ' +
+            'exclude those models from extraction.'
+          );
+        }
+      }
+    } else {
+      log.info('No orphaned metadata found - every extracted JSON has a live source file');
+    }
+    if (pruneSkippedModels.length > 0) {
+      console.log(statusLine('warn', c.yellow(`Orphan sweep skipped for ${formatCount(pruneSkippedModels.length)} model(s) with extraction errors: ${pruneSkippedModels.slice(0, 10).join(', ')}`)));
+      log.detail('A parse failure writes no JSON, which is indistinguishable from a deleted object - fix the errors and re-run, or those models may still serve stale metadata.');
+    }
+  }
+
   console.log('');
   if (stats.errors > 0) {
     console.log(statusLine('warn', c.yellow(`${formatCount(stats.errors)} error(s) during extraction - see log above`)));
@@ -827,7 +1011,7 @@ async function extractClasses(
       const outputDir = path.join(OUTPUT_PATH, modelName, 'classes');
       await fs.mkdir(outputDir, { recursive: true });
       const outputFile = path.join(outputDir, `${classData.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify(classData, isCustom ? sourcePathReplacer : undefined, 2));
+      await writeMetadataJson(outputFile, classData, isCustom, modelName);
 
       stats.classes++;
 
@@ -863,9 +1047,11 @@ async function writeClassExtensionRecord(
 
   const outputDir = path.join(OUTPUT_PATH, modelName, 'class-extensions');
   await fs.mkdir(outputDir, { recursive: true });
-  await fs.writeFile(
+  await writeMetadataJson(
     path.join(outputDir, `${classInfo.name}.json`),
-    JSON.stringify(record, isCustom ? sourcePathReplacer : undefined, 2),
+    record,
+    isCustom,
+    modelName,
   );
 
   stats.classExtensions++;
@@ -902,7 +1088,7 @@ async function extractTables(
       const outputDir = path.join(OUTPUT_PATH, modelName, 'tables');
       await fs.mkdir(outputDir, { recursive: true });
       const outputFile = path.join(outputDir, `${tableData.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify(tableData, isCustom ? sourcePathReplacer : undefined, 2));
+      await writeMetadataJson(outputFile, tableData, isCustom, modelName);
 
       stats.tables++;
     } catch (error) {
@@ -945,7 +1131,7 @@ async function extractForms(
       const outputDir = path.join(OUTPUT_PATH, modelName, 'forms');
       await fs.mkdir(outputDir, { recursive: true });
       const outputFile = path.join(outputDir, `${formInfo.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify(formInfo, isCustom ? sourcePathReplacer : undefined, 2));
+      await writeMetadataJson(outputFile, formInfo, isCustom, modelName);
 
       stats.forms++;
     } catch (error) {
@@ -985,7 +1171,7 @@ async function extractQueries(
       const outputDir = path.join(OUTPUT_PATH, modelName, 'queries');
       await fs.mkdir(outputDir, { recursive: true });
       const outputFile = path.join(outputDir, `${queryName}.json`);
-      await fs.writeFile(outputFile, JSON.stringify(queryInfo, isCustom ? sourcePathReplacer : undefined, 2));
+      await writeMetadataJson(outputFile, queryInfo, isCustom, modelName);
 
       stats.queries++;
     } catch (error) {
@@ -1028,7 +1214,7 @@ async function extractViews(
         const outputDir = path.join(OUTPUT_PATH, modelName, 'views');
         await fs.mkdir(outputDir, { recursive: true });
         const outputFile = path.join(outputDir, `${viewData.name}.json`);
-        await fs.writeFile(outputFile, JSON.stringify(viewData, isCustom ? sourcePathReplacer : undefined, 2));
+        await writeMetadataJson(outputFile, viewData, isCustom, modelName);
 
         if (viewData.type === 'data-entity') {
           stats.dataEntities++;
@@ -1067,7 +1253,7 @@ async function extractEnums(
       const outputDir = path.join(OUTPUT_PATH, modelName, 'enums');
       await fs.mkdir(outputDir, { recursive: true });
       const outputFile = path.join(outputDir, file.replace('.xml', '.json'));
-      await fs.writeFile(outputFile, JSON.stringify({ raw: content }, isCustom ? sourcePathReplacer : undefined, 2));
+      await writeMetadataJson(outputFile, { raw: content }, isCustom, modelName);
 
       stats.enums++;
     } catch (error) {
@@ -1110,7 +1296,7 @@ async function extractEdts(
       const outputDir = path.join(OUTPUT_PATH, modelName, 'edts');
       await fs.mkdir(outputDir, { recursive: true });
       const outputFile = path.join(outputDir, `${edtInfo.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify(edtInfo, isCustom ? sourcePathReplacer : undefined, 2));
+      await writeMetadataJson(outputFile, edtInfo, isCustom, modelName);
 
       stats.edts++;
     } catch (error) {
@@ -1158,7 +1344,7 @@ async function extractReports(
       };
 
       const outputFile = path.join(outputDir, `${name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify(stub, isCustom ? sourcePathReplacer : undefined, 2));
+      await writeMetadataJson(outputFile, stub, isCustom, modelName);
 
       stats.reports++;
     } catch (error) {
@@ -1189,7 +1375,7 @@ async function extractSecurityPrivileges(
       if (!result.success || !result.data) { stats.errors++; return; }
       const privilegeData = result.data;
       const outputFile = path.join(outputDir, `${privilegeData.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify({ ...privilegeData, model: modelName, type: 'security-privilege' }, isCustom ? sourcePathReplacer : undefined, 2));
+      await writeMetadataJson(outputFile, { ...privilegeData, model: modelName, type: 'security-privilege' }, isCustom, modelName);
       stats.securityPrivileges++;
     } catch (error) {
       log.err(`Error extracting security privilege ${file}: ${error instanceof Error ? error.message : error}`);
@@ -1219,7 +1405,7 @@ async function extractSecurityDuties(
       if (!result.success || !result.data) { stats.errors++; return; }
       const dutyData = result.data;
       const outputFile = path.join(outputDir, `${dutyData.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify({ ...dutyData, model: modelName, type: 'security-duty' }, isCustom ? sourcePathReplacer : undefined, 2));
+      await writeMetadataJson(outputFile, { ...dutyData, model: modelName, type: 'security-duty' }, isCustom, modelName);
       stats.securityDuties++;
     } catch (error) {
       log.err(`Error extracting security duty ${file}: ${error instanceof Error ? error.message : error}`);
@@ -1249,7 +1435,7 @@ async function extractSecurityRoles(
       if (!result.success || !result.data) { stats.errors++; return; }
       const roleData = result.data;
       const outputFile = path.join(outputDir, `${roleData.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify({ ...roleData, model: modelName, type: 'security-role' }, isCustom ? sourcePathReplacer : undefined, 2));
+      await writeMetadataJson(outputFile, { ...roleData, model: modelName, type: 'security-role' }, isCustom, modelName);
       stats.securityRoles++;
     } catch (error) {
       log.err(`Error extracting security role ${file}: ${error instanceof Error ? error.message : error}`);
@@ -1284,7 +1470,7 @@ async function extractMenuItems(
       if (!result.success || !result.data) { stats.errors++; return; }
       const menuItemData = result.data;
       const outputFile = path.join(outputDir, `${menuItemData.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify({ ...menuItemData, model: modelName, type: `menu-item-${itemType}` }, isCustom ? sourcePathReplacer : undefined, 2));
+      await writeMetadataJson(outputFile, { ...menuItemData, model: modelName, type: `menu-item-${itemType}` }, isCustom, modelName);
       (stats as any)[statKey]++;
     } catch (error) {
       log.err(`Error extracting menu item (${itemType}) ${file}: ${error instanceof Error ? error.message : error}`);
@@ -1334,7 +1520,7 @@ async function extractExtensions(
       if (!result.success || !result.data) { stats.errors++; return; }
       const extensionData = result.data;
       const outputFile = path.join(outputDir, `${extensionData.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify({ ...extensionData, model: modelName, type: extensionType }, isCustom ? sourcePathReplacer : undefined, 2));
+      await writeMetadataJson(outputFile, { ...extensionData, model: modelName, type: extensionType }, isCustom, modelName);
       const statKey = statKeyMap[extensionType];
       if (statKey) (stats as any)[statKey]++;
     } catch (error) {
@@ -1365,7 +1551,7 @@ async function extractServices(
       if (!result.success || !result.data) { stats.errors++; return; }
       const serviceData = result.data;
       const outputFile = path.join(outputDir, `${serviceData.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify({ ...serviceData, model: modelName, type: 'service' }, isCustom ? sourcePathReplacer : undefined, 2));
+      await writeMetadataJson(outputFile, { ...serviceData, model: modelName, type: 'service' }, isCustom, modelName);
       stats.services++;
     } catch (error) {
       log.err(`Error extracting service ${file}: ${error instanceof Error ? error.message : error}`);
@@ -1395,7 +1581,7 @@ async function extractServiceGroups(
       if (!result.success || !result.data) { stats.errors++; return; }
       const serviceGroupData = result.data;
       const outputFile = path.join(outputDir, `${serviceGroupData.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify({ ...serviceGroupData, model: modelName, type: 'service-group' }, isCustom ? sourcePathReplacer : undefined, 2));
+      await writeMetadataJson(outputFile, { ...serviceGroupData, model: modelName, type: 'service-group' }, isCustom, modelName);
       stats.serviceGroups++;
     } catch (error) {
       log.err(`Error extracting service group ${file}: ${error instanceof Error ? error.message : error}`);
@@ -1433,7 +1619,7 @@ async function extractSimpleType(
       if (!result.success || !result.data) { stats.errors++; return; }
       const parsedData = result.data;
       const outputFile = path.join(outputDir, `${parsedData.name}.json`);
-      await fs.writeFile(outputFile, JSON.stringify({ ...parsedData, model: modelName, type }, isCustom ? sourcePathReplacer : undefined, 2));
+      await writeMetadataJson(outputFile, { ...parsedData, model: modelName, type }, isCustom, modelName);
       (stats as any)[statKey]++;
     } catch (error) {
       log.err(`Error extracting ${label} ${file}: ${error instanceof Error ? error.message : error}`);

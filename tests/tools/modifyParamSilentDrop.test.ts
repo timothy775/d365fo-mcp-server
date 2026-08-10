@@ -22,12 +22,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { modifyD365FileTool, coerceNoYesFlag } from '../../src/tools/modifyD365File';
+import { modifyD365FileTool, coerceNoYesFlag } from '../../src/tools/write/modifyD365File';
 import {
   findIgnoredParams,
   findMissingMutationParams,
   renderIgnoredParamsWarning,
-} from '../../src/tools/d365foFileOpSpecs';
+} from '../../src/tools/specs/d365foFileOpSpecs';
 import type { XppServerContext } from '../../src/types/context';
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 
@@ -129,6 +129,10 @@ vi.mock('fs/promises', () => ({
   stat: vi.fn(async () => ({ isFile: () => true, isDirectory: () => false })),
   readdir: vi.fn(async () => []),
   copyFile: vi.fn(async () => {}),
+  // The direct-XML writes go through writeFileAtomic: a temp sibling written with
+  // writeFile, then renamed over the target (rm cleans the temp up on failure).
+  rename: vi.fn(async () => {}),
+  rm: vi.fn(async () => {}),
 }));
 
 vi.mock('../../src/utils/configManager', () => ({
@@ -165,6 +169,9 @@ vi.mock('../../src/utils/modelClassifier', () => ({
   applyObjectSuffix: vi.fn((name: string) => name),
   isCustomModel: vi.fn(() => true),
   isStandardModel: vi.fn(() => false),
+  // No prefix in these fixtures: what is under test here is that the declared
+  // params reach the bridge, not what a member gets renamed to.
+  resolveRegularObjectPrefixToken: vi.fn(() => ''),
 }));
 
 const TABLE_FILE_PATH = 'K:\\PackagesLocalDirectory\\MyPackage\\MyModel\\AxTable\\ConDemoModLifecycle.xml';
@@ -197,10 +204,17 @@ const buildContext = (): XppServerContext => {
   };
 };
 
-/** XML of the last write to the object file. */
+/**
+ * XML of the last write to the object file. The direct-XML path writes through
+ * writeFileAtomic, whose writeFile call targets a temp sibling
+ * (`<object>.xml.tmp-<pid>-<n>`) that is then renamed over the object — so the
+ * path to recognise is the .xml with an optional temp suffix.
+ */
 function writtenXml(): string | undefined {
   const calls = mockWriteFile.mock.calls as unknown as Array<[string, string, string]>;
-  const hit = [...calls].reverse().find(c => typeof c[0] === 'string' && c[0].endsWith('.xml') && !c[0].includes('.backup'));
+  const hit = [...calls].reverse().find(
+    c => typeof c[0] === 'string' && /\.xml(\.tmp-[^\\/]*)?$/.test(c[0]) && !c[0].includes('.backup'),
+  );
   return hit?.[1];
 }
 
@@ -528,6 +542,18 @@ describe('parameter-accounting helpers', () => {
 
   it('accepts an alias of a required param (methodCode for sourceCode)', () => {
     expect(findIgnoredParams('add-method', ['methodName', 'methodCode'])).toEqual([]);
+  });
+
+  it('never flags peerOperations, which this server injects itself', () => {
+    // runModifyBatch adds it to every entry of an operations[] batch so an
+    // advisory note can tell whether its advice is already being followed. It is
+    // not in the published schema, so no caller can send it — flagging it made
+    // EVERY batched entry answer "peerOperations: IGNORED (not a recognised
+    // d365fo_file parameter)", a false drop warning on the one flow the batch
+    // API exists to encourage.
+    expect(findIgnoredParams('add-field', ['fieldName', 'fieldType', 'peerOperations'])).toEqual([]);
+    expect(findIgnoredParams('add-field-to-field-group',
+      ['fieldName', 'fieldGroupName', 'peerOperations'])).toEqual([]);
   });
 
   it('reports the two enum-value drops the audit turned up', () => {

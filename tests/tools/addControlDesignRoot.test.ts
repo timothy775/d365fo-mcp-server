@@ -24,8 +24,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { modifyD365FileTool, isUnresolvedObjectError } from '../../src/tools/modifyD365File';
-import { D365FO_FILE_OP_SPECS } from '../../src/tools/d365foFileOpSpecs';
+import { modifyD365FileTool, isUnresolvedObjectError } from '../../src/tools/write/modifyD365File';
+import { D365FO_FILE_OP_SPECS } from '../../src/tools/specs/d365foFileOpSpecs';
 import type { XppServerContext } from '../../src/types/context';
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 
@@ -73,6 +73,10 @@ vi.mock('fs/promises', () => ({
   stat: vi.fn(async () => ({ isFile: () => true, isDirectory: () => false })),
   readdir: vi.fn(async () => []),
   copyFile: vi.fn(async () => {}),
+  // The direct-XML writes go through writeFileAtomic: a temp sibling written with
+  // writeFile, then renamed over the target (rm cleans the temp up on failure).
+  rename: vi.fn(async () => {}),
+  rm: vi.fn(async () => {}),
 }));
 
 vi.mock('../../src/utils/configManager', () => ({

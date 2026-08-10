@@ -106,7 +106,7 @@ npm run build
 
 `D365FO_CONFIG` points at the file `npm run setup` wrote — it already holds `server.mode: write-only`, the workspace and the solutions path for this companion. Add a variable to the `env` block only to override the file for that one server entry.
 
-The local companion also exposes the bridge-backed reader `get_object_info` (and `get_method`), so freshly created objects are immediately readable without waiting for an Azure index refresh.
+The local companion also exposes the bridge-backed reader `get_object_info` (including its `options.method` form), so freshly created objects are immediately readable without waiting for an Azure index refresh.
 
 **Update:** `git pull && npm install && npm run build` whenever a new version ships.
 
@@ -289,4 +289,4 @@ For a team-shared, project-scoped config, create `.mcp.json` in the solution roo
 
 ## Next steps
 
-[MCP_CONFIG.md](MCP_CONFIG.md) — every option · [MCP_TOOLS.md](MCP_TOOLS.md) — all 26 tools · [USAGE_EXAMPLES.md](USAGE_EXAMPLES.md) — real workflows · [CUSTOM_EXTENSIONS.md](CUSTOM_EXTENSIONS.md) — ISV/multi-model · [SETUP_AZURE.md § pipelines](SETUP_AZURE.md#azure-devops-pipelines) — automated index refresh
+[MCP_CONFIG.md](MCP_CONFIG.md) — every option · [MCP_TOOLS.md](MCP_TOOLS.md) — all 23 tools · [USAGE_EXAMPLES.md](USAGE_EXAMPLES.md) — real workflows · [CUSTOM_EXTENSIONS.md](CUSTOM_EXTENSIONS.md) — ISV/multi-model · [SETUP_AZURE.md § pipelines](SETUP_AZURE.md#azure-devops-pipelines) — automated index refresh

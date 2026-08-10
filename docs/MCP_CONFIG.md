@@ -71,9 +71,11 @@ Set in the `env` block. The legacy `"context": {...}` block is **deprecated** �
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `MCP_SERVER_MODE` | `full` | `full` (26 tools) / `read-only` (Azure) / `write-only` (hybrid companion) |
+| `MCP_SERVER_MODE` | `full` | `full` (23 tools) / `read-only` (Azure) / `write-only` (hybrid companion) |
+| `MCP_TOOL_PROFILE` | `full` | `full` (all 23) / `core` (18-tool create-and-build loop) — shrinks the catalogue when the workspace already runs other MCP servers |
+| `MCP_EXTRA_TOOLS` | — | comma-separated tool names added back on top of `core` (e.g. `security_info,run_systest_class`) |
 | `DB_PATH` / `LABELS_DB_PATH` | repo `data/` | absolute paths to the SQLite databases — **required in stdio mode** |
-| `GROUNDING_ENFORCE` | on | fail-closed grounding gate for write tools |
+| `GROUNDING_ENFORCE` | off | fail-closed grounding gate for write tools — opt in |
 | `GROUNDING_SECRET` | — | shared secret → HMAC-signed portable grounding tokens; required for enforcement in hybrid / scaled-out deployments |
 | `FORM_PATTERN_ENFORCE` | on | block form writes on structural pattern violations (FP001–FP010) |
 | `DEBUG_LOGGING` | off | verbose JSON-RPC trace (`[VS→MCP]` / `[MCP→VS]`) on stderr |

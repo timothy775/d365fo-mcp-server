@@ -20,6 +20,9 @@ const isCI = (): boolean => {
   return !!(process.env.CI || process.env.TF_BUILD || process.env.GITHUB_ACTIONS);
 };
 
+/** How many distinct queries keep a memoized "did you mean" candidate pool. */
+const SUGGESTION_CACHE_ENTRIES = 32;
+
 /** Total + per-type symbol counts (both come from one GROUP BY scan). */
 export interface SymbolCounts {
   total: number;
@@ -55,9 +58,23 @@ export class XppSymbolIndex {
   private labelsDbPath: string = ':memory:';
   private symbolCountsCache: SymbolCounts | null = null;
   private symbolCountsPromise: Promise<SymbolCounts> | null = null;
+  // "Did you mean" candidate pools, keyed by query. An agent that guesses a name
+  // wrong tends to guess near it again, and both pools are derived purely from the
+  // index — recomputing them per probe is the whole cost of a failed search.
+  // Bounded so a long session cannot accumulate one entry per typo.
+  private suggestionNamesCache: Map<string, string[]> = new Map();
+  private symbolsByTermCache: Map<string, XppSymbol[]> | null = null;
   // Per-connection prepared-statement cache.  Prepared statements are bound to
   // their originating connection and cannot be shared across connections.
   private perConnStmtCache = new WeakMap<Database, Map<string, Statement>>();
+
+  /**
+   * Directory holding the metadata databases. Sibling marker files (the blob-download
+   * note, the last-build record) live here so they travel with the index they describe.
+   */
+  get dataDir(): string {
+    return path.dirname(this.dbPath);
+  }
 
   constructor(dbPath: string, labelsDbPath?: string) {
     this.dbPath = dbPath;
@@ -84,7 +101,12 @@ export class XppSymbolIndex {
     this.db.pragma('synchronous = NORMAL'); // Faster writes, still crash-safe
     this.db.pragma('cache_size = -64000'); // 64MB cache (negative = kibibytes)
     this.db.pragma('temp_store = MEMORY'); // Store temp tables in memory
-    this.db.pragma('mmap_size = 268435456'); // 256MB memory-mapped I/O
+    // 1 GiB. The shipped symbol DB is ~2.3 GB and the labels DB ~0.9 GB, so the
+    // previous 256 MB / 128 MB mapped roughly a tenth of each file and every read
+    // outside that window paid a page copy through the regular pager. SQLite maps
+    // min(mmap_size, file size) and the mapping is virtual — pages fault in on
+    // demand — so a larger window costs address space, not resident memory.
+    this.db.pragma('mmap_size = 1073741824'); // 1 GiB memory-mapped I/O
     // Without a busy_timeout the writer fails immediately (SQLITE_BUSY) whenever
     // a WAL checkpoint races with an active reader; retry for up to 5s instead.
     this.db.pragma('busy_timeout = 5000');
@@ -100,7 +122,7 @@ export class XppSymbolIndex {
     this.labelsDb.pragma('synchronous = NORMAL');
     this.labelsDb.pragma('cache_size = -32000'); // 32MB cache for labels
     this.labelsDb.pragma('temp_store = MEMORY');
-    this.labelsDb.pragma('mmap_size = 134217728'); // 128MB memory-mapped I/O
+    this.labelsDb.pragma('mmap_size = 536870912'); // 512 MiB — see the note above
     this.labelsDb.pragma('busy_timeout = 5000');
     this.labelsDb.pragma('wal_autocheckpoint = 4000');
     // page_size is a no-op on an existing database (only applies to new DBs).
@@ -119,7 +141,7 @@ export class XppSymbolIndex {
         rConn.pragma('busy_timeout = 5000');
         rConn.pragma('cache_size = -32000'); // 32 MB page cache per connection
         rConn.pragma('temp_store = MEMORY');
-        rConn.pragma('mmap_size = 268435456');
+        rConn.pragma('mmap_size = 1073741824');
         this.readPool.push(rConn);
 
         if (labelPath !== ':memory:') {
@@ -127,7 +149,7 @@ export class XppSymbolIndex {
           rLabels.pragma('busy_timeout = 5000');
           rLabels.pragma('cache_size = -16000'); // 16 MB per labels connection
           rLabels.pragma('temp_store = MEMORY');
-          rLabels.pragma('mmap_size = 134217728');
+          rLabels.pragma('mmap_size = 536870912');
           this.labelsReadPool.push(rLabels);
         }
       }
@@ -402,9 +424,15 @@ export class XppSymbolIndex {
       CREATE INDEX IF NOT EXISTS idx_labels_language ON labels(language);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_labels_unique
         ON labels(label_id, label_file_id, model, language);
+      -- Every language comparison in this file is LOWER(language) = LOWER(?), because
+      -- Microsoft packages unzipped on Linux store 'en-us' while custom packages write
+      -- 'en-US'. A plain index on language cannot serve that predicate, so the LIKE
+      -- fallback degraded to a scan of all four locales instead of one.
+      CREATE INDEX IF NOT EXISTS idx_labels_language_lower ON labels(LOWER(language));
     `);
 
-    // FTS5 full-text search for labels (en-US text only – primary search language)
+    // FTS5 full-text search for labels — every indexed language, not just en-US.
+    // See rebuildLabelsFts() for why the en-US-only index had to go.
     this.labelsDb.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS labels_fts USING fts5(
         label_id,
@@ -415,26 +443,8 @@ export class XppSymbolIndex {
       );
     `);
 
-    // Only index en-US rows to keep FTS compact (~5x smaller on typical installs)
-    // Case-insensitive: Microsoft packages store language as 'en-us' from Linux directory names
-    this.labelsDb.exec(`
-      CREATE TRIGGER IF NOT EXISTS labels_ai AFTER INSERT ON labels WHEN LOWER(new.language) = 'en-us' BEGIN
-        INSERT INTO labels_fts(rowid, label_id, text, comment)
-        VALUES (new.id, new.label_id, new.text, new.comment);
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS labels_ad AFTER DELETE ON labels WHEN LOWER(old.language) = 'en-us' BEGIN
-        INSERT INTO labels_fts(labels_fts, rowid, label_id, text, comment)
-        VALUES ('delete', old.id, old.label_id, old.text, old.comment);
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS labels_au AFTER UPDATE ON labels WHEN LOWER(old.language) = 'en-us' OR LOWER(new.language) = 'en-us' BEGIN
-        INSERT INTO labels_fts(labels_fts, rowid, label_id, text, comment)
-        VALUES ('delete', old.id, old.label_id, old.text, old.comment);
-        INSERT INTO labels_fts(rowid, label_id, text, comment)
-        VALUES (new.id, new.label_id, new.text, new.comment);
-      END;
-    `);
+    this.createLabelsFtsTriggers();
+    this.migrateLabelsFtsLanguageCoverage();
 
     // Extended metadata tables for smart generation
 
@@ -775,6 +785,27 @@ export class XppSymbolIndex {
         sql: 'CREATE INDEX IF NOT EXISTS idx_labels_file_path ON labels(file_path);',
       });
     }
+    // NOCASE twins. removeSymbolsByFile/removeLabelsByFile compare COLLATE NOCASE
+    // (Windows paths differ only in case between the indexer and a tool argument),
+    // and SQLite will only use an index whose collation matches the comparison —
+    // without these the case-insensitive delete falls back to the full-table scan
+    // the BINARY indexes above exist to avoid.
+    if (missing(this.db, 'idx_symbols_file_path_nocase')) {
+      work.push({
+        db: this.db,
+        dbFile: this.dbPath,
+        name: 'idx_symbols_file_path_nocase',
+        sql: 'CREATE INDEX IF NOT EXISTS idx_symbols_file_path_nocase ON symbols(file_path COLLATE NOCASE);',
+      });
+    }
+    if (missing(this.labelsDb, 'idx_labels_file_path_nocase')) {
+      work.push({
+        db: this.labelsDb,
+        dbFile: labelsPath,
+        name: 'idx_labels_file_path_nocase',
+        sql: 'CREATE INDEX IF NOT EXISTS idx_labels_file_path_nocase ON labels(file_path COLLATE NOCASE);',
+      });
+    }
 
     for (const item of work) {
       if (isLarge(item.dbFile)) {
@@ -855,6 +886,87 @@ export class XppSymbolIndex {
   }
 
   /**
+   * (Re)create the labels_fts sync triggers — the single definition of them.
+   *
+   * There is deliberately no language filter here. The triggers used to carry
+   * `WHEN LOWER(language) = 'en-us'`, which kept the index one quarter of its size
+   * on a four-locale build but made every non-English search fall through to the
+   * LIKE scan in searchLabelsLike — measured at 152 s for a four-term `cs` query
+   * against a 1.4 M-row table, run synchronously on the event loop so the whole
+   * server stalled behind it. The rows are indexed; the space is the cheaper half
+   * of that trade. Whatever LABEL_LANGUAGES ingested is what gets tokenised, so a
+   * default en-US-only build is unaffected.
+   *
+   * Dropped and recreated (not CREATE-IF-NOT-EXISTS alone) so a database still
+   * carrying the earlier language-filtered definitions is repaired on the next open —
+   * mirrors createFTSTriggers on the symbols side.
+   */
+  private createLabelsFtsTriggers(): void {
+    this.labelsDb.exec(`
+      DROP TRIGGER IF EXISTS labels_ai;
+      DROP TRIGGER IF EXISTS labels_ad;
+      DROP TRIGGER IF EXISTS labels_au;
+
+      CREATE TRIGGER labels_ai AFTER INSERT ON labels BEGIN
+        INSERT INTO labels_fts(rowid, label_id, text, comment)
+        VALUES (new.id, new.label_id, new.text, new.comment);
+      END;
+
+      CREATE TRIGGER labels_ad AFTER DELETE ON labels BEGIN
+        INSERT INTO labels_fts(labels_fts, rowid, label_id, text, comment)
+        VALUES ('delete', old.id, old.label_id, old.text, old.comment);
+      END;
+
+      CREATE TRIGGER labels_au AFTER UPDATE ON labels BEGIN
+        INSERT INTO labels_fts(labels_fts, rowid, label_id, text, comment)
+        VALUES ('delete', old.id, old.label_id, old.text, old.comment);
+        INSERT INTO labels_fts(rowid, label_id, text, comment)
+        VALUES (new.id, new.label_id, new.text, new.comment);
+      END;
+    `);
+  }
+
+  /**
+   * Databases built before labels_fts covered every language carry an index holding
+   * only en-US rows. Recreating the triggers fixes rows written from now on but
+   * cannot retroactively tokenise the ones already there, so the non-English search
+   * would stay silently empty until the next full rebuild — exactly the failure this
+   * change exists to remove.
+   *
+   * `PRAGMA user_version` on the labels DB records the coverage generation. It is 0
+   * on every database that predates this, so the one-time rebuild is self-triggering
+   * and costs nothing on an already-migrated file.
+   */
+  private migrateLabelsFtsLanguageCoverage(): void {
+    const LABELS_FTS_ALL_LANGUAGES = 1;
+    try {
+      const version = Number(this.labelsDb.pragma('user_version', { simple: true }) ?? 0);
+      if (version >= LABELS_FTS_ALL_LANGUAGES) return;
+
+      // An empty labels table needs no rebuild — a fresh DB is already correct, and
+      // stamping it here keeps the first real build off the slow path.
+      const { n } = this.labelsDb
+        .prepare('SELECT COUNT(*) AS n FROM labels')
+        .get() as { n: number };
+      if (n > 0) {
+        // Measured at ~23 s for 1.4 M labels, and it blocks startup. Announced rather
+        // than done quietly, because a silent 23 s stall reads as a hung server.
+        log.detail(
+          `Re-tokenising ${n.toLocaleString('en-US')} labels so every language is searchable (one-off, ~20 s)…`,
+        );
+        this.rebuildLabelsFts();
+      }
+      this.labelsDb.pragma(`user_version = ${LABELS_FTS_ALL_LANGUAGES}`);
+    } catch (e) {
+      // A read-only file, or a writer holding the lock, must not take the server down.
+      // Leaving user_version unstamped means the next open retries; until then the
+      // non-English searches fall back to searchLabelsLike — the old behaviour, slow
+      // but correct.
+      console.error(`[SymbolIndex] labels_fts language migration skipped: ${e}`);
+    }
+  }
+
+  /**
    * Add a symbol to the index with enhanced metadata
    */
   addSymbol(symbol: XppSymbol): void {
@@ -910,16 +1022,31 @@ export class XppSymbolIndex {
    * working regardless of which build produced the DB.
    */
   private filePathForms(filePath: string): string[] {
-    const forms = new Set<string>([
-      filePath,
-      filePath.replace(/\//g, '\\'),
-      filePath.replace(/\\/g, '/'),
-    ]);
-    const m = /[/\\]PackagesLocalDirectory[/\\](.+)$/.exec(filePath);
-    if (m) {
-      const tail = m[1].replace(/\\/g, '/');
-      forms.add(tail);
-      forms.add(tail.replace(/\//g, '\\'));
+    const forms = new Set<string>();
+    const addSpellings = (p: string): void => {
+      if (!p) return;
+      forms.add(p);
+      forms.add(p.replace(/\//g, '\\'));
+      forms.add(p.replace(/\\/g, '/'));
+      const m = /[/\\]PackagesLocalDirectory[/\\](.+)$/.exec(p);
+      if (m) {
+        const tail = m[1].replace(/\\/g, '/');
+        forms.add(tail);
+        forms.add(tail.replace(/\//g, '\\'));
+      }
+    };
+
+    addSpellings(filePath);
+    // A model directory under PackagesLocalDirectory is routinely a symlink/junction
+    // to a repo checkout, so the path a caller holds and the path the indexer walked
+    // are two different spellings of the same file. Without the resolved alias the
+    // delete matches neither stored form and the stale rows survive — the index then
+    // keeps answering with symbols of a file that was reverted or deleted.
+    try {
+      addSpellings(fs.realpathSync(filePath));
+    } catch {
+      // File already gone (the usual case for an undo that deleted it) — the
+      // as-given spellings are all we have.
     }
     return [...forms];
   }
@@ -928,29 +1055,75 @@ export class XppSymbolIndex {
    * Remove all symbols for a given file path from both the main table and FTS index.
    * Matches every stored path form (see filePathForms) so stale rows are removed
    * even when the DB stores a different path form than the caller passed.
+   *
+   * The comparison is COLLATE NOCASE because SQLite's default BINARY collation made
+   * it case-SENSITIVE against a Windows filesystem that is not: `k:\aosservice\…`
+   * from a tool argument never matched `K:\AosService\…` as stored by the indexer,
+   * so the delete reported 0 rows and every stale symbol stayed searchable. See
+   * ensureFilePathIndexes for the NOCASE index that keeps this lookup off a scan.
+   *
    * Returns the names of top-level objects that were removed (for cache invalidation).
    */
   /**
    * Top-level object names belonging to one model — the evidence from which a
    * model's naming prefix is inferred (see utils/modelPrefixInference.ts).
    *
-   * Deliberately narrow and bounded: only `name`, only root objects, capped at
-   * `limit`. Reading whole rows here would pull source snippets across the wire
-   * and turn a 450 ms lookup into a slow one. Extension objects are included on
-   * purpose — a dot-notation extension states the model's infix outright.
+   * Deliberately narrow and bounded: only `name`, capped at `limit`. Reading whole
+   * rows here would pull source snippets across the wire and turn a 450 ms lookup
+   * into a slow one.
+   *
+   * Extension objects are included on purpose — a dot-notation extension states the
+   * model's infix outright — but `parent_name IS NULL` had been quietly excluding
+   * them, because an extension ELEMENT is stored as a child of the base object it
+   * extends. On ContosoFinanceSK that hid 34 of 36: the model spells its extensions
+   * "…ConSKExtension" 35 times and "…ConSkExtension" once, yet inference saw
+   * two names, one of each, fell under the 60 % threshold and derived "ConSk"
+   * from the regular token instead — flattening the "SK" country code. This server
+   * then WROTE a ConSk extension, which became one of the two visible names, so
+   * the wrong answer was feeding itself. Members ('method', 'field') are excluded by
+   * type, which is what this clause was reaching for.
+   *
+   * The sample is drawn in two BANDS rather than as one `LIMIT` over the union,
+   * because a model with more names than `limit` otherwise lets SQLite decide which
+   * ones inference sees — no ORDER BY means no defined subset, and inference is
+   * threshold-based (MIN_COVERAGE 60 %), so a skewed sample can flip the answer.
+   * The bands also protect the signal: extensions are rare and state the infix
+   * outright, regular objects are many and carry the leading token, and
+   * inferPrefixFromObjectNames needs BOTH — a single window ordered any way at all
+   * would let the larger band crowd the other one out entirely. Each band is capped
+   * at half the budget, gives back what it does not use, and is ordered (type, name)
+   * so the same model always yields the same sample — a silent, self-reinforcing
+   * failure otherwise, since this server writes names with the inferred prefix and
+   * those names become evidence for the next inference.
    */
   getModelObjectNames(model: string, limit = 400): string[] {
     if (!model) return [];
-    const rows = this.getReadDb()
-      .prepare(
-        `SELECT name FROM symbols
-         WHERE model = ?
-           AND parent_name IS NULL
-           AND type NOT IN ('method', 'field')
-         LIMIT ?`
-      )
-      .all(model, limit) as Array<{ name: string }>;
-    return rows.map(r => r.name);
+    if (limit <= 0) return [];
+    const db = this.getReadDb();
+
+    const band = (extensions: boolean, cap: number): string[] => {
+      if (cap <= 0) return [];
+      const rows = db
+        .prepare(
+          `SELECT name FROM symbols
+           WHERE model = ?
+             AND type ${extensions ? 'LIKE' : 'NOT LIKE'} '%-extension'
+             ${extensions ? '' : 'AND parent_name IS NULL'}
+             AND type NOT IN ('method', 'field')
+           ORDER BY type, name
+           LIMIT ?`
+        )
+        .all(model, cap) as Array<{ name: string }>;
+      return rows.map(r => r.name);
+    };
+
+    // Extensions first so their (smaller) band can hand its leftover budget to the
+    // regular one; the reverse would let a large model spend the whole budget on
+    // regular objects before the infix evidence is ever read.
+    const half = Math.max(1, Math.ceil(limit / 2));
+    const extensionNames = band(true, half);
+    const regularNames = band(false, limit - extensionNames.length);
+    return [...extensionNames, ...regularNames];
   }
 
   removeSymbolsByFile(filePath: string): { deletedCount: number; objectNames: string[] } {
@@ -959,12 +1132,12 @@ export class XppSymbolIndex {
 
     // Collect object names BEFORE deletion (for cache invalidation)
     const rows = this.db.prepare(
-      `SELECT DISTINCT name FROM symbols WHERE file_path IN (${placeholders}) AND parent_name IS NULL`
+      `SELECT DISTINCT name FROM symbols WHERE file_path COLLATE NOCASE IN (${placeholders}) AND parent_name IS NULL`
     ).all(...forms) as Array<{ name: string }>;
     const objectNames = rows.map(r => r.name);
 
     // The FTS trigger (symbols_fts AFTER DELETE) handles FTS cleanup automatically
-    const result = this.db.prepare(`DELETE FROM symbols WHERE file_path IN (${placeholders})`).run(...forms);
+    const result = this.db.prepare(`DELETE FROM symbols WHERE file_path COLLATE NOCASE IN (${placeholders})`).run(...forms);
     this.invalidateSymbolCounts();
     return { deletedCount: result.changes, objectNames };
   }
@@ -978,9 +1151,9 @@ export class XppSymbolIndex {
   removeLabelsByFile(filePath: string): number {
     const forms = this.filePathForms(filePath);
     const placeholders = forms.map(() => '?').join(', ');
-    // The labels_ad trigger handles FTS cleanup for en-US rows
+    // The labels_ad trigger handles FTS cleanup, for every language
     const result = this.labelsDb.prepare(
-      `DELETE FROM labels WHERE file_path IN (${placeholders})`
+      `DELETE FROM labels WHERE file_path COLLATE NOCASE IN (${placeholders})`
     ).run(...forms);
     return result.changes;
   }
@@ -1215,10 +1388,15 @@ export class XppSymbolIndex {
     return promise;
   }
 
-  /** Drop memoized counts — call after any write that changes symbol rows. */
+  /**
+   * Drop everything memoized from the symbols table — counts and the suggestion
+   * candidate pools. Call after any write that changes symbol rows.
+   */
   private invalidateSymbolCounts(): void {
     this.symbolCountsCache = null;
     this.symbolCountsPromise = null;
+    this.suggestionNamesCache.clear();
+    this.symbolsByTermCache = null;
   }
 
   private computeSymbolCountsSync(): SymbolCounts {
@@ -1389,7 +1567,7 @@ export class XppSymbolIndex {
           WHERE type = 'method'
             AND NOT EXISTS (SELECT 1 FROM temp_call_stats WHERE temp_call_stats.called_method = symbols.name);
         `);
-      } catch (e) {
+      } catch {
         log.warn('Optimized UPDATE failed, using fallback method');
         // Fallback to correlated subquery (slower but compatible)
         this.db.exec(`
@@ -1793,7 +1971,6 @@ export class XppSymbolIndex {
   private indexClasses(classesPath: string, model: string): void {
     const files = fs.readdirSync(classesPath).filter(f => f.endsWith('.json'));
     
-    let processedCount = 0;
     for (const file of files) {
       try {
         const filePath = path.join(classesPath, file);
@@ -1848,8 +2025,6 @@ export class XppSymbolIndex {
             });
           }
         }
-        
-        processedCount++;
       } catch (error) {
         log.warn(`Skipped ${file}: ${error instanceof Error ? error.message : error}`);
       }
@@ -3481,12 +3656,36 @@ export class XppSymbolIndex {
    * Get candidate symbol names for fuzzy matching ("did you mean" suggestions).
    *
    * When a query is given, candidates are anchored to it: names sharing the
-   * query's leading characters plus names containing its root term (avoids
+   * query's leading characters plus names sharing its root term (avoids
    * always sampling the same alphabetical slice of a 580K-symbol index).
    * Without a query, falls back to the first 5000 names alphabetically.
+   *
+   * Both probes go through symbols_fts. `name LIKE '%root%'` cannot use any index
+   * — SQLite scans all 1.17M rows, synchronously, on exactly the path an agent hits
+   * when it guessed a name wrong, which it does routinely. FTS5 answers a prefix
+   * term from its term index instead. The trade is that infix candidates
+   * ("MyCustTable" for query "CustTable") are no longer offered; they scored below
+   * the 0.7 fuzzy threshold anyway, being far longer than the query.
    */
   getAllSymbolNames(query?: string, limit: number = 2000): string[] {
     const trimmed = query?.trim();
+    const cacheKey = `${trimmed ?? ''}|${limit}`;
+    const cached = this.suggestionNamesCache.get(cacheKey);
+    if (cached) return cached;
+
+    const names = this.computeSymbolNameCandidates(trimmed, limit);
+
+    // Bounded LRU-ish: a session probing dozens of wrong names must not pin an
+    // unbounded number of 2000-name arrays in memory.
+    if (this.suggestionNamesCache.size >= SUGGESTION_CACHE_ENTRIES) {
+      const oldest = this.suggestionNamesCache.keys().next().value;
+      if (oldest !== undefined) this.suggestionNamesCache.delete(oldest);
+    }
+    this.suggestionNamesCache.set(cacheKey, names);
+    return names;
+  }
+
+  private computeSymbolNameCandidates(trimmed: string | undefined, limit: number): string[] {
     if (!trimmed) {
       const stmt = this.db.prepare(`
         SELECT DISTINCT name
@@ -3502,27 +3701,40 @@ export class XppSymbolIndex {
       return names;
     }
 
-    const escapeLike = (value: string): string =>
-      value.replace(/\\/g, '\\\\').replace(/[%_]/g, '\\$&');
-
-    // Typo distance is usually in the tail of the name, so same-prefix names
-    // are the best candidate pool; contains-matches on the root term catch
-    // wrong-prefix typos (e.g. "CusTable" → "CustTable").
+    // Typo distance is usually in the tail of the name, so same-prefix names are
+    // the best candidate pool; the longer root-term prefix catches typos further
+    // in (e.g. "CusTable" → "CustTable") with a tighter, higher-quality window.
     const half = Math.max(1, Math.floor(limit / 2));
-    const prefix = escapeLike(trimmed.slice(0, 2));
-    const root = escapeLike(trimmed.slice(0, Math.max(3, Math.ceil(trimmed.length / 2))));
+    // FTS5 tokenizes on non-alphanumerics, so anything else in the term would be
+    // read as an operator (or a syntax error) rather than matched.
+    const ftsTerm = trimmed.replace(/[^a-zA-Z0-9]/g, '');
+    const prefix = ftsTerm.slice(0, 2);
+    const root = ftsTerm.slice(0, Math.max(3, Math.ceil(ftsTerm.length / 2)));
 
     const names = new Set<string>();
     const db = this.getReadDb();
+    if (prefix.length > 0) {
+      try {
+        const stmt = this.getReadStmt(db, 'suggest_fts_prefix', () =>
+          `SELECT s.name FROM symbols_fts fts JOIN symbols s ON s.id = fts.rowid
+           WHERE symbols_fts MATCH ? LIMIT ?`);
+        for (const probe of new Set([prefix, root])) {
+          for (const row of stmt.iterate(`{name} : "${probe}"*`, half) as IterableIterator<{ name: string }>) {
+            names.add(row.name);
+          }
+        }
+        return [...names];
+      } catch {
+        // FTS table missing (SKIP_FTS build) — fall through to the scan.
+      }
+    }
+
+    const escapeLike = (value: string): string =>
+      value.replace(/\\/g, '\\\\').replace(/[%_]/g, '\\$&');
     try {
       const prefixStmt = this.getReadStmt(db, 'suggest_prefix', () =>
         `SELECT DISTINCT name FROM symbols WHERE name LIKE ? ESCAPE '\\' LIMIT ?`);
-      for (const row of prefixStmt.iterate(`${prefix}%`, half) as IterableIterator<{ name: string }>) {
-        names.add(row.name);
-      }
-      const containsStmt = this.getReadStmt(db, 'suggest_contains', () =>
-        `SELECT DISTINCT name FROM symbols WHERE name LIKE ? ESCAPE '\\' LIMIT ?`);
-      for (const row of containsStmt.iterate(`%${root}%`, half) as IterableIterator<{ name: string }>) {
+      for (const row of prefixStmt.iterate(`${escapeLike(trimmed.slice(0, 2))}%`, half) as IterableIterator<{ name: string }>) {
         names.add(row.name);
       }
     } catch {
@@ -3535,8 +3747,20 @@ export class XppSymbolIndex {
    * Get symbols grouped by term (for relationship analysis)
    * Returns a map of term -> symbols with that term
    * Uses iterator to avoid loading all symbols into memory at once
+   *
+   * Memoized for the lifetime of the index contents: the query takes no arguments
+   * and hydrates the same 3000 rows every time, yet it sits on the failed-search
+   * path next to getAllSymbolNames — so every name an agent probes and misses paid
+   * for a fresh `SELECT *` of 3000 rows on the event loop.
    */
   getSymbolsByTerm(): Map<string, XppSymbol[]> {
+    if (this.symbolsByTermCache) return this.symbolsByTermCache;
+    const built = this.computeSymbolsByTerm();
+    this.symbolsByTermCache = built;
+    return built;
+  }
+
+  private computeSymbolsByTerm(): Map<string, XppSymbol[]> {
     const stmt = this.db.prepare(`
       SELECT *
       FROM symbols
@@ -3592,9 +3816,14 @@ export class XppSymbolIndex {
    * and any pending debounced labels FTS rebuild timer.
    */
   close(): void {
-    // Flush any debounced labels FTS rebuild to avoid losing writes on shutdown.
-    if (this._labelsFtsTimer) {
-      clearTimeout(this._labelsFtsTimer);
+    // RUN the pending debounced rebuild, don't just cancel its timer: labels created
+    // in the last ~300 ms before shutdown are in the labels table but not yet in
+    // labels_fts, and cancelling leaves them unfindable by searchLabels until the
+    // next full re-index. Best-effort — a rebuild failure must not block the close.
+    try {
+      this.flushLabelsFtsRebuild();
+    } catch (e) {
+      console.error(`[SymbolIndex] Final labels FTS flush failed: ${e}`);
       this._labelsFtsTimer = null;
     }
 
@@ -3659,9 +3888,10 @@ export class XppSymbolIndex {
     }>,
     opts?: { skipFtsRebuild?: boolean; keepTriggers?: boolean },
   ): void {
-    if (opts?.keepTriggers) {
+    const keepTriggers = !!opts?.keepTriggers;
+    if (keepTriggers) {
       // Scoped/incremental insert: let the triggers maintain labels_fts per row instead of
-      // re-tokenising every en-US label afterwards. Recursive triggers are required so the
+      // re-tokenising every label in the database afterwards. Recursive triggers are required so the
       // rows displaced by INSERT OR REPLACE fire labels_ad and don't leave orphaned FTS
       // entries pointing at dead rowids.
       this.labelsDb.pragma('recursive_triggers = ON');
@@ -3672,62 +3902,56 @@ export class XppSymbolIndex {
       this.labelsDb.exec(`DROP TRIGGER IF EXISTS labels_au`);
     }
 
-    const insert = this.labelsDb.prepare(`
-      INSERT OR REPLACE INTO labels (label_id, label_file_id, model, language, text, comment, file_path)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
+    // try/finally, because the teardown is not optional: a constraint violation in
+    // the insert or a failure inside rebuildLabelsFts used to propagate with the
+    // triggers still dropped, and from then on every label written through this
+    // connection was missing from labels_fts with nothing to signal it.
+    try {
+      const insert = this.labelsDb.prepare(`
+        INSERT OR REPLACE INTO labels (label_id, label_file_id, model, language, text, comment, file_path)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
 
-    const insertMany = this.labelsDb.transaction((rows: typeof entries) => {
-      for (const e of rows) {
-        insert.run(e.labelId, e.labelFileId, e.model, e.language, e.text, e.comment ?? null, e.filePath);
+      const insertMany = this.labelsDb.transaction((rows: typeof entries) => {
+        for (const e of rows) {
+          insert.run(e.labelId, e.labelFileId, e.model, e.language, e.text, e.comment ?? null, e.filePath);
+        }
+      });
+
+      insertMany(entries);
+
+      // With keepTriggers the index is already up to date — the triggers maintained
+      // it row by row. Otherwise rebuild, unless the caller will do a single rebuild
+      // after all batches.
+      if (!keepTriggers && !opts?.skipFtsRebuild) {
+        this.rebuildLabelsFts();
       }
-    });
-
-    insertMany(entries);
-
-    if (opts?.keepTriggers) {
-      // labels_fts is already up to date — the triggers maintained it row by row.
-      this.labelsDb.pragma('recursive_triggers = OFF');
-      return;
+    } finally {
+      if (keepTriggers) {
+        this.labelsDb.pragma('recursive_triggers = OFF');
+      } else {
+        this.createLabelsFtsTriggers();
+      }
     }
-
-    // Rebuild FTS unless the caller will do a single rebuild after all batches
-    if (!opts?.skipFtsRebuild) {
-      this.rebuildLabelsFts();
-    }
-
-    // Re-create triggers (en-US only to keep FTS compact)
-    this.labelsDb.exec(`
-      CREATE TRIGGER IF NOT EXISTS labels_ai AFTER INSERT ON labels WHEN new.language = 'en-US' BEGIN
-        INSERT INTO labels_fts(rowid, label_id, text, comment)
-        VALUES (new.id, new.label_id, new.text, new.comment);
-      END;
-      CREATE TRIGGER IF NOT EXISTS labels_ad AFTER DELETE ON labels WHEN old.language = 'en-US' BEGIN
-        INSERT INTO labels_fts(labels_fts, rowid, label_id, text, comment)
-        VALUES ('delete', old.id, old.label_id, old.text, old.comment);
-      END;
-      CREATE TRIGGER IF NOT EXISTS labels_au AFTER UPDATE ON labels WHEN old.language = 'en-US' OR new.language = 'en-US' BEGIN
-        INSERT INTO labels_fts(labels_fts, rowid, label_id, text, comment)
-        VALUES ('delete', old.id, old.label_id, old.text, old.comment);
-        INSERT INTO labels_fts(rowid, label_id, text, comment)
-        VALUES (new.id, new.label_id, new.text, new.comment);
-      END;
-    `);
   }
 
   /**
-   * Rebuild the FTS index for labels from scratch.
-   * Only indexes en-US rows — the primary search language — keeping the
-   * index ~(N_languages)x smaller compared to indexing all translations.
+   * Rebuild the FTS index for labels from scratch — every row in `labels`, whatever
+   * its language.
+   *
+   * This used to filter to en-US on the theory that it was "the primary search
+   * language", which held only as long as nobody searched in another one. On a build
+   * with LABEL_LANGUAGES=en-US,cs,sk,de the other three quarters were unreachable
+   * through the index, and searchLabels quietly answered them with a LIKE scan of
+   * the whole table instead. The index is ~4x larger on such a build; the alternative
+   * was a 150 s query.
    */
   rebuildLabelsFts(): void {
     // Clear existing FTS index
     this.labelsDb.exec(`INSERT INTO labels_fts(labels_fts) VALUES('delete-all')`);
-    // Re-populate with en-US rows only (case-insensitive: Microsoft packages store
-    // locale as 'en-us' from Linux-unzipped directory names, custom packages use 'en-US')
     this.labelsDb.exec(`
       INSERT INTO labels_fts(rowid, label_id, text, comment)
-      SELECT id, label_id, text, comment FROM labels WHERE LOWER(language) = 'en-us'
+      SELECT id, label_id, text, comment FROM labels
     `);
   }
 
@@ -3763,7 +3987,10 @@ export class XppSymbolIndex {
   }
 
   /**
-   * Full-text search labels (default language: en-US, falls back to any)
+   * Full-text search labels within one language (default en-US).
+   *
+   * Answered from labels_fts, which covers every indexed locale. Only queries FTS5
+   * cannot tokenise fall through to the LIKE scan in searchLabelsLike.
    */
   searchLabels(
     query: string,
@@ -3780,25 +4007,18 @@ export class XppSymbolIndex {
   }> {
     const { language = 'en-US', model, labelFileId, limit = 30 } = opts;
 
-    // labels_fts only indexes en-US rows. For any other language, skip straight to
-    // LIKE-based search — attempting FTS would always produce 0 results and then
-    // fall through to LIKE anyway, wasting two round-trips.
-    // Compare case-insensitively: callers pass variants like 'en-us', and a
-    // false mismatch here degrades to a LIKE full scan of the labels table
-    // (200+ s on a production DB, synchronously blocking the event loop).
-    if (language.toLowerCase() !== 'en-us') {
-      return this.searchLabelsLike(query, opts);
-    }
-
     // Sanitize query for FTS5 (strip chars that would cause a syntax error)
     const ftsQuery = query.replace(/['"*()]/g, ' ').trim();
     // Route to LIKE when FTS5 would silently return 0 results:
     // • '_' and '%' — word separators in the unicode61 tokenizer (also LIKE wildcards);
     //   literal underscore/percent searches must go through LIKE with proper escaping.
-    // • Any query whose alphanumeric content disappears after sanitization (e.g. '-',
+    // • Any query whose letter/digit content disappears after sanitization (e.g. '-',
     //   '.', '@', ':', '@SYS:') produces zero FTS5 tokens and no exception to trigger
     //   the catch-based fallback below.
-    if (/[_%]/.test(query) || !/[a-zA-Z0-9]/.test(ftsQuery)) {
+    //   The test is Unicode-aware on purpose: unicode61 tokenises 'Přístup' and
+    //   'Qualität' perfectly well, and an [a-zA-Z0-9] test would have shunted any
+    //   query without ASCII letters onto the LIKE scan this method exists to avoid.
+    if (/[_%]/.test(query) || !/[\p{L}\p{N}]/u.test(ftsQuery)) {
       return this.searchLabelsLike(query, opts);
     }
 
@@ -3806,13 +4026,17 @@ export class XppSymbolIndex {
     const stmtKey = `searchLabels_${model ? 'model' : 'nomodel'}_${labelFileId ? 'lfid' : 'nolfid'}`;
     let stmt = this.labelsStmtCache.get(stmtKey);
     if (!stmt) {
+      // The language predicate is not optional. labels_fts now holds every locale,
+      // so without it a `cs` search happily returns the en-US and de rows that share
+      // a token — the index no longer does the filtering the caller assumed.
       let sql = `
         SELECT l.label_id AS labelId, l.label_file_id AS labelFileId, l.model, l.language,
                l.text, l.comment, l.file_path AS filePath,
                f.rank
         FROM labels_fts f
         JOIN labels l ON l.id = f.rowid
-        WHERE labels_fts MATCH ?`;
+        WHERE labels_fts MATCH ?
+          AND LOWER(l.language) = ?`;
       if (model)       sql += `\n          AND l.model = ?`;
       if (labelFileId) sql += `\n          AND l.label_file_id = ?`;
       sql += `\n          ORDER BY f.rank\n          LIMIT ?`;
@@ -3820,7 +4044,7 @@ export class XppSymbolIndex {
       this.labelsStmtCache.set(stmtKey, stmt);
     }
 
-    const params: any[] = [ftsQuery];
+    const params: any[] = [ftsQuery, language.toLowerCase()];
     if (model)       params.push(model);
     if (labelFileId) params.push(labelFileId);
     params.push(limit);
@@ -3834,7 +4058,14 @@ export class XppSymbolIndex {
   }
 
   /**
-   * LIKE-based fallback label search (for queries with special characters)
+   * LIKE-based fallback label search, for the queries FTS5 cannot tokenise
+   * (literal '_'/'%', or nothing but punctuation once sanitised).
+   *
+   * A leading-wildcard LIKE cannot use an index, so this scans the labels table.
+   * The language predicate is written to hit idx_labels_language_lower, which keeps
+   * the scan inside one locale instead of all of them; there is no way to make the
+   * text comparison itself cheaper here, which is exactly why the FTS path above now
+   * covers every language rather than only en-US.
    */
   private searchLabelsLike(
     query: string,
@@ -3854,7 +4085,7 @@ export class XppSymbolIndex {
                text, comment, file_path AS filePath, 0 as rank
         FROM labels
         WHERE (text LIKE ? ESCAPE '\\' OR label_id LIKE ? ESCAPE '\\')
-          AND LOWER(language) = LOWER(?)`;
+          AND LOWER(language) = ?`;
       if (model)       sql += `\n          AND model = ?`;
       if (labelFileId) sql += `\n          AND label_file_id = ?`;
       sql += `\n        LIMIT ?`;
@@ -3862,7 +4093,9 @@ export class XppSymbolIndex {
       this.labelsStmtCache.set(stmtKey, stmt);
     }
 
-    const params: any[] = [pattern, pattern, language];
+    // Lowercased here, not as LOWER(?) in SQL: the expression index is on
+    // LOWER(language), and matching it requires the bound side to be a plain value.
+    const params: any[] = [pattern, pattern, language.toLowerCase()];
     if (model)       params.push(model);
     if (labelFileId) params.push(labelFileId);
     params.push(limit);
@@ -3898,24 +4131,40 @@ export class XppSymbolIndex {
   }
 
   /**
-   * Get all label file IDs for a model (i.e. which AxLabelFiles exist)
+   * Get all label file IDs for a model (i.e. which AxLabelFiles exist).
+   *
+   * Both filters belong in SQL. `labelFileId` used to be applied by the caller to
+   * the finished list, so asking about ONE label file still grouped all 1.4 M rows
+   * into 1602 groups and then threw 1601 of them away — a full index scan measured
+   * at 2.5 s warm, and one cold call in a real session took 28 s against the 40-170 ms
+   * every other call to the same tool costs. Pushed into the WHERE clause the same
+   * lookup is a seek on idx_labels_file_id: 0.4 ms.
    */
-  getLabelFileIds(model?: string): Array<{ labelFileId: string; model: string; languages: string }> {
-    if (model) {
-      return this.labelsDb.prepare(`
-        SELECT label_file_id AS labelFileId, model, GROUP_CONCAT(DISTINCT language) AS languages
-        FROM labels
-        WHERE model = ?
-        GROUP BY label_file_id, model
-        ORDER BY label_file_id
-      `).all(model) as any[];
-    }
-    return this.labelsDb.prepare(`
+  getLabelFileIds(model?: string, labelFileId?: string): Array<{ labelFileId: string; model: string; languages: string }> {
+    const run = (extraWhere: string, params: string[]) => this.labelsDb.prepare(`
       SELECT label_file_id AS labelFileId, model, GROUP_CONCAT(DISTINCT language) AS languages
       FROM labels
+      ${extraWhere}
       GROUP BY label_file_id, model
       ORDER BY label_file_id
-    `).all() as any[];
+    `).all(...params) as Array<{ labelFileId: string; model: string; languages: string }>;
+
+    const where: string[] = [];
+    const params: string[] = [];
+    if (model) { where.push('model = ?'); params.push(model); }
+    if (labelFileId) { where.push('label_file_id = ?'); params.push(labelFileId); }
+    const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    const hits = run(clause, params);
+    if (hits.length > 0 || !labelFileId) return hits;
+
+    // The caller-side filter this replaced compared lowercased, and idx_labels_file_id
+    // is BINARY — so a differently-cased ID would silently return nothing. Only when
+    // the fast exact seek misses does it cost the scan to stay case-insensitive.
+    const nocaseWhere: string[] = ['label_file_id = ? COLLATE NOCASE'];
+    const nocaseParams: string[] = [labelFileId];
+    if (model) { nocaseWhere.unshift('model = ?'); nocaseParams.unshift(model); }
+    return run(`WHERE ${nocaseWhere.join(' AND ')}`, nocaseParams);
   }
 
   /**
@@ -3945,7 +4194,7 @@ export class XppSymbolIndex {
     const placeholders = models.map(() => '?').join(',');
     this.labelsDb.prepare(`DELETE FROM labels WHERE model IN (${placeholders})`).run(...models);
     // 'incremental': the labels_ad trigger already dropped each deleted row from labels_fts,
-    // so the full delete-all + re-INSERT of every en-US label (O(all labels)) is pure waste
+    // so the full delete-all + re-INSERT of every label (O(all labels)) is pure waste
     // when only a handful of models were cleared.
     if (opts?.ftsStrategy !== 'incremental') this.rebuildLabelsFts();
   }
