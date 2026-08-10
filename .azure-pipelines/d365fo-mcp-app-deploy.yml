@@ -17,6 +17,10 @@ trigger:
       - 'tsconfig.json'
       - '.azure-pipelines/d365fo-mcp-app-deploy.yml'
 
+# Azure Pipelines triggers on every PR by default when this is omitted,
+# which would build AND deploy to production for every pull request.
+pr: none
+
 pool:
   vmImage: 'ubuntu-latest'
 
