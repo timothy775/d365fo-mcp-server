@@ -15,6 +15,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { createXppMcpServer } from './server/mcpServer.js';
 import { createStreamableHttpTransport } from './server/transport.js';
 import { XppSymbolIndex } from './metadata/symbolIndex.js';
+import { shouldWarmIndexes, warmIndexes, renderWarmupReport } from './metadata/indexWarmup.js';
 import { XppMetadataParser } from './metadata/xmlParser.js';
 import { WorkspaceScanner } from './workspace/workspaceScanner.js';
 import { HybridSearch } from './workspace/hybridSearch.js';
@@ -22,11 +23,12 @@ import { initializeDatabase } from './database/download.js';
 import { initializeConfig, getConfigManager } from './utils/configManager.js';
 import { SERVER_MODE, LOCAL_TOOLS, TOOL_PROFILE, EXTRA_TOOLS, isToolEnabled } from './server/serverMode.js';
 import { TOOL_ANNOTATIONS } from './server/toolAnnotations.js';
-import { apiKeyAuth } from './middleware/apiKeyAuth.js';
+import { apiKeyAuth, authStartupError, resolveBindHost } from './middleware/apiKeyAuth.js';
 import { VERSION } from './version.js';
 import { setInitializeParams } from './utils/stdioSessionInfo.js';
 import { setModelObjectNameSource } from './utils/modelPrefixInference.js';
 import { trackBridgeStartup } from './bridge/bridgeReadiness.js';
+import { startLoopLagMonitor } from './utils/loopLag.js';
 import { createShutdownCoordinator } from './utils/gracefulShutdown.js';
 import { box, kv, sectionTitle, statusLine, spread, c, glyph, sanitize, supportsUnicode, log, shortPath, startupWarnings } from './utils/terminalUi.js';
 import * as fs from 'fs/promises';
@@ -41,16 +43,39 @@ const DEBUG_LOGGING = process.env.DEBUG_LOGGING === 'true';
 // to a file (useful when the IDE doesn't expose MCP subprocess stderr).
 const LOG_FILE = process.env.LOG_FILE;
 let _logStream: fsSync.WriteStream | undefined;
+/** Undoes the stderr tee. Set only while the tee is installed. */
+let _restoreStderr: (() => void) | undefined;
 if (LOG_FILE) {
   try {
     _logStream = fsSync.createWriteStream(LOG_FILE, { flags: 'a', encoding: 'utf8' });
+    // The open is asynchronous, so a bad path (missing directory, no write
+    // permission) never reaches the catch below — it arrives here instead, and
+    // without a listener an 'error' event on a stream is an uncaught exception.
+    _logStream.on('error', (err) => {
+      _logStream = undefined;
+      _restoreStderr?.();
+      process.stderr.write(`[d365fo-mcp] ⚠️ LOG_FILE=${LOG_FILE} unusable, file logging off: ${err}\n`);
+    });
     const banner = `\n${'─'.repeat(72)}\n[d365fo-mcp] Started at ${new Date().toISOString()}  pid=${process.pid}\n${'─'.repeat(72)}\n`;
     _logStream.write(banner);
-    // Tee: intercept process.stderr so every write also goes to the log file
-    const origStderrWrite = process.stderr.write.bind(process.stderr);
-    (process.stderr as NodeJS.WriteStream & { write: (...args: any[]) => boolean }).write = function (chunk: any, ...rest: any[]): boolean {
-      _logStream!.write(typeof chunk === 'string' ? chunk : chunk.toString('utf8'));
+    // Tee: intercept process.stderr so every write also goes to the log file.
+    // The mirror is best-effort — stderr itself must keep working even once the
+    // stream is gone, because shutdown reports its final progress through it.
+    const stderr = process.stderr as NodeJS.WriteStream & { write: (...args: any[]) => boolean };
+    const origStderrWrite = stderr.write.bind(process.stderr);
+    const teeWrite = function (chunk: any, ...rest: any[]): boolean {
+      try {
+        _logStream?.write(typeof chunk === 'string' ? chunk : chunk.toString('utf8'));
+      } catch {
+        // A failed mirror must never take the real stderr write down with it.
+      }
       return origStderrWrite(chunk, ...rest) as boolean;
+    };
+    stderr.write = teeWrite;
+    _restoreStderr = () => {
+      // Only unpatch our own tee — something else may have wrapped stderr since.
+      if (stderr.write === teeWrite) stderr.write = origStderrWrite;
+      _restoreStderr = undefined;
     };
   } catch (e) {
     // Don't crash the server if the log file can't be opened
@@ -89,9 +114,20 @@ console.error = (...args: any[]) => {
 // on the first request and has to be restarted" when a background task (e.g.
 // the async DB load) rejects before any tool call awaits it. Log and keep the
 // server alive instead of dying. (stderr is already tee'd to LOG_FILE above.)
+// A throw inside either of these handlers is fatal and unrecoverable — Node has
+// no net left to catch it — so the reporting itself is wrapped: the net must not
+// be the thing that kills the process it exists to keep alive.
+function reportSafely(message: string): void {
+  try {
+    process.stderr.write(message);
+  } catch {
+    /* nothing left to report through */
+  }
+}
+
 process.on('unhandledRejection', (reason) => {
   const msg = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
-  process.stderr.write(`[d365fo-mcp] ⚠️ Unhandled promise rejection (server staying up): ${msg}\n`);
+  reportSafely(`[d365fo-mcp] ⚠️ Unhandled promise rejection (server staying up): ${msg}\n`);
 });
 
 // Same protection for SYNCHRONOUS uncaught exceptions — a throw that escapes a
@@ -101,7 +137,7 @@ process.on('unhandledRejection', (reason) => {
 // root cause is diagnosable, then keep serving. (Genuinely fatal startup errors
 // are still surfaced via main().catch → process.exit below.)
 process.on('uncaughtException', (err) => {
-  process.stderr.write(`[d365fo-mcp] ⚠️ Uncaught exception (server staying up): ${err?.stack ?? err}\n`);
+  reportSafely(`[d365fo-mcp] ⚠️ Uncaught exception (server staying up): ${err?.stack ?? err}\n`);
 });
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
@@ -150,10 +186,14 @@ const shutdownCoordinator = createShutdownCoordinator({
 const onShutdown = shutdownCoordinator.onShutdown;
 
 async function initializeServices() {
+  // Attribution for "the first call took seconds" — off unless DEBUG_LOGGING is
+  // set. See src/utils/loopLag.ts for what was measured and what could not be.
+  startLoopLagMonitor();
+
   // -----------------------------------------------------------------------
   // write-only mode: skip all database/symbol work — the LOCAL_TOOLS set
   // (src/server/serverMode.ts; d365fo_file, build_d365fo_project,
-  //  verify_d365fo_project, undo_last_modification, get_workspace_info, …)
+  //  verify_d365fo_project, run_bp_check, get_workspace_info, …)
   //  only needs the config manager for path resolution, not the 1.5 GB symbol
   //  database. Read the set from serverMode.ts rather than trusting this list.
   // -----------------------------------------------------------------------
@@ -315,6 +355,20 @@ async function initializeServices() {
       }).catch(err => {
         console.error(statusLine('warn', 'Symbol count failed:'), err);
       });
+
+      // Read the indexes the request paths use, on a thread of their own, before
+      // anyone asks a question that needs them. Measured on the reference VM:
+      // the first covering scan of idx_symbols_name costs 83 s cold and 0.11 s
+      // warm, and the labels join behind every label search costs 31 s cold —
+      // which is most of what the benchmark's tool time has ever been. The OS
+      // page cache is process-wide, so a worker warms it for the main thread's
+      // own connections. Never awaited: an unfinished warm-up just leaves the
+      // first query paying for the part not yet read, exactly as it does today.
+      if (shouldWarmIndexes(DB_PATH, LABELS_DB_PATH)) {
+        void warmIndexes({ dbPath: DB_PATH, labelsDbPath: LABELS_DB_PATH })
+          .then(report => { log.detail(renderWarmupReport(report)); })
+          .catch(err => { log.detail(`Index warm-up skipped: ${err}`); });
+      }
     }
 
     serverState.symbolIndex = symbolIndex;
@@ -446,6 +500,9 @@ async function main() {
   // Registered first so it runs LAST (cleanups run in reverse): the log file is
   // where the other steps report, so it has to outlive them.
   onShutdown('log file', () => {
+    // Unpatch before closing: the coordinator still writes "[shutdown] done"
+    // after this cleanup returns, and that write must not touch a closed stream.
+    _restoreStderr?.();
     if (_logStream) {
       _logStream.end();
       _logStream = undefined;
@@ -656,7 +713,19 @@ async function main() {
     // Branded banner first — connection details are known immediately, before
     // the (potentially long) database load. Symbol counts are intentionally NOT
     // shown here; they appear once during the load (`✓ Loaded … symbols`).
-    const host = process.env.HOST || '0.0.0.0';
+    // Fail closed before anything binds: a network-reachable listener with no
+    // API_KEY would serve the whole read surface to anonymous callers.
+    const authError = authStartupError();
+    if (authError) {
+      console.error('');
+      console.error(authError);
+      console.error('');
+      process.exit(1);
+    }
+
+    // Not `process.env.HOST || '0.0.0.0'` — with no key configured the default
+    // is loopback, so forgetting the key costs reachability, not secrecy.
+    const host = resolveBindHost();
     const W = 50;
     console.log('');
     for (const line of box([
@@ -667,6 +736,13 @@ async function main() {
     }
     console.log('');
     console.log(kv('Mode', `HTTP ${c.dim(glyph.dot)} ${SERVER_MODE}`));
+    // Three states, and the guard above has already ruled out the fourth
+    // (no key on a public interface), so "none" here always means loopback.
+    console.log(kv('Auth', process.env.API_KEY?.trim()
+      ? `API key ${c.dim(glyph.dot)} X-Api-Key`
+      : process.env.ALLOW_UNAUTHENTICATED === 'true'
+        ? c.yellow(`delegated upstream ${c.dim(glyph.dot)} nothing is checked here`)
+        : `none ${c.dim(glyph.dot)} ${c.dim('loopback only, not reachable from the network')}`));
     console.log(kv('Endpoint', c.cyan(`http://${host}:${PORT}/mcp`)));
     console.log(kv('Health', c.cyan(`http://localhost:${PORT}/health`)));
     console.log(kv('Runtime', `Node ${process.version} ${c.dim(glyph.dot)} pid ${process.pid}`));
@@ -781,7 +857,7 @@ async function main() {
           { name: 'generate_object',                     desc: 'mode=pattern (named X++ skeleton) | scaffold (whole table/form/report)' },
         ]},
         { icon: '📝', category: 'File & Metadata Operations', tools: [
-          { name: 'd365fo_file',                  desc: 'action=create|modify|generate — write/edit AOT objects or emit XML (cloud)' },
+          { name: 'd365fo_file',                  desc: 'action=create|modify|delete|undo|generate — write/edit/roll back AOT objects or emit XML (cloud)' },
         ]},
         { icon: '📈', category: 'Pattern Analysis', tools: [
           { name: 'object_patterns',                     desc: 'domain=table|form — table field/index patterns, or form-pattern toolkit (analyze/spec/validate)' },
@@ -790,19 +866,14 @@ async function main() {
           { name: 'security_info',                desc: 'mode=artifact|coverage — Privilege/Duty/Role chain, or who can access an object' },
           { name: 'extension_info',                desc: 'mode=coc|events|table-merge|points|strategy — CoC/event-handler/extension analysis + strategy advice' },
           { name: 'validate_object_naming',       desc: 'Validate proposed extensions and object names against D365FO conventions' },
-          { name: 'get_workspace_info',           desc: 'Detected workspace paths, model name, project file, and server mode' },
+          { name: 'get_workspace_info',           desc: 'Detected workspace paths, model name, project file, and server mode; changes=true returns the uncommitted git diff' },
           { name: 'verify_d365fo_project',        desc: 'Verify objects exist on disk and are referenced in the .rnrproj project file' },
         ]},
         { icon: '🏗️ ', category: 'SDLC & Build Tools', tools: [
           { name: 'update_symbol_index',          desc: 'Re-index a file changed outside this server (create/modify refresh it themselves)' },
-          { name: 'build_d365fo_project',         desc: 'Run MSBuild compilation locally to capture errors' },
-          { name: 'trigger_db_sync',              desc: 'Run a database sync for the current model' },
+          { name: 'build_d365fo_project',         desc: 'Compile the model locally; bpCheck/dbSync fold the BP check and the database sync into the same call' },
           { name: 'run_bp_check',                 desc: 'Run Microsoft Best Practices (xppbp.exe) analysis' },
           { name: 'run_systest_class',            desc: 'Execute unit tests using SysTestConsole.exe' },
-        ]},
-        { icon: '🔄', category: 'Code Review & Source Control', tools: [
-          { name: 'review_workspace_changes',     desc: 'AI-based D365FO code review on uncommitted X++ changes (git diff)' },
-          { name: 'undo_last_modification',       desc: 'Safely revert last file change: checkout HEAD or delete untracked file' },
         ]},
         { icon: '🧪', category: 'Code Quality & Grounding', tools: [
           { name: 'validate_code',                     desc: 'mode=syntax (offline BP validator, SEL/COC/BP/TTS/XML) | references (semantic symbol resolver vs index)' },

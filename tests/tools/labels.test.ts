@@ -10,24 +10,59 @@ import { createLabelTool } from '../../src/tools/write/createLabel';
 import { renameLabelTool } from '../../src/tools/write/renameLabel';
 import { labelsTool, mapWithConcurrency } from '../../src/tools/labels';
 import { isExtensionLabelFile } from '../../src/metadata/labelParser';
+import { resetLabelSearchHistory } from '../../src/tools/analysis/labelSearchHistory';
 import type { XppServerContext } from '../../src/types/context';
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 
+// The search history is module state that deliberately outlives one call — reset
+// it per test so one suite's phrasings never become another's "you already asked".
+beforeEach(() => { resetLabelSearchHistory(); });
+
 // Mock filesystem access — label tools write to disk
+// ONE set of stubs, installed under both 'fs' and 'fs/promises'.
+//
+// The label writers import `{ promises as fs } from 'fs'`, but writeFileAtomic
+// — which they now go through, so a torn write cannot corrupt every label in a
+// model's .label.txt — imports 'fs/promises'. Mocking only 'fs' let the real
+// writeFile run against a test path that does not exist. Sharing the vi.fn
+// instances keeps every existing `fsMock.promises.*` assertion pointed at the
+// calls it was written for, whichever specifier the code under test used.
+const fsStubs = vi.hoisted(() => ({
+  readFile: vi.fn(async () => '; Label file\nMyExistingLabel=Existing label text\n'),
+  writeFile: vi.fn(async () => {}),
+  mkdir: vi.fn(async () => {}),
+  access: vi.fn(async () => {}),
+  readdir: vi.fn(async () => []),
+  // writeFileAtomic: write a temp sibling, rename it over the target, rm the
+  // temp if the rename failed. Stubbed as no-ops — nothing here touches a real
+  // filesystem, and the assertions are about writeFile being reached at all.
+  rename: vi.fn(async () => {}),
+  rm: vi.fn(async () => {}),
+}));
+
 vi.mock('fs', async (orig) => {
   const actual = await orig<typeof import('fs')>();
-  return {
-    ...actual,
-    promises: {
-      ...actual.promises,
-      readFile: vi.fn(async () => '; Label file\nMyExistingLabel=Existing label text\n'),
-      writeFile: vi.fn(async () => {}),
-      mkdir: vi.fn(async () => {}),
-      access: vi.fn(async () => {}),
-      readdir: vi.fn(async () => []),
-    },
-  };
+  return { ...actual, promises: { ...actual.promises, ...fsStubs } };
 });
+
+vi.mock('fs/promises', async (orig) => {
+  const actual = await orig<typeof import('fs/promises')>();
+  return { ...actual, ...fsStubs, default: { ...actual, ...fsStubs } };
+});
+
+/**
+ * Does this write target `name`, directly or through writeFileAtomic's temp
+ * sibling (`<name>.tmp-<pid>-<n>`, renamed over the target)?
+ *
+ * The label writers are on the atomic helper because a torn write to a
+ * .label.txt does not corrupt one label, it corrupts every label in that
+ * model's file — and .label.txt has no undo outside git. The assertions below
+ * are about the bytes reaching that file, not about which of the two syscalls
+ * carried them.
+ */
+function writeTargets(writePath: string, name: string): boolean {
+  return writePath.endsWith(name) || writePath.includes(`${name}.tmp-`);
+}
 
 const mockAddToProject = vi.fn(async () => true);
 const mockAddLabelToProject = vi.fn(async (_proj: string, _id: string, langs: string[]): Promise<string[]> =>
@@ -230,13 +265,22 @@ describe('labels(action="search") with query[]', () => {
     expect(text).toContain('3 queries');
     expect(text).toMatch(/none of these 3 phrasings/i);
     expect(text).toContain('Stop searching and create your own.');
-    // Each query still gets its own section.
+    // Every phrasing is still named, but a miss carries no information beyond
+    // its own name: three full "create your own label" sections were three
+    // copies of one paragraph. They collapse into one line.
+    expect(text).toContain('No match — 3 phrasing(s)');
     for (const q of ['cannot be decreased', 'downgrade', 'value is lower']) {
-      expect(text).toContain(`## "${q}"`);
+      expect(text).toContain(`"${q}"`);
+      expect(text).not.toContain(`## "${q}"`);
     }
+    // The advice survives — once.
+    expect(text.match(/Nothing reusable here/g) ?? []).toHaveLength(1);
   });
 
-  it('reports a reusable hit instead of telling the caller to create one', async () => {
+  // "At least one reusable label was found" promised more than a hit means: the
+  // model can RESOLVE the label, not that it says what the caller needs. Callers
+  // kept rephrasing to find the label the verdict implied was there.
+  it('reports a hit as a candidate, and still hands over the create call', async () => {
     (ctx.symbolIndex.searchLabels as any).mockReturnValue([
       makeLabelResult({ labelId: 'CustomerName', text: 'Customer name', labelFileId: 'MyModel', model: 'MyModel' }),
     ]);
@@ -246,8 +290,12 @@ describe('labels(action="search") with query[]', () => {
       ctx,
     )).content[0].text as string;
 
-    expect(text).toMatch(/at least one reusable label was found/i);
-    expect(text).not.toContain('Stop searching and create your own.');
+    expect(text).toMatch(/at least one label this model can resolve came back/i);
+    expect(text).toMatch(/a hit is a candidate, not a verdict/i);
+    // Never the flat "nothing was found" verdict — something WAS found.
+    expect(text).not.toMatch(/none of these \d+ phrasings/i);
+    // …but the fallback is right there, so "none of these fit" needs no new call.
+    expect(text).toContain('labels(action="create"');
   });
 
   it('caps the batch and says what it did not run', async () => {
@@ -279,8 +327,104 @@ describe('labels(action="search") with query[]', () => {
     expect((ctx.symbolIndex.searchLabels as any).mock.calls.length).toBe(2);
     expect(text).toContain('2 duplicate phrasing(s) folded');
     // The caller's own first spelling is what reads back.
-    expect(text).toContain('## "customer"');
-    expect(text).not.toContain('## "Customer"');
+    expect(text).toContain('"customer"');
+    expect(text).not.toContain('"Customer"');
+  });
+
+  // Run f7130bea: six batches of phrasings, ~23 AIU, plus two raw reads of the
+  // .label.txt files — and the answer was settled by the first batch. Every result
+  // already said "rephrasing does not help"; advice stated in the abstract is easy
+  // to argue with, the same advice listing what you already asked is not.
+  it('says nothing about repetition on the first miss', async () => {
+    (ctx.symbolIndex.searchLabels as any).mockReturnValue([]);
+
+    const text = (await labelsTool(
+      req('labels', { action: 'search', query: ['cannot be decreased', 'downgrade'] }),
+      ctx,
+    )).content[0].text as string;
+
+    expect(text).not.toContain('This is not new information');
+  });
+
+  it('names the earlier phrasings when the caller comes back to rephrase', async () => {
+    (ctx.symbolIndex.searchLabels as any).mockReturnValue([]);
+
+    await labelsTool(req('labels', { action: 'search', query: ['cannot be decreased', 'downgrade'] }), ctx);
+    const text = (await labelsTool(
+      req('labels', { action: 'search', query: ['value must not drop'] }),
+      ctx,
+    )).content[0].text as string;
+
+    expect(text).toContain('This is not new information');
+    expect(text).toContain('2 phrasing(s) already came back empty');
+    expect(text).toContain('"cannot be decreased"');
+    // Its own phrasings are the current answer, not evidence of repetition.
+    expect(text).not.toMatch(/already came back empty here:[^\n]*value must not drop/);
+  });
+
+  it('keeps quiet about a phrasing that DID find something', async () => {
+    (ctx.symbolIndex.searchLabels as any).mockReturnValue([
+      makeLabelResult({ labelId: 'CustomerName', text: 'Customer name', labelFileId: 'MyModel', model: 'MyModel' }),
+    ]);
+    await labelsTool(req('labels', { action: 'search', query: ['customer'] }), ctx);
+
+    (ctx.symbolIndex.searchLabels as any).mockReturnValue([]);
+    const text = (await labelsTool(req('labels', { action: 'search', query: ['nothing at all'] }), ctx))
+      .content[0].text as string;
+
+    expect(text).not.toContain('This is not new information');
+  });
+
+  // Run 7b8de4ba: five batches in a row drew "at least one label this model can
+  // resolve came back" — each because ONE phrasing had landed on an unrelated SYS
+  // label — so the repeat notice (fruitless phrasings only) stayed nearly silent
+  // and nothing ever said stop. ~49 AIU, then the caller went off to read the
+  // .label.txt files by hand and ask the user. The count is what ends that, so it
+  // counts calls and rides on whichever verdict follows.
+  it('stops the caller by call count even when every batch keeps hitting', async () => {
+    (ctx.symbolIndex.searchLabels as any).mockReturnValue([
+      makeLabelResult({ labelId: 'OrderType', text: 'Order type cannot be changed', labelFileId: 'SYS', model: 'ApplicationSuite' }),
+    ]);
+
+    const search = (q: string[]) => labelsTool(req('labels', { action: 'search', query: q }), ctx);
+
+    const first = (await search(['cannot be decreased'])).content[0].text as string;
+    const second = (await search(['downgrade not allowed'])).content[0].text as string;
+    expect(first).not.toContain('STOP');
+    expect(second).not.toContain('STOP');
+
+    const third = (await search(['value cannot be lower'])).content[0].text as string;
+    expect(third).toContain('that was label search call 3 this session');
+    // The hits verdict is still the hits verdict — the stop rides on it.
+    expect(third).toMatch(/at least one label this model can resolve came back/i);
+    // Names the escalations that follow the loop, which cost more than it did.
+    expect(third).toContain('read the .label.txt files by hand');
+    expect(third).toContain('do not ask the user');
+    // And the way out is right there.
+    expect(third).toContain('labels(action="create"');
+  });
+
+  it('counts phrasings that missed and phrasings that hit as the same call', async () => {
+    (ctx.symbolIndex.searchLabels as any).mockReturnValue([]);
+    await labelsTool(req('labels', { action: 'search', query: ['a', 'b', 'c'] }), ctx);
+    await labelsTool(req('labels', { action: 'search', query: ['d'] }), ctx);
+
+    const text = (await labelsTool(req('labels', { action: 'search', query: ['e'] }), ctx))
+      .content[0].text as string;
+
+    expect(text).toContain('that was label search call 3 this session');
+    expect(text).toContain('(5 phrasing(s) in total)');
+  });
+
+  it('stops a single-string caller on the same count', async () => {
+    (ctx.symbolIndex.searchLabels as any).mockReturnValue([]);
+    await labelsTool(req('labels', { action: 'search', query: 'first' }), ctx);
+    await labelsTool(req('labels', { action: 'search', query: 'second' }), ctx);
+
+    const text = (await labelsTool(req('labels', { action: 'search', query: 'third' }), ctx))
+      .content[0].text as string;
+
+    expect(text).toContain('that was label search call 3 this session');
   });
 
   it('does not report a failed batch as "no reusable label exists"', async () => {
@@ -936,10 +1080,10 @@ describe('create_label', () => {
       ctx,
     );
     expect(result.isError).toBeFalsy();
-    expect(writes.some(w => w.path.endsWith('MyModel.en-US.label.txt'))).toBe(true);
-    expect(writes.some(w => w.path.endsWith('MyModel.fi.label.txt'))).toBe(true);
-    expect(writes.some(w => w.path.endsWith('MyModel.lt.label.txt'))).toBe(true);
-    expect(writes.some(w => w.path.endsWith('MyModel.nb-NO.label.txt'))).toBe(true);
+    expect(writes.some(w => writeTargets(w.path, 'MyModel.en-US.label.txt'))).toBe(true);
+    expect(writes.some(w => writeTargets(w.path, 'MyModel.fi.label.txt'))).toBe(true);
+    expect(writes.some(w => writeTargets(w.path, 'MyModel.lt.label.txt'))).toBe(true);
+    expect(writes.some(w => writeTargets(w.path, 'MyModel.nb-NO.label.txt'))).toBe(true);
   });
 
   it('writes ONLY the requested locales when `languages` is provided', async () => {
@@ -966,10 +1110,10 @@ describe('create_label', () => {
     );
     expect(result.isError).toBeFalsy();
     // en-US written; fi / lt / nb-NO must NOT be touched (no stray placeholder files)
-    expect(writes.some(w => w.path.endsWith('MyModel.en-US.label.txt'))).toBe(true);
-    expect(writes.some(w => w.path.endsWith('MyModel.fi.label.txt'))).toBe(false);
-    expect(writes.some(w => w.path.endsWith('MyModel.lt.label.txt'))).toBe(false);
-    expect(writes.some(w => w.path.endsWith('MyModel.nb-NO.label.txt'))).toBe(false);
+    expect(writes.some(w => writeTargets(w.path, 'MyModel.en-US.label.txt'))).toBe(true);
+    expect(writes.some(w => writeTargets(w.path, 'MyModel.fi.label.txt'))).toBe(false);
+    expect(writes.some(w => writeTargets(w.path, 'MyModel.lt.label.txt'))).toBe(false);
+    expect(writes.some(w => writeTargets(w.path, 'MyModel.nb-NO.label.txt'))).toBe(false);
     // and no orphaned XML descriptors for the unrequested locales
     expect(writes.some(w => w.path.endsWith('MyModel_lt.xml'))).toBe(false);
     expect(writes.some(w => w.path.endsWith('MyModel_nb-NO.xml'))).toBe(false);
@@ -1003,10 +1147,10 @@ describe('create_label', () => {
       ctx,
     );
     expect(result.isError).toBeFalsy();
-    expect(writes.some(w => w.path.endsWith('MyModel.en-US.label.txt'))).toBe(true);
-    expect(writes.some(w => w.path.endsWith('MyModel.sv.label.txt'))).toBe(true);
+    expect(writes.some(w => writeTargets(w.path, 'MyModel.en-US.label.txt'))).toBe(true);
+    expect(writes.some(w => writeTargets(w.path, 'MyModel.sv.label.txt'))).toBe(true);
     // fi / lt / nb-NO never requested and not present — must not appear
-    expect(writes.some(w => w.path.endsWith('MyModel.fi.label.txt'))).toBe(false);
+    expect(writes.some(w => writeTargets(w.path, 'MyModel.fi.label.txt'))).toBe(false);
   });
 
   it('resolves to on-disk casing when `languages` locale differs in case (Linux unzip)', async () => {
@@ -1525,7 +1669,7 @@ describe('rename_label', () => {
     );
     if (result.isError) throw new Error(`rename_label failed: ${result.content[0].text}`);
     expect(result.isError).toBeFalsy();
-    const labelWrite = writeCalls.find(c => c.path.endsWith('.label.txt'));
+    const labelWrite = writeCalls.find(c => writeTargets(c.path, '.label.txt'));
     expect(labelWrite).toBeDefined();
     // Renamed line must use CRLF, and surrounding lines must not be silently downgraded to LF
     expect(labelWrite!.content).toContain('NewFeatureName=Some text\r\n');
@@ -1562,7 +1706,7 @@ describe('rename_label', () => {
     );
     if (result.isError) throw new Error(`rename_label failed: ${result.content[0].text}`);
     expect(result.isError).toBeFalsy();
-    const labelWrite = writeCalls.find(c => c.path.endsWith('.label.txt'));
+    const labelWrite = writeCalls.find(c => writeTargets(c.path, '.label.txt'));
     expect(labelWrite).toBeDefined();
     // Renamed line must keep LF — tool must not upgrade a LF file to CRLF.
     expect(labelWrite!.content).toContain('NewFeatureName=Some text\n');
@@ -1780,6 +1924,13 @@ describe('labels dispatcher: action aliases + errors', () => {
       ctx,
     );
     // searchText is mapped to query, so the search runs instead of failing validation.
-    expect(r.content?.[0]?.text ?? '').not.toMatch(/expected string, received undefined|missing|required/i);
+    // Matched against the shapes a zod failure actually takes, not the bare words
+    // "missing"/"required" anywhere in the reply: the no-hit advice now names
+    // `createIfMissing` (the one call that replaces search-then-create), and the
+    // old broad regex read that as a validation error.
+    const text = r.content?.[0]?.text ?? '';
+    expect(text).not.toMatch(/expected string, received undefined/i);
+    expect(text).not.toContain('invalid arguments');
+    expect(text).not.toMatch(/\bquery\b[^\n]*\bis required\b/i);
   });
 });

@@ -36,7 +36,11 @@ export const GENERATE_OBJECT_PARAM_SPECS: Record<string, { type: string; descrip
     description:
       'REQUIRED. CoC skeletons: class/table-extension, form-handler, form-datasource-extension ' +
       '(name=FormName, baseName=DataSourceName), form-control-extension (name=FormName, baseName=ControlName), ' +
-      'map-extension. ssrs-report-full = Contract+DP+Controller; service-class-ais = CRUD service + contract.',
+      'map-extension. ssrs-report-full = Contract+DP+Controller; service-class-ais = CRUD service + contract. ' +
+      'Extending a STANDARD report: report-dataset-extension (name=DP class, baseName=its temp table, ' +
+      'optional datasetAccessor), report-custom-design (name=standard report, baseName=its controller, ' +
+      'documentType, designName), report-menu-redirect (name=controller, baseName=your report, designName). ' +
+      'Recipes with the metadata half: object_patterns(domain="report").',
   },
   menuItemType: {
     type: 'string (display | action | output)',
@@ -52,16 +56,46 @@ export const GENERATE_OBJECT_PARAM_SPECS: Record<string, { type: string; descrip
     type: 'string',
     description: 'For the menu-item and security-privilege patterns: target form/class/report name.',
   },
+  testMethods: {
+    type: 'string[]',
+    description:
+      'systest: target-class methods to write a test for — one [SysTestMethod] each. ' +
+      'Every generated test fails until its assertion is written, which is what makes the ' +
+      'first run meaningful. Read the method names from get_object_info(objectType="class").',
+  },
   serviceMethod: {
     type: 'string',
     description: 'sysoperation: service method the Controller calls (default "process").',
+  },
+  datasetAccessor: {
+    type: 'string',
+    description:
+      'report-dataset-extension: the data provider method returning the dataset buffer — the one ' +
+      'carrying [SRSReportDataSetAttribute(tableStr(<TmpTable>))]. It CANNOT be derived from the table ' +
+      'name (the platform ships "geAssetBarCodeTmp"), so read it with get_object_info. Given it, you get ' +
+      'the bulk [PostHandlerFor] shape; omit it for the per-row [DataEventHandler], which needs no accessor.',
+  },
+  documentType: {
+    type: 'string',
+    description:
+      'report-custom-design: the PrintMgmtDocumentType literal to override, e.g. "SalesOrderInvoice".',
+  },
+  designName: {
+    type: 'string',
+    description:
+      'report-custom-design / report-menu-redirect: the DESIGN name inside the AxReport (commonly ' +
+      '"Report", but read it off the report — ssrsReportStr checks it at compile time).',
   },
   // mode=scaffold
   objectType: { type: 'string (table | form | report)', description: 'REQUIRED. Kind of object to generate.' },
   label: { type: 'string', description: 'Optional label for the generated object.' },
   caption: {
     type: 'string',
-    description: 'Optional caption/title (form: window title; report: human-readable report title).',
+    description: 'Optional caption/title (form: window title; report: human-readable report title). ' +
+      'Pass a label ID ("@Module:LabelId") to also label the objects: for a report it becomes the ' +
+      'Label of the tmp table and the output menu item. Prose titles the RDL header only — a Label ' +
+      'property must hold a label ID, so anything else leaves those objects unlabelled rather than ' +
+      'earning them a BPErrorLabelIsText.',
   },
   packagePath: { type: 'string', description: 'Base packages directory path.' },
   tableGroup: {
@@ -120,6 +154,26 @@ export const GENERATE_OBJECT_PARAM_SPECS: Record<string, { type: string; descrip
       '("Header" → <Report>HeaderTmp).',
   },
   generateController: { type: 'boolean', description: 'Generate the Controller class (default: true).' },
+  aotQuery: {
+    type: 'string',
+    description: 'AOT query name — DP gains [SRSReportQueryAttribute] and a query-based processReport() via this.parmQuery().',
+  },
+  callerTableName: {
+    type: 'string',
+    description: 'Caller record table (e.g. "CustTable") — Controller pre-fills the contract from args.record() in prePromptModifyContract().',
+  },
+  preProcess: {
+    type: 'boolean',
+    description: 'DP extends SrsReportDataProviderPreProcessTempDB (long-running reports: data staged on the AOS before the render request; TempDB pairing, [SRSReportParameterAttribute] kept, no extra hook method — processReport() is the pre-processing step).',
+  },
+  controllerType: {
+    type: 'string',
+    description: '"simple" (default — SrsReportRunController) or "printMgmt" (SrsPrintMgmtController with the abstract runPrintMgmt() implemented and an initPrintMgmtReportRun() whose PrintMgmtReportRun::construct(hierarchy, node, documentType) placeholders you replace — there is no parmPrintMgmtDocType).',
+  },
+  uiBuilder: {
+    type: 'boolean',
+    description: 'Also emit a <Name>UIBuilder class (extends SrsReportDataContractUIBuilder) and bind it on the contract via [SysOperationContractProcessing] — for custom dialog lookups/events.',
+  },
   designStyle: {
     type: 'string',
     description: 'RDL design pattern: "SimpleList" (default) or "GroupedWithTotals".',
@@ -164,7 +218,10 @@ export interface GenerateObjectModeSpec {
 export const GENERATE_OBJECT_MODE_SPECS: Record<string, GenerateObjectModeSpec> = {
   pattern: {
     required: ['name', 'pattern'],
-    optional: ['menuItemType', 'baseName', 'targetObject', 'serviceMethod', 'modelName'],
+    optional: [
+      'menuItemType', 'baseName', 'targetObject', 'serviceMethod', 'testMethods', 'modelName',
+      'datasetAccessor', 'documentType', 'designName',
+    ],
     note:
       'Text only, no write. Call analyze_code(mode="patterns") first, then generate_object(mode="pattern"), ' +
       'then d365fo_file(action="create") to write the result.',
@@ -197,7 +254,9 @@ export const GENERATE_OBJECT_MODE_SPECS: Record<string, GenerateObjectModeSpec> 
     optional: [
       'caption', 'packagePath', 'fields', 'fieldsHint', 'contractParams', 'additionalDatasets',
       'generateController', 'designStyle', 'copyFrom', 'modelName', 'projectPath', 'solutionPath',
+      'aotQuery', 'callerTableName', 'preProcess', 'controllerType', 'uiBuilder',
     ],
+    note: 'Pattern recipes (roster + when-to-use): object_patterns(domain="report").',
   },
   'find-methods': {
     required: ['name'],
@@ -246,11 +305,10 @@ export function renderGenerateObjectSpec(mode: string): string {
     );
   }
   const lines = [
-    `(Fetch this spec any time with get_knowledge(kind="op-spec", topic="${mode}").)`,
     `Parameter spec for generate_object(mode="${mode.split(':')[0]}") — pass anything beyond ` +
-    `mode/name/pattern/objectType/modelName NESTED inside \`params\`. (Flat top-level keys still reach the ` +
-    `handler, but strict MCP clients validate against the published wire schema and drop undeclared keys ` +
-    `before they arrive here, which then surfaces as a missing-parameter error naming the wrong cause.)`,
+    `mode/name/pattern/objectType/modelName NESTED inside \`params\` ` +
+    `(strict MCP clients drop undeclared top-level keys). ` +
+    `Re-fetch: get_knowledge(kind="op-spec", topic="${mode}").`,
     ...spec.required.map(p => renderParamLine(p, 'REQUIRED')),
     ...spec.optional.map(p => renderParamLine(p, 'optional')),
   ];

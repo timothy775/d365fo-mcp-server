@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'child_process';
 import util from 'util';
 import path from 'path';
-import { access, writeFile, readFile, unlink, appendFile, readdir, stat } from 'fs/promises';
+import { access, writeFile, readFile, unlink, appendFile, readdir, rm, stat } from 'fs/promises';
 import { openSync as openSyncFs, closeSync as closeSyncFs } from 'fs';
 import os from 'os';
 import crypto from 'crypto';
@@ -62,38 +62,127 @@ export interface XppcDiagnostic {
   message: string;
 }
 
-const XPPC_DIAG_LINE_RE =
-  /^(Compile Fatal Error|Compile Error|Compile Warning|Generation Warning|Best Practice Warning):\s*(?:(.*?)\s+)?dynamics:\/\/([^/\s:]+)\/([^/\s:]+)(?:\/([^\s:]+))?\s*:?\s*\[\((\d+),(\d+)\)(?:,\(\d+,\d+\))?\]\s*:\s*(.*)$/;
+/**
+ * The severity prefix every xppc diagnostic line opens with, as a family rather
+ * than a list of literals: xppc also emits `Metadata` and
+ * `FormPatternValidation` errors, which a five-literal list reported as zero —
+ * a FAILED build with no stated cause.
+ */
+const DIAG_PREFIX = String.raw`(?:([A-Za-z][A-Za-z ]{0,30}?)\s)?(Fatal Error|Error|Warning)`;
+
+/** Prefix-only test, for deciding which log lines are worth keeping in an excerpt. */
+export const DIAG_LINE_TEST = new RegExp(String.raw`^${DIAG_PREFIX}:\s`);
+
+/** `<Kind> <Severity>: [<elementKind> ]dynamics://Model/Object[/Member]: [(l,c)…]: message` */
+const XPPC_DIAG_DYNAMICS_RE = new RegExp(
+  String.raw`^${DIAG_PREFIX}:\s*(?:(.*?)\s+)?dynamics:\/\/([^/\s:]+)\/([^/\s:]+)(?:\/([^\s:]+))?\s*:?\s*\[\((\d+),(\d+)\)(?:,\(\d+,\d+\))?\]\s*:\s*(.*)$`,
+);
+
+/** `<Kind> <Severity>: AxFormExtension/Name/Design/Controls/…: message` — no line/col. */
+const XPPC_DIAG_PATH_RE = new RegExp(
+  String.raw`^${DIAG_PREFIX}:\s*(Ax[A-Za-z]+)\/([^\s:]+)\s*:\s*(.*)$`,
+);
+
+/** `<Kind> <Severity>: message` */
+const XPPC_DIAG_PLAIN_RE = new RegExp(String.raw`^${DIAG_PREFIX}:\s*(.+)$`);
+
+/** xppc's own tally at the end of the log, to catch a parser shortfall. */
+const XPPC_ERROR_TOTAL_RE = /^Errors:\s*(\d+)\s*$/m;
+
+/** Errors xppc counted in this log, or null when it printed no tally. */
+export function xppcReportedErrorCount(logContent: string): number | null {
+  const m = XPPC_ERROR_TOTAL_RE.exec(logContent);
+  return m ? Number(m[1]) : null;
+}
 
 /** Parse xppc log content into structured diagnostics. */
 export function parseXppcDiagnostics(logContent: string): XppcDiagnostic[] {
   const diagnostics: XppcDiagnostic[] = [];
   for (const rawLine of logContent.split(/\r?\n/)) {
     const line = rawLine.trim();
-    const m = XPPC_DIAG_LINE_RE.exec(line);
-    if (m) {
+
+    const dyn = XPPC_DIAG_DYNAMICS_RE.exec(line);
+    if (dyn) {
       diagnostics.push({
-        severity: m[1].includes('Error') ? 'error' : 'warning',
-        kind: m[2] || undefined,
-        model: m[3],
-        object: m[4],
-        member: m[5] || undefined,
-        line: Number(m[6]),
-        column: Number(m[7]),
-        message: m[8].trim(),
+        severity: dyn[2].includes('Error') ? 'error' : 'warning',
+        kind: dyn[3] || dyn[1] || undefined,
+        model: dyn[4],
+        object: dyn[5],
+        member: dyn[6] || undefined,
+        line: Number(dyn[7]),
+        column: Number(dyn[8]),
+        message: dyn[9].trim(),
       });
       continue;
     }
-    // Fallback: severity prefix without the dynamics:// location part
-    const simple = /^(Compile Fatal Error|Compile Error|Compile Warning|Generation Warning):\s*(.+)$/.exec(line);
-    if (simple) {
+
+    const pathForm = XPPC_DIAG_PATH_RE.exec(line);
+    if (pathForm) {
+      // "AxFormExtension/MyForm.Ext/Design/Controls/Grid/Foo" — the element is the
+      // first segment, the rest locates the member inside it.
+      const [objectName, ...rest] = pathForm[4].split('/');
       diagnostics.push({
-        severity: simple[1].includes('Error') ? 'error' : 'warning',
-        message: simple[2].trim(),
+        severity: pathForm[2].includes('Error') ? 'error' : 'warning',
+        kind: pathForm[1] || undefined,
+        model: pathForm[3],
+        object: objectName,
+        member: rest.length > 0 ? rest.join('/') : undefined,
+        message: pathForm[5].trim(),
+      });
+      continue;
+    }
+
+    const plain = XPPC_DIAG_PLAIN_RE.exec(line);
+    if (plain) {
+      diagnostics.push({
+        severity: plain[2].includes('Error') ? 'error' : 'warning',
+        kind: plain[1] || undefined,
+        message: plain[3].trim(),
       });
     }
   }
   return diagnostics;
+}
+
+/**
+ * What to say when the compiler failed and this parser cannot show why.
+ *
+ * A FAILED headline over a list of warnings reads as though the warnings are
+ * the cause, and invites deleting whatever is nearest to clear the red. Name
+ * the gap instead. Returns '' when the parsed errors do explain the failure.
+ */
+export function renderUnexplainedFailure(
+  parsed: XppcDiagnostic[],
+  logContent: string,
+): string {
+  const parsedErrors = parsed.filter(d => d.severity === 'error').length;
+  const reported = xppcReportedErrorCount(logContent);
+
+  if (parsedErrors > 0 && (reported === null || parsedErrors >= reported)) return '';
+
+  const lines: string[] = [];
+  if (parsedErrors === 0) {
+    lines.push(
+      `⚠️ The build FAILED but this server parsed **no error diagnostic** from the log` +
+      (reported !== null ? ` (xppc's own tally says: Errors: ${reported})` : '') + '.',
+    );
+    lines.push(
+      `Any warnings listed below are NOT the failure — do not treat them as the cause. ` +
+      `Read the raw log at the end of this response; the failing line is in there in a ` +
+      `format this parser did not recognise.`,
+    );
+  } else {
+    lines.push(
+      `⚠️ xppc counted ${reported} error(s) but only ${parsedErrors} could be parsed into the list below. ` +
+      `The rest are in the raw log.`,
+    );
+  }
+  lines.push(
+    `⛔ Do NOT delete, undo or unregister an object to make the build pass. A green build ` +
+    `you obtained by removing the thing you were asked to create is a failed task, not a fixed one. ` +
+    `If you cannot find the cause, say so and ask.`,
+  );
+  return lines.join('\n');
 }
 
 /**
@@ -306,6 +395,97 @@ async function readLogTail(logFile: string, lines = 60): Promise<string> {
   }
 }
 
+/**
+ * Log excerpt for a SUCCEEDED build.
+ *
+ * A green build returned the raw 60-line tail, which is almost entirely xppc's
+ * phase-timing table — measured at ~2.6 KB of a ~3.1 KB response — and nothing
+ * downstream reads a timing row. Keep the lines a green build can still say
+ * something with: the diagnostic (warning) lines, and the trailing summary counts.
+ *
+ * The input is deliberately the same 60-line tail the raw version returned, so
+ * the warnings verdict computed from that tail is unchanged by this trim; a
+ * warning that never reached the tail was already invisible before.
+ */
+export function trimSucceededLog(logTail: string, keepTail = 12): string {
+  const all = logTail.split(/\r?\n/);
+  // Nothing to win on a log that is already short.
+  if (all.length <= keepTail + 8) return logTail;
+
+  const summaryFrom = all.length - keepTail;
+  const diagnostics: string[] = [];
+  let omitted = 0;
+  for (let i = 0; i < summaryFrom; i++) {
+    if (isWorthKeeping(all[i])) diagnostics.push(all[i]);
+    else omitted++;
+  }
+  if (omitted === 0) return logTail;
+
+  return (
+    `[${omitted} phase-timing line(s) omitted — build succeeded]\n` +
+    [...diagnostics, ...all.slice(summaryFrom)].join('\n').trim()
+  );
+}
+
+/**
+ * Which lines of a GREEN build's tail survive the trim.
+ *
+ * DIAG_LINE_TEST is anchored and case-sensitive — it wants `[Kind ]Error: ` or
+ * `[Kind ]Warning: ` at the start of the line, which is exactly xppc's shape and
+ * nothing else. Verified: it keeps `Metadata Warning:`, `Compile Error:`,
+ * `BEST PRACTICE Warning:` and a bare `Warning:`, and drops a lowercase
+ * `warning:` and the MSBuild shape `MyTable.xpp(12,3): warning CS1234:`.
+ *
+ * On the FAILURE path that is harmless — non-matching lines still arrive through
+ * the head/tail fallback. On this path they are dropped outright, so a warning in
+ * a shape xppc does not normally emit would vanish from a green build entirely;
+ * hasWarnings uses the same test, so it would not even set the ⚠️ icon.
+ *
+ * The costs are not symmetric: a handful of extra lines is nothing, a silently
+ * dropped warning is the thing this function must not do. So anything that
+ * MENTIONS an error or a warning is kept too, whatever its shape.
+ */
+function isWorthKeeping(line: string): boolean {
+  return DIAG_LINE_TEST.test(line.trim()) || /\b(error|warning)s?\b/i.test(line);
+}
+
+/**
+ * The log section of a FAILED build's response.
+ *
+ * `build_d365fo_project` is deliberately 'uncapped' in the response capper, and
+ * a failure used to return BOTH the structured diagnostics (up to 25) AND up to
+ * 300 lines of raw log — measured at the host's logging cap on all 43 build
+ * calls in a 1,400-call sample, 13 of them failures. Every byte of that lands in
+ * the context and is re-billed on every later request in the session.
+ *
+ * So the raw log is included in full only in the case it is actually evidence
+ * for: the parser produced NO structured diagnostic, so the raw text is the only
+ * statement of why the build failed (this is the case renderUnexplainedFailure
+ * points at — "read the raw log at the end of this response"). When diagnostics
+ * WERE parsed they already carry object, member, line, column and message, and
+ * the raw log restates them inside a phase table; a short tail is enough to see
+ * the summary counts, and the path is enough to read the rest on demand.
+ */
+export async function renderFailureLog(
+  logFile: string,
+  /**
+   * Do the parsed diagnostics EXPLAIN the failure — i.e. is at least one of them
+   * an error? Callers used to pass `parsed.length > 0`, which counts warnings:
+   * a build that failed in a shape the regexes do not match, but whose log
+   * carries BP warnings, then got a 40-line tail instead of the log, and the
+   * error that actually stopped it is rarely in the last 40 lines.
+   */
+  hasStructuredDiagnostics: boolean,
+): Promise<string> {
+  if (!hasStructuredDiagnostics) return await readFullLog(logFile);
+  const tail = await readLogTail(logFile, FAILURE_TAIL_LINES);
+  return `[last ${FAILURE_TAIL_LINES} lines — the diagnostics above are parsed from the same log; ` +
+    `full log: ${logFile}]\n${tail}`;
+}
+
+/** How much of a failed build's log is worth carrying once the diagnostics are parsed. */
+const FAILURE_TAIL_LINES = 40;
+
 /** Read the entire log without truncation — used for diagnostics parsing only. */
 async function readWholeLog(logFile: string): Promise<string> {
   try {
@@ -315,14 +495,36 @@ async function readWholeLog(logFile: string): Promise<string> {
   }
 }
 
+/** First and last line of the verbatim xppc invocation written at the top of every build log. */
+const INVOCATION_HEADER_START = '=== xppc invocation ===';
+const INVOCATION_HEADER_END   = '=======================';
+
+/**
+ * Line indices of that invocation header, or [] if the log does not start with one.
+ *
+ * The header exists so a failed build can be traced back to the arguments that produced it —
+ * which root `-compilermetadata` pointed at, above all. A failed build is also the only time
+ * readFullLog takes its diagnostic-window path, and that path returns windows plus a tail, so
+ * without this the header reached the response only for logs short enough to be returned whole.
+ */
+function invocationHeaderRange(all: string[]): number[] {
+  if (all[0]?.trim() !== INVOCATION_HEADER_START) return [];
+  const end = all.findIndex((line, i) => i > 0 && line.trim() === INVOCATION_HEADER_END);
+  if (end === -1) return [];
+  // Bounded: a long extraReferenceFolders list must not crowd out the diagnostics.
+  const last = Math.min(end, 60);
+  return Array.from({ length: last + 1 }, (_, i) => i);
+}
+
 /**
  * Log excerpt for a failed build that always includes diagnostic lines. A
  * naive head+tail can miss errors when long phase-timing tables precede them,
  * so instead: find every diagnostic line, include a context window around
- * each, always include the trailing summary lines, and cap the number of
- * diagnostic windows shown (MAX_DIAGS) to bound the response size.
+ * each, always include the invocation header and the trailing summary lines,
+ * and cap the number of diagnostic windows shown (MAX_DIAGS) to bound the
+ * response size.
  */
-async function readFullLog(logFile: string, maxLines = 300): Promise<string> {
+export async function readFullLog(logFile: string, maxLines = 300): Promise<string> {
   const CONTEXT = 3;     // lines before/after each diagnostic
   const TAIL_LINES = 30; // always-included trailing lines
   const MAX_DIAGS = 30;  // cap on diagnostic windows to bound response size
@@ -332,10 +534,9 @@ async function readFullLog(logFile: string, maxLines = 300): Promise<string> {
     const all = content.split(/\r?\n/);
     if (all.length <= maxLines) return content.trim();
 
-    const DIAG_RE = /^(Compile Fatal Error|Compile Error|Compile Warning|Generation Warning|Best Practice Warning):/;
     const diagIndices: number[] = [];
     for (let i = 0; i < all.length; i++) {
-      if (DIAG_RE.test(all[i].trim())) diagIndices.push(i);
+      if (DIAG_LINE_TEST.test(all[i].trim())) diagIndices.push(i);
     }
 
     if (diagIndices.length > 0) {
@@ -343,6 +544,7 @@ async function readFullLog(logFile: string, maxLines = 300): Promise<string> {
       const shownDiags = diagIndices.slice(0, MAX_DIAGS);
 
       const included = new Set<number>();
+      for (const i of invocationHeaderRange(all)) included.add(i);
       for (const idx of shownDiags) {
         for (let i = Math.max(0, idx - CONTEXT); i <= Math.min(all.length - 1, idx + CONTEXT); i++) {
           included.add(i);
@@ -475,7 +677,87 @@ interface XppcBuildContext {
   xppcExe: string;
   customPackagesPath: string;
   microsoftPackagesPath: string;
+  /**
+   * The `-compilermetadata` root — where xppc READS the compiler metadata of
+   * referenced modules and, in its "Metadata Write-Back" phase, WRITES its own
+   * back. The write-back half is easy to miss, and it is why this is not simply
+   * `microsoftPackagesPath`: pointing it at the framework directory made every
+   * build deposit `<FrameworkDirectory>\<CustomModel>\XppMetadata`, leaving
+   * customer model names in a directory shared by every environment on the box.
+   *
+   * Pointing it at the model store instead is what VS does. Microsoft's own
+   * compiler metadata still resolves, because the framework directory is passed
+   * as a `-referenceFolder` (verified against 10.0.2645.90: a full compile of a
+   * customer model succeeded with `Errors: 0` and no unresolved-metadata
+   * diagnostic, and the write-back landed in the model store rather than the
+   * framework directory).
+   *
+   * It also removes an asymmetry that could only hurt `-incremental`, which is
+   * the DEFAULT here: VS wrote its baseline to the model store and nothing
+   * copied it back, so an MCP build following a VS build compared against
+   * metadata predating it. Both tools now share one baseline.
+   */
+  compilerMetadataPath: string;
   extraReferenceFolders: string[];
+}
+
+/** Windows path comparison: case-insensitive, trailing separator and `.`/`..` normalised away. */
+function samePath(a: string, b: string): boolean {
+  const norm = (p: string) => path.resolve(p).replace(/[\\/]+$/, '').toLowerCase();
+  return norm(a) === norm(b);
+}
+
+/**
+ * Delete the compiler-metadata stub an earlier build left in the framework directory.
+ *
+ * While `-compilermetadata` pointed at the framework directory, every build of a customer
+ * model deposited `<FrameworkDirectory>\<Model>\XppMetadata` there. Now that the write-back
+ * goes to the model store, those trees are never refreshed again — and the framework
+ * directory is still passed as a `-referenceFolder`, so xppc keeps finding a `<Model>` folder
+ * that looks like a package and holds metadata frozen at the last build before the switch.
+ * That is how "has not been successfully compiled since it was last changed" gets reported
+ * for source that was just compiled cleanly. Anything else enumerating the framework
+ * directory keeps seeing phantom customer models for the same reason.
+ *
+ * Deliberately narrow, because the framework directory is shared by every environment on the
+ * box: only when the two roots actually differ (UDE), only for a model that really lives in
+ * the model store, and only when the folder holds nothing but XppMetadata — i.e. it is a
+ * write-back stub and not a package deployed there on purpose. Anything unexpected is left
+ * alone and reported; a build is never failed over it.
+ */
+async function removeStaleFrameworkCompilerMetadata(
+  ctx: XppcBuildContext,
+  modelName: string,
+): Promise<void> {
+  const { microsoftPackagesPath, customPackagesPath, compilerMetadataPath } = ctx;
+
+  // CHE: one root, so the stub IS the live metadata.
+  if (samePath(microsoftPackagesPath, compilerMetadataPath)) return;
+  if (samePath(microsoftPackagesPath, customPackagesPath)) return;
+
+  const stubDir = path.join(microsoftPackagesPath, modelName);
+  try {
+    // Only a model whose authoritative copy is in the model store — never one that is
+    // genuinely installed in the framework directory and merely also named here.
+    await access(path.join(customPackagesPath, modelName));
+    const entries = await readdir(stubDir);
+    if (entries.length === 0) return;
+    if (entries.some(e => e.toLowerCase() !== 'xppmetadata')) {
+      await buildLog(
+        'INFO',
+        `Left ${stubDir} alone — it holds more than XppMetadata (${entries.join(', ')}), so it is not a stale write-back stub`,
+      );
+      return;
+    }
+    await rm(stubDir, { recursive: true, force: true });
+    await buildLog('INFO', `Removed stale compiler-metadata stub left by an earlier build: ${stubDir}`);
+  } catch (err: any) {
+    // ENOENT on either probe is the normal case: no stub, or the model is not in the
+    // model store. Anything else (a lock, a permission) is worth saying out loud once.
+    if (err?.code !== 'ENOENT') {
+      await buildLog('WARN', `Could not clean up ${stubDir}: ${err?.message ?? err}`);
+    }
+  }
 }
 
 /**
@@ -485,7 +767,7 @@ interface XppcBuildContext {
  * Returns the PID of the spawned process.
  */
 async function spawnXppcForState(ctx: XppcBuildContext, state: BuildJobState): Promise<number> {
-  const { xppcExe, customPackagesPath, microsoftPackagesPath, extraReferenceFolders } = ctx;
+  const { xppcExe, customPackagesPath, microsoftPackagesPath, compilerMetadataPath, extraReferenceFolders } = ctx;
   const { modelName, fullBuild, targetModel } = state;
 
   // fullBuild only applies to the TARGET model — dependencies always run
@@ -498,6 +780,9 @@ async function spawnXppcForState(ctx: XppcBuildContext, state: BuildJobState): P
   assertSafePath(modelName, 'Model name');
   assertSafePath(customPackagesPath, 'Custom packages path');
   assertSafePath(microsoftPackagesPath, 'Microsoft packages path');
+  assertSafePath(compilerMetadataPath, 'Compiler metadata path');
+
+  await removeStaleFrameworkCompilerMetadata(ctx, modelName);
 
   const outputPath = path.join(customPackagesPath, modelName, 'bin');
   const xppcErrLog = state.logFile.replace('.log', '.xppc.err');
@@ -517,7 +802,8 @@ async function spawnXppcForState(ctx: XppcBuildContext, state: BuildJobState): P
 
   const xppcArgs = [
     `-metadata=${customPackagesPath}`,
-    `-compilermetadata=${microsoftPackagesPath}`,
+    // Not microsoftPackagesPath — see XppcBuildContext.compilerMetadataPath.
+    `-compilermetadata=${compilerMetadataPath}`,
     `-modelmodule=${modelName}`,
     ...referenceFolderArgs,
     `-output=${outputPath}`,
@@ -546,9 +832,27 @@ async function spawnXppcForState(ctx: XppcBuildContext, state: BuildJobState): P
     await buildLog('WARN', `labelc did not compile ${modelName} labels: ${labelResult.message}`);
   }
 
-  // Truncate the log with the label outcome, then append xppc's output to it,
-  // so a single tail read shows the whole build in the order it happened.
-  await writeFile(state.logFile, labelHeader, 'utf-8');
+  // The invocation, verbatim, at the top of the log. buildLog() already reports
+  // it, but only to stderr and to bridgeLogFile — and bridgeLogFile only exists
+  // when D365FO_BRIDGE_LOG_FILE is configured. Neither is the file anyone opens
+  // when auditing a build afterwards, so a question as basic as "which root did
+  // -compilermetadata point at" could not be answered from the build log at all.
+  // Recording it here makes a regression in these arguments directly greppable.
+  // The markers are shared with invocationHeaderRange(), which keeps these lines in the
+  // excerpt readFullLog returns for a failed build — the case the header is written for.
+  const invocationHeader = [
+    INVOCATION_HEADER_START,
+    xppcExe,
+    ...xppcArgs.map(arg => `  ${arg}`),
+    INVOCATION_HEADER_END,
+    '',
+    '',
+  ].join('\n');
+
+  // Truncate the log with the invocation and label outcome, then append xppc's
+  // output to it, so a single tail read shows the whole build in the order it
+  // happened.
+  await writeFile(state.logFile, invocationHeader + labelHeader, 'utf-8');
   const logFd = openSyncFs(state.logFile, 'a');
 
   const child = spawn(xppcExe, xppcArgs, {
@@ -683,6 +987,7 @@ async function spawnXppcForState(ctx: XppcBuildContext, state: BuildJobState): P
       microsoftPackagesPath,
       customPackagesPath,
       liveState.targetModel,
+      compilerMetadataPath,
     );
     if (metaResult.skipped) {
       await buildLog('WARN', `Runtime metadata regeneration skipped: ${metaResult.message}`);
@@ -732,6 +1037,9 @@ async function renderFinishedBuildResult(
   targetModel: string,
   /** Where to leave the last-build note; omitted when no symbol index is attached. */
   dataDir?: string,
+  /** The tool's own arguments, for the opt-in post-build BP check. */
+  params?: any,
+  context?: any,
 ): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> {
   const succeeded  = finalState.status === 'succeeded';
   const isQueued   = !!(finalState.buildQueue && finalState.buildQueue.length > 1);
@@ -748,17 +1056,21 @@ async function renderFinishedBuildResult(
       ? allResults[allResults.length - 1]
       : allResults.find(r => r.status === 'failed');
     const relevantLogFile = relevantResult?.logFile ?? finalState.logFile;
+    const wholeLog = succeeded ? '' : await readWholeLog(relevantLogFile);
+    const parsed = succeeded ? [] : parseXppcDiagnostics(wholeLog);
+    const structured = succeeded ? '' : formatStructuredDiagnostics(parsed);
+    const unexplained = succeeded ? '' : renderUnexplainedFailure(parsed, wholeLog);
+    // Parse FIRST: how much raw log is worth carrying depends on whether the
+    // diagnostics already explain the failure — see renderFailureLog.
     const logContent = succeeded
-      ? await readLogTail(relevantLogFile)
-      : await readFullLog(relevantLogFile);
-    const structured = succeeded
-      ? ''
-      : formatStructuredDiagnostics(parseXppcDiagnostics(await readWholeLog(relevantLogFile)));
+      ? trimSucceededLog(await readLogTail(relevantLogFile))
+      : await renderFailureLog(relevantLogFile, parsed.some(d => d.severity === 'error'));
 
     return {
       content: [{
         type: 'text',
         text: `${statusIcon} — ${allResults.length} models, ${totalDuration}s total\n\n${modelLines}\n\n` +
+          (unexplained ? `${unexplained}\n\n` : '') +
           (structured ? `${structured}\n\n` : '') +
           `--- Log (${relevantResult?.modelName ?? targetModel}) ---\n${logContent}`,
       }],
@@ -767,16 +1079,21 @@ async function renderFinishedBuildResult(
   }
 
   const logTail       = await readLogTail(finalState.logFile);
-  const logContent    = succeeded ? logTail : await readFullLog(finalState.logFile);
-  const hasWarnings   = succeeded && /^(Generation Warning|Compile Warning):/m.test(logTail);
+  const hasWarnings   = succeeded && logTail.split(/\r?\n/).some(l => /Warning:\s/.test(l) && DIAG_LINE_TEST.test(l.trim()));
   const statusIcon    = !succeeded ? '❌ Build FAILED' : hasWarnings ? '⚠️ Build succeeded with warnings' : '✅ Build succeeded';
   const buildMode     = finalState.fullBuild ? 'full build (target), incremental (deps)' : 'incremental';
   const duration      = finalState.endTime
     ? Math.round((new Date(finalState.endTime).getTime() - new Date(finalState.startTime).getTime()) / 1000)
     : '?';
-  const structured    = succeeded
-    ? ''
-    : formatStructuredDiagnostics(parseXppcDiagnostics(await readWholeLog(finalState.logFile)));
+  const wholeLog      = succeeded ? '' : await readWholeLog(finalState.logFile);
+  const parsed        = succeeded ? [] : parseXppcDiagnostics(wholeLog);
+  const structured    = succeeded ? '' : formatStructuredDiagnostics(parsed);
+  const unexplained   = succeeded ? '' : renderUnexplainedFailure(parsed, wholeLog);
+  // Parse FIRST: how much raw log is worth carrying depends on whether the
+  // diagnostics already explain the failure — see renderFailureLog.
+  const logContent    = succeeded
+    ? trimSucceededLog(logTail)
+    : await renderFailureLog(finalState.logFile, parsed.some(d => d.severity === 'error'));
 
   // The note run_bp_check and verify_d365fo_project read, so a green verdict from a
   // tool that compiles nothing can say whether anything ever did.
@@ -788,16 +1105,125 @@ async function renderFinishedBuildResult(
     });
   }
 
+  // "compile, then check best practices" was the second most common pair in the
+  // sampled sessions (10 build -> run_bp_check hand-offs). Opt-in, and only on a
+  // green build: when the compile failed, the compiler errors ARE the answer and
+  // a BP report on half-built metadata is noise.
+  const bpSection = succeeded ? await runPostBuildBpCheck(params, targetModel, context) : '';
+  // Same shape, same reason, for the database sync: a table change is not
+  // finished until AxDB is synchronised, and that sync always follows a
+  // successful build. Gated on `succeeded` for the same reason bpCheck is —
+  // syncing metadata the compiler just rejected is worse than not syncing.
+  const sync = succeeded
+    ? await runPostBuildDbSync(params, targetModel, context)
+    : { section: '', failed: false };
+  const syncSection = sync.section;
+
   return {
     content: [{
       type: 'text',
       text: `${statusIcon} (${finalState.tool}, ${buildMode}, ${duration}s)\n\nModel: ${targetModel}\n` +
         incrementalScopeCaveat(succeeded, !!finalState.fullBuild) + '\n' +
-        (structured ? `${structured}\n\n--- Raw log ---\n` : '') +
-        `${logContent || '(no output)'}`,
+        (unexplained ? `${unexplained}\n\n` : '') +
+        (structured ? `${structured}\n\n` : '') +
+        `${logContent || '(no output)'}` + bpSection + syncSection,
     }],
-    ...((!succeeded) ? { isError: true } : {}),
+    // A failed sync is an error even though the compile passed: the caller asked
+    // for "build and sync", and half of that did not happen.
+    ...((!succeeded || sync.failed) ? { isError: true } : {}),
   };
+}
+
+/**
+ * Model-wide BP check appended to a successful build when bpCheck:true.
+ *
+ * Advisory by construction: any failure here is reported as a line, never as a
+ * failed build — the compile already succeeded and that verdict stands.
+ */
+async function runPostBuildBpCheck(
+  params: any,
+  targetModel: string,
+  context: any,
+): Promise<string> {
+  if (params?.bpCheck !== true && params?.bpCheck !== 'true') return '';
+  try {
+    const { runBpCheckTool } = await import('./runBpCheck.js');
+    const result: any = await runBpCheckTool(
+      { modelName: targetModel, projectPath: params?.projectPath, packagePath: params?.packagePath },
+      context,
+    );
+    const text = (result?.content ?? [])
+      .filter((c: any) => c?.type === 'text' && typeof c.text === 'string')
+      .map((c: any) => c.text)
+      .join('\n')
+      .trim();
+    return text ? `\n\n--- Best practices (bpCheck=true) ---\n${text}` : '';
+  } catch (e: any) {
+    return `\n\n⚠️ bpCheck requested but could not run: ${e?.message ?? e}`;
+  }
+}
+
+/**
+ * Database sync appended to a successful build when `dbSync` is set.
+ *
+ * Folded in from the retired `trigger_db_sync` tool, on the `bpCheck`
+ * precedent above and with the same advisory contract: a sync failure is
+ * reported as a section, never as a failed build, because the compile verdict
+ * already stands.
+ *
+ * `dbSync: true` lets dbSyncTool derive the partial-sync list from the project
+ * (its ordinary behaviour when no `tables` are named); `dbSync: ["CustTable"]`
+ * syncs exactly those.
+ */
+async function runPostBuildDbSync(
+  params: any,
+  targetModel: string,
+  context: any,
+): Promise<{ section: string; failed: boolean }> {
+  const requested = params?.dbSync;
+  const tables = Array.isArray(requested)
+    ? requested.filter((t: unknown) => typeof t === 'string' && t.trim().length > 0)
+    : undefined;
+  if (!Array.isArray(requested) && requested !== true && requested !== 'true') return { section: '', failed: false };
+  // `dbSync: []` fell through with `tables` undefined, which dbSyncTool reads as
+  // "derive the scope from the project" — so asking to sync NOTHING synced
+  // everything. An empty list is a caller mistake; say so rather than guess.
+  if (Array.isArray(requested) && (tables?.length ?? 0) === 0) {
+    return {
+      section: '\n\n⚠️ dbSync was an empty list, so nothing was synced. Pass `dbSync: true` to sync ' +
+        'the project scope, or name the tables: `dbSync: ["CustTable"]`.',
+      failed: false,
+    };
+  }
+  try {
+    const { dbSyncTool } = await import('./dbSync.js');
+    const result: any = await dbSyncTool(
+      {
+        modelName: targetModel,
+        projectPath: params?.projectPath,
+        packagePath: params?.packagePath,
+        ...(tables && tables.length > 0 ? { tables } : {}),
+      },
+      context,
+    );
+    const text = (result?.content ?? [])
+      .filter((c: any) => c?.type === 'text' && typeof c.text === 'string')
+      .map((c: any) => c.text)
+      .join('\n')
+      .trim();
+    if (!text) return { section: '', failed: false };
+    // dbSyncTool sets isError when the sync fails. Dropping it put a ❌ at the
+    // bottom of a response headed ✅ Build succeeded, with the flag unset — and
+    // since trigger_db_sync is no longer published, this is the only sync path
+    // a caller has.
+    const failed = result?.isError === true;
+    const heading = failed
+      ? '--- Database sync (dbSync) — FAILED, the build did not ---'
+      : '--- Database sync (dbSync) ---';
+    return { section: `\n\n${heading}\n${text}`, failed };
+  } catch (e: any) {
+    return { section: `\n\n⚠️ dbSync requested but could not run: ${e?.message ?? e}`, failed: true };
+  }
 }
 
 /**
@@ -1101,7 +1527,7 @@ export const buildProjectTool = async (params: any, context: any, onProgress?: P
           );
           if (wait.outcome === 'finished' && wait.state) {
             await clearBuildState(targetModel, customPackagesPath);
-            return await renderFinishedBuildResult(wait.state, targetModel, dataDir);
+            return await renderFinishedBuildResult(wait.state, targetModel, dataDir, params, context);
           }
           const tailLog = await readLogTail(existingState.logFile);
           if (wait.outcome === 'orphaned') {
@@ -1171,7 +1597,7 @@ export const buildProjectTool = async (params: any, context: any, onProgress?: P
       );
       await clearBuildState(targetModel, customPackagesPath);
       if (stillCurrent) {
-        const result = await renderFinishedBuildResult(existingState, targetModel, dataDir);
+        const result = await renderFinishedBuildResult(existingState, targetModel, dataDir, params, context);
         // Say plainly that nothing was compiled just now, so a reader can never
         // mistake a collected result for a fresh one.
         const collected =
@@ -1232,25 +1658,32 @@ export const buildProjectTool = async (params: any, context: any, onProgress?: P
     const firstLogFile = logFilePath(targetModel, 0, customPackagesPath);
 
     // ------------------------------------------------------------------
-    // Log build parameters
-    // ------------------------------------------------------------------
-    await buildLog('INFO', `Starting build — model: ${targetModel} | fullBuild: ${fullBuild} | queue: ${buildQueue.length}`);
-    await buildLog('INFO', `  xppc.exe:              ${xppcExe}`);
-    await buildLog('INFO', `  customPackagesPath:    ${customPackagesPath}`);
-    await buildLog('INFO', `  microsoftPackagesPath: ${microsoftPackagesPath}`);
-    if (extraReferenceFolders.length > 0) {
-      await buildLog('INFO', `  extraReferenceFolders: ${extraReferenceFolders.join(', ')}`);
-    }
-
-    // ------------------------------------------------------------------
     // Build context (shared across the entire queue)
     // ------------------------------------------------------------------
     const ctx: XppcBuildContext = {
       xppcExe,
       customPackagesPath,
       microsoftPackagesPath,
+      // The model store, so the write-back stays with the source it describes.
+      // In CHE the two roots are the same path anyway, so this is a no-op there.
+      compilerMetadataPath: customPackagesPath,
       extraReferenceFolders,
     };
+
+    // ------------------------------------------------------------------
+    // Log build parameters
+    // ------------------------------------------------------------------
+    // Read from ctx, not from the variables it was built out of: this line exists to answer
+    // "which root did -compilermetadata point at", and a copy of the expression would keep
+    // reporting the old answer the moment the field is derived any other way.
+    await buildLog('INFO', `Starting build — model: ${targetModel} | fullBuild: ${fullBuild} | queue: ${buildQueue.length}`);
+    await buildLog('INFO', `  xppc.exe:              ${ctx.xppcExe}`);
+    await buildLog('INFO', `  customPackagesPath:    ${ctx.customPackagesPath}`);
+    await buildLog('INFO', `  microsoftPackagesPath: ${ctx.microsoftPackagesPath}`);
+    await buildLog('INFO', `  compilerMetadataPath:  ${ctx.compilerMetadataPath} (xppc write-back target)`);
+    if (ctx.extraReferenceFolders.length > 0) {
+      await buildLog('INFO', `  extraReferenceFolders: ${ctx.extraReferenceFolders.join(', ')}`);
+    }
 
     // ------------------------------------------------------------------
     // Initial state
@@ -1297,7 +1730,7 @@ export const buildProjectTool = async (params: any, context: any, onProgress?: P
       );
       if (wait.outcome === 'finished' && wait.state) {
         await clearBuildState(targetModel, customPackagesPath);
-        return await renderFinishedBuildResult(wait.state, targetModel, dataDir);
+        return await renderFinishedBuildResult(wait.state, targetModel, dataDir, params, context);
       }
       const elapsed = Math.round((Date.now() - startedAt) / 1000);
       const tailLog = await readLogTail(wait.state?.logFile ?? firstLogFile);

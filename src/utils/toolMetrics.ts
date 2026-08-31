@@ -27,6 +27,38 @@ function getStats(toolName: string): ToolStats {
   return s;
 }
 
+/**
+ * Wall-clock past which a single tool call is logged individually, in ms.
+ *
+ * The aggregate stats below cannot attribute one slow call after the fact.
+ *
+ * The ⚠️ is load-bearing: console.error in src/index.ts drops "[module]"-
+ * prefixed messages without an error/warning marker.
+ */
+const SLOW_CALL_MS = Number(process.env.SLOW_CALL_LOG_MS ?? 10_000);
+
+/** Argument digest for a slow-call line — enough to identify the call, never the payload. */
+function digestArgs(args: unknown): string {
+  if (!args || typeof args !== 'object') return '';
+  const entries = Object.entries(args as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined && v !== null)
+    .slice(0, 6)
+    .map(([k, v]) => {
+      const s = typeof v === 'string' ? v : JSON.stringify(v);
+      const short = (s ?? '').length > 40 ? `${(s ?? '').slice(0, 40)}…` : s;
+      return `${k}=${short}`;
+    });
+  return entries.length > 0 ? ` {${entries.join(', ')}}` : '';
+}
+
+/** Log a single tool call that ran long enough to be worth attributing. */
+export function reportSlowCall(toolName: string, elapsedMs: number, args?: unknown): void {
+  if (elapsedMs < SLOW_CALL_MS) return;
+  console.error(
+    `[toolMetrics] ⚠️ slow call: ${toolName} took ${(elapsedMs / 1000).toFixed(1)}s${digestArgs(args)}`,
+  );
+}
+
 /** Call before dispatching a tool. Returns a finish() callback. */
 export function recordToolStart(toolName: string): (isEmpty: boolean) => void {
   const t0 = Date.now();
@@ -50,6 +82,8 @@ interface SequenceEntry {
   tool: string;
   argsKey: string;
   at: number;
+  /** Write epoch the call ran under — 0 when the caller does not track one. */
+  epoch: number;
 }
 
 const recentCalls: SequenceEntry[] = [];
@@ -59,8 +93,8 @@ const recentCalls: SequenceEntry[] = [];
  * of this exact tool+args combination within the recent window (including
  * the call just recorded). 1 = first occurrence, 3+ = likely loop.
  */
-export function recordCallSequence(toolName: string, argsKey: string): number {
-  recentCalls.push({ tool: toolName, argsKey, at: Date.now() });
+export function recordCallSequence(toolName: string, argsKey: string, epoch = 0): number {
+  recentCalls.push({ tool: toolName, argsKey, at: Date.now(), epoch });
   if (recentCalls.length > SEQUENCE_BUFFER_MAX) {
     recentCalls.splice(0, recentCalls.length - SEQUENCE_BUFFER_MAX);
   }
@@ -68,6 +102,28 @@ export function recordCallSequence(toolName: string, argsKey: string): number {
   const occurrences = window.filter(e => e.tool === toolName && e.argsKey === argsKey).length;
   if (occurrences > 1) getStats(toolName).duplicateCalls++;
   return occurrences;
+}
+
+/**
+ * Occurrences of this exact call within the recent window that ran under `epoch`.
+ *
+ * Repeating a read is only a LOOP when nothing changed underneath it. Once a write
+ * has landed, re-issuing the same read is the correct thing to do — it is how an
+ * agent sees its own edit. The loop advisory used to fire on the raw repeat count
+ * and assert "the answer does not change between calls", which after the dedup
+ * cache became write-invalidated was simply false: a live run (eval case
+ * L2-entity-query-range-roundtrip, 2026-08-24) got correct, freshly-changed
+ * content and that advisory attached to it, on occurrence #3 of a read whose
+ * answer had changed twice through this server's own writes.
+ *
+ * That wording is the same class of hazard the invalidation fix was for: telling
+ * an agent its re-read is pointless is how it gets talked out of trusting the
+ * truth it just fetched.
+ */
+export function occurrencesInEpoch(toolName: string, argsKey: string, epoch: number): number {
+  return recentCalls
+    .slice(-SEQUENCE_WINDOW)
+    .filter(e => e.tool === toolName && e.argsKey === argsKey && e.epoch === epoch).length;
 }
 
 /** Test/maintenance helper — clears the sequence buffer. */

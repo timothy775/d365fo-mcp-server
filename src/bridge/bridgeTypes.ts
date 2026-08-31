@@ -154,9 +154,17 @@ export interface BridgeEdtInfo {
   name: string;
   baseType?: string;
   extends?: string;
+  /** Root of the Extends chain, for orientation in a multi-level hierarchy. */
+  rootEdt?: string;
   label?: string;
   helpText?: string;
   stringSize?: number;
+  /**
+   * Ancestor the reported `stringSize` came from. Absent when the number is what this EDT's
+   * own XML declares. Present both when the EDT declares nothing (the common case) and when
+   * an ancestor's value overrode one the EDT did declare.
+   */
+  stringSizeInheritedFrom?: string;
   enumType?: string;
   referenceTable?: string;
   model?: string;
@@ -579,6 +587,12 @@ export interface BridgeSecurityPrivilegeResult {
   model?: string;
   entryPoints: BridgeSecurityEntryPoint[];
   parentDuties: Array<{ name: string }>;
+  /**
+   * False when the duty scan could not finish. An empty `parentDuties` then
+   * means "unknown", not "none" — and "none" is the claim
+   * BPErrorPrivilegeNotCoveredByDuty is about, so the two must not render alike.
+   */
+  parentDutiesComplete?: boolean;
   _source: string;
 }
 

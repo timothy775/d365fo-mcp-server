@@ -149,6 +149,33 @@ describe('batch_search', () => {
     expect(result.isError).toBe(true);
   });
 
+  // ~250 bytes of preamble/postamble on EVERY batch result — an Executed/Time/
+  // Success header and a "💡 Performance Note: N searches in Xms … ~Nx faster"
+  // block — reporting on the tool's own cleverness. Nothing the caller can act
+  // on, and it is re-billed on every later request in the session.
+  it('carries no performance chatter — only what the caller can act on', async () => {
+    const result = await batchSearchTool(
+      req('batch_search', {
+        queries: [
+          { query: 'CustTable', limit: 5 },
+          { query: 'VendTable', limit: 5 },
+        ],
+      }),
+      ctx,
+    );
+    const text = result.content[0].text as string;
+    expect(text).not.toContain('Performance Note');
+    expect(text).not.toContain('faster');
+    expect(text).not.toMatch(/^Time: /m);
+    expect(text).not.toMatch(/^Executed: /m);
+    expect(text).not.toMatch(/^Success: /m);
+    // A batch with nothing to report starts straight at the results.
+    expect(text.startsWith('# Batch Search Results\n\n---\n\n')).toBe(true);
+    // The results themselves are untouched.
+    expect(text).toContain('CustTable');
+    expect(text).toContain('VendTable');
+  });
+
   it('applies globalTypeFilter to queries without explicit type', async () => {
     const result = await batchSearchTool(
       req('batch_search', {
@@ -181,10 +208,29 @@ describe('search_extensions', () => {
 
   it('returns no-results message when nothing found', async () => {
     (ctx.symbolIndex.searchCustomExtensions as any).mockReturnValue([]);
-    (ctx.symbolIndex.getCustomModels as any).mockReturnValue([]);
+    (ctx.symbolIndex.getCustomModels as any).mockReturnValue(['ISVModel']);
     const result = await extensionSearchTool(req('search_extensions', { query: 'Unknown' }), ctx);
     expect(result.isError).toBeFalsy();
     expect(result.content[0].text).toMatch(/no.*found|0 match|no extension/i);
+  });
+
+  // The scope is defined by the custom-model list, so an empty list is not an empty
+  // result — it means the search could never have matched anything.
+  it('names the configuration fault when no custom models are known', async () => {
+    (ctx.symbolIndex.searchCustomExtensions as any).mockReturnValue([]);
+    (ctx.symbolIndex.getCustomModels as any).mockReturnValue([]);
+    const result = await extensionSearchTool(req('search_extensions', { query: 'Unknown' }), ctx);
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toContain('CUSTOM_MODELS');
+  });
+
+  it('forwards the type filter to the index', async () => {
+    (ctx.symbolIndex.searchCustomExtensions as any).mockReturnValue([]);
+    (ctx.symbolIndex.getCustomModels as any).mockReturnValue(['ISVModel']);
+    await extensionSearchTool(
+      req('search_extensions', { query: 'validateWrite', type: 'method' }), ctx);
+    expect(ctx.symbolIndex.searchCustomExtensions).toHaveBeenCalledWith(
+      'validateWrite', undefined, 20, ['method']);
   });
 
   it('returns error on missing query', async () => {

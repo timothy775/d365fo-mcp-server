@@ -20,6 +20,7 @@ import {
 import { resolveSubPattern } from '../../knowledge/formPatterns/index.js';
 import { canonicalSymbolName } from '../../utils/symbolLookup.js';
 import { resolveIndexedFilePath } from '../../utils/packagesRoot.js';
+import { readXmlFile } from '../../utils/indexedXmlLookup.js';
 import {
   walkFormDesign,
   type FormControlNode,
@@ -108,7 +109,8 @@ export async function validateFormPatternTool(
       const row = db
         ?.prepare(`SELECT file_path FROM symbols WHERE type = 'form' AND name = ? LIMIT 1`)
         ?.get(canonicalForm) as { file_path?: string } | undefined;
-      if (!row?.file_path) {
+      const indexedPath = row?.file_path;
+      if (!indexedPath) {
         return {
           isError: true,
           content: [{
@@ -119,8 +121,25 @@ export async function validateFormPatternTool(
       }
       // The index stores some file_path values package-relative; read them
       // against the packages root, not the process cwd. See resolveIndexedFilePath.
-      const resolved = resolveIndexedFilePath(row.file_path);
-      formXml = await fs.readFile(resolved, 'utf-8');
+      const resolved = resolveIndexedFilePath(indexedPath);
+      // That path is not always the AOT source: a row whose cached object carried
+      // no sourcePath points at the extracted-metadata JSON instead (see
+      // isAotSourcePath). Handing that to the XML parser fails in a place with no
+      // useful message — but the JSON holds the original XML in `raw`, so the
+      // right move is to unwrap it, not to refuse. readXmlFile reads both shapes
+      // and returns null only when neither yields XML.
+      const indexedXml = await readXmlFile(resolved);
+      if (indexedXml === null) {
+        return {
+          isError: true,
+          content: [{
+            type: 'text',
+            text: `❌ Form "${formName}" is indexed at ${resolved}, but no form XML could be read there. ` +
+              `Pass filePath or xml directly.`,
+          }],
+        };
+      }
+      formXml = indexedXml;
       source = `${formName} (${resolved})`;
     }
   } catch (error) {
@@ -207,6 +226,146 @@ export async function checkAddControlAgainstParentPattern(
   for (const node of sp.root) node.controlTypes.forEach((t) => allowedTypes.add(t));
   const allowed = allowedTypes.has('*') || allowedTypes.has(controlType);
   return { parentPattern: sp.xmlName, allowed, allowedTypes: [...allowedTypes] };
+}
+
+/** Result of the add-control DataGroup pre-flight */
+export interface AddControlDataGroupVerdict {
+  /** Field group the parent container renders (its <DataGroup> value) */
+  dataGroup: string;
+  /** Datasource the field group resolves against, when the parent declares one */
+  dataSource?: string;
+  /** Control name the compiler generates for this field: <DataGroup>_<DataField> */
+  generatedName: string;
+  /** True when the requested controlName is exactly the generated one — a certain build error */
+  exactNameCollision: boolean;
+}
+
+/**
+ * Pre-flight for add-control: refuse to hand-add a BOUND control under a
+ * container that carries <DataGroup>.
+ *
+ * Such a container is populated by the compiler from that table field group —
+ * one control per member, named `<DataGroup>_<FieldName>`. Adding the field to
+ * the field group (add-field-to-field-group on the table extension) AND an
+ * explicit control for it produces "The duplicate name '…' was detected". The
+ * duplicate is invisible on disk: only the explicit control is written to a
+ * file, so inspecting the XML never reveals it.
+ *
+ * Returns null when the parent cannot be found, declares no DataGroup, or the
+ * new control is unbound (a button or static text in such a group is fine).
+ */
+export async function checkAddControlAgainstDataGroup(
+  baseFormXml: string,
+  parentControlName: string,
+  controlDataField: string | undefined,
+  controlName: string | undefined,
+): Promise<AddControlDataGroupVerdict | null> {
+  if (!controlDataField) return null;
+
+  let parsed: any;
+  try {
+    const parser = new Parser({ explicitArray: false, mergeAttrs: true, trim: true });
+    parsed = await parser.parseStringPromise(baseFormXml);
+  } catch {
+    return null;
+  }
+  if (!parsed?.AxForm?.Design) return null;
+
+  const design = walkFormDesign(parsed.AxForm.Design);
+  const needle = parentControlName.toLowerCase();
+  let parent: FormControlNode | undefined;
+  const visit = (nodes: FormControlNode[]): void => {
+    for (const n of nodes) {
+      if (n.name.toLowerCase() === needle) { parent = n; return; }
+      visit(n.children);
+      if (parent) return;
+    }
+  };
+  visit(design.controls);
+
+  const dataGroup = parent?.properties?.DataGroup;
+  if (!dataGroup) return null;
+
+  const generatedName = `${dataGroup}_${controlDataField}`;
+  return {
+    dataGroup,
+    dataSource: parent?.properties?.DataSource,
+    generatedName,
+    exactNameCollision: (controlName ?? '').toLowerCase() === generatedName.toLowerCase(),
+  };
+}
+
+/** A control that renders a table field group through its <DataGroup> property */
+export interface DataGroupRenderer {
+  /** Name of the container control carrying <DataGroup> */
+  controlName: string;
+  /** Its <DataSource>, when it declares one */
+  dataSource?: string;
+  /** Control the compiler generates for a member field: <DataGroup>_<FieldName> */
+  generatedNameFor: (fieldName: string) => string;
+  /** The field group it renders, as spelled in the form XML */
+  dataGroup: string;
+}
+
+/**
+ * Every container in a form that renders a table field group via <DataGroup>.
+ *
+ * {@link findDataGroupRenderers} answers "is THIS group on the form"; this one
+ * answers "which groups are", which is what a caller needs when the answer to
+ * the first is no — a field group nothing renders puts the field on no form, and
+ * naming the groups that ARE rendered turns that dead end into one call.
+ *
+ * Returns [] when the XML is unparseable or no container carries a <DataGroup>.
+ */
+export async function listDataGroupRenderers(baseFormXml: string): Promise<DataGroupRenderer[]> {
+  let parsed: any;
+  try {
+    const parser = new Parser({ explicitArray: false, mergeAttrs: true, trim: true });
+    parsed = await parser.parseStringPromise(baseFormXml);
+  } catch {
+    return [];
+  }
+  if (!parsed?.AxForm?.Design) return [];
+
+  const found: DataGroupRenderer[] = [];
+  const visit = (nodes: FormControlNode[]): void => {
+    for (const n of nodes) {
+      const dataGroup = n.properties?.DataGroup;
+      if (dataGroup) {
+        found.push({
+          controlName: n.name,
+          dataSource: n.properties?.DataSource,
+          generatedNameFor: (fieldName: string) => `${dataGroup}_${fieldName}`,
+          dataGroup,
+        });
+      }
+      visit(n.children);
+    }
+  };
+  visit(walkFormDesign(parsed.AxForm.Design).controls);
+
+  return found;
+}
+
+/**
+ * The reverse of {@link checkAddControlAgainstDataGroup}: given a field group,
+ * find the controls that already render it via <DataGroup>.
+ *
+ * Same fact, asked one step earlier. The add-control guard can only fire once a
+ * form extension exists and a control is being added to it — by then the agent
+ * has spent a create it will have to undo. Asked at add-field-to-field-group
+ * time, the answer ("this group is already on the form; the control appears by
+ * itself") arrives before any of that is written.
+ *
+ * Returns [] when the XML is unparseable or no container renders the group.
+ */
+export async function findDataGroupRenderers(
+  baseFormXml: string,
+  fieldGroupName: string,
+): Promise<DataGroupRenderer[]> {
+  const needle = fieldGroupName.toLowerCase();
+  return (await listDataGroupRenderers(baseFormXml))
+    .filter(r => r.dataGroup.toLowerCase() === needle);
 }
 
 /**

@@ -11,7 +11,7 @@ import { handleGetFormPatterns } from '../knowledge/getFormPatterns.js';
 import path from 'path';
 import fs from 'fs';
 import { getConfigManager } from '../../utils/configManager.js';
-import { defaultPackagesRoot, resolveIndexedFilePath } from '../../utils/packagesRoot.js';
+import { defaultPackagesRoot, isAotSourcePath, resolveIndexedFilePath } from '../../utils/packagesRoot.js';
 import { resolveObjectPrefix, applyObjectPrefix, getObjectSuffix, applyObjectSuffix } from '../../utils/modelClassifier.js';
 import { ProjectFileManager } from '../../workspace/projectFile.js';
 import { extractModelFromProject, findProjectInSolution } from '../../utils/projectUtils.js';
@@ -21,10 +21,11 @@ import { resolvePattern } from '../../knowledge/formPatterns/index.js';
 import { expandPatternToXml, canExpandPattern } from '../../utils/formControlExpander.js';
 import { cloneFormXml } from '../../utils/formCloner.js';
 import { methodStubsForPattern, injectMethodStubs } from '../../knowledge/formPatterns/methodStubs.js';
-import { findBaseFormXml } from '../write/modifyD365File.js';
+import { findBaseFormXml } from '../../utils/baseObjectXml.js';
 import { getFieldControlMap, getTableTitleField, type FieldControlMap } from '../../utils/fieldControlTypes.js';
 import { lookupSymbolNocase } from '../../utils/symbolLookup.js';
 import { scaffoldWriteRefusalResult } from '../write/writeAnchorGuard.js';
+import { upsertWrittenFileIntoIndex } from '../write/inlineIndexUpsert.js';
 
 /**
  * Symbol types a form datasource may bind to. Views are indexed as 'view'
@@ -322,7 +323,7 @@ export async function handleGenerateSmartForm(
     // A form datasource may be a VIEW as well as a table — the AOT accepts any of
     // them in <Table>. Resolving against 'table' alone rejected a view that
     // object_patterns resolves fine, so a form over a view was unbuildable through
-    // the scaffold (docs/eval-sweep-findings-2026-07-21.md, "Open — writers").
+    // the scaffold (the 2026-07-21 eval sweep, "Open — writers").
     let dataSourceIsView = false;
     try {
       const db = symbolIndex.getReadDb();
@@ -657,7 +658,7 @@ export async function handleGenerateSmartForm(
 
   // See generateSmartTable: the resolved model follows the ACTIVE project, the
   // write anchor does not. Checked before the first byte is written.
-  const anchorRefusal = scaffoldWriteRefusalResult({
+  const anchorRefusal = await scaffoldWriteRefusalResult({
     objectName: finalName,
     objectType: 'form',
     targetModel: resolvedModel,
@@ -1003,7 +1004,18 @@ export async function handleGenerateSmartForm(
       const row = lookupSymbolNocase(db, table, ['table']);
       // Package-relative file_path rows would always miss here and mark a
       // perfectly good table "stale" — see resolveIndexedFilePath.
-      const stale = row?.file_path && !fs.existsSync(resolveIndexedFilePath(row.file_path));
+      //
+      // A file_path pointing at the extracted-metadata JSON cache rather than the
+      // AOT source (see isAotSourcePath) is evidence of neither: that cache file
+      // exists whether or not the table still does. Calling it "stale — its file
+      // no longer exists on disk" would be a claim about a file that is right
+      // there, and the advice that follows it (run update_symbol_index) cannot
+      // help, since re-indexing rebuilds the same cache path. Judge only the paths
+      // that can be judged — the same rule isStaleIndexedPath applies in
+      // utils/indexedXmlLookup.ts, so the two do not drift apart.
+      const indexedPath = row?.file_path;
+      const stale = isAotSourcePath(indexedPath)
+        && !fs.existsSync(resolveIndexedFilePath(indexedPath));
       if (row && !stale) continue;
       const stem = table.replace(/s$/i, '');
       const alt = db.prepare(
@@ -1095,6 +1107,11 @@ export async function handleGenerateSmartForm(
 
   fs.writeFileSync(normalizedPath, normalizeD365Xml(xml), 'utf-8');
   console.log(`[generateSmartForm] Created file: ${normalizedPath}`);
+
+  // Tell the index about it, the way every create/modify path does.
+  // Without this the object is invisible to `search` — which is now answered
+  // from the index for untyped queries — in the very session that created it.
+  await upsertWrittenFileIntoIndex(normalizedPath, { symbolIndex });
 
   // Add to Visual Studio project if a projectPath is known
   let projectMessage = '';

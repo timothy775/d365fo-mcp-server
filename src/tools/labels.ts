@@ -14,7 +14,14 @@
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { XppServerContext } from '../types/context.js';
-import { searchLabelsTool, REUSABLE_MARKER, NO_REUSE_ADVICE } from './analysis/searchLabels.js';
+import {
+  searchLabelsTool, REUSABLE_MARKER, NO_HITS_MARKER, NO_REUSE_ADVICE, SOME_REUSE_ADVICE,
+} from './analysis/searchLabels.js';
+import { createPhaseTimer } from '../utils/phaseTimer.js';
+import { mapWithConcurrency } from '../utils/concurrency.js';
+import {
+  recordLabelSearchCall, repeatSearchNotice, searchBudgetNotice,
+} from './analysis/labelSearchHistory.js';
 import { getLabelInfoTool } from './readers/getLabelInfo.js';
 import { createLabelTool } from './write/createLabel.js';
 import { renameLabelTool } from './write/renameLabel.js';
@@ -133,6 +140,12 @@ export async function labelsTool(request: CallToolRequest, context: XppServerCon
         delete r.searchText; delete r.text; delete r.q;
       }
     }
+    // Counted here rather than in either handler: this is the one point both the
+    // batched and the single-string path pass through, so a caller cannot escape
+    // the budget by switching shapes. (The legacy `search_labels` handler,
+    // reached directly, is not counted — nothing in the tool surface routes there.)
+    recordLabelSearchCall();
+
     if (Array.isArray(r.query)) {
       return batchSearch(r, dispatch.tool, context);
     }
@@ -142,7 +155,28 @@ export async function labelsTool(request: CallToolRequest, context: XppServerCon
     method: 'tools/call',
     params: { name: dispatch.toolName, arguments: rest },
   };
-  return dispatch.tool(subRequest, context);
+  // Time the handler for EVERY action, not only search — the 2026-08-25 audit had
+  // a 5.6 s mean over 268 real `labels` calls and no way to attribute one of them,
+  // and 78 of those calls were `info`, which has no timing of its own. Rendered
+  // through the same helper the slow writes use: silent below SLOW_CALL_LOG_MS
+  // (10 s), so a normal reply is unchanged; SLOW_CALL_LOG_MS=0 makes the next
+  // audit's re-measure a matter of setting one already-registered variable.
+  const timer = createPhaseTimer();
+  const result = await timer.time(`${action} handler`, () => dispatch.tool(subRequest, context));
+  const phases = timer.render();
+  return phases ? appendPhaseLine(result, phases) : result;
+}
+
+/** Append the `⏱️` block to a tool result without disturbing its shape. */
+function appendPhaseLine(result: any, block: string): any {
+  const content = Array.isArray(result?.content) ? [...result.content] : [];
+  const last = content.length - 1;
+  if (last >= 0 && typeof content[last]?.text === 'string') {
+    content[last] = { ...content[last], text: `${content[last].text}${block}` };
+  } else {
+    content.push({ type: 'text', text: block });
+  }
+  return { ...result, content };
 }
 
 /** Most phrasings one call will try — beyond this the answer is "create your own". */
@@ -159,23 +193,11 @@ const MAX_BATCH_QUERIES = 12;
  */
 const BATCH_CONCURRENCY = 4;
 
-/** Run `fn` over `items` with at most `limit` in flight, preserving input order. Exported for tests. */
-export async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    while (next < items.length) {
-      const i = next++;
-      results[i] = await fn(items[i], i);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
-}
+/**
+ * Re-exported from utils/concurrency so the label indexer can share the same helper
+ * without importing from the tools layer. Kept exported here for existing callers/tests.
+ */
+export { mapWithConcurrency };
 
 /**
  * Run several label searches in one call.
@@ -235,7 +257,24 @@ async function batchSearch(
   const failed = runs.filter(r => r.failed);
   const searched = runs.length - failed.length;
   const foundReusable = runs.some(r => !r.failed && r.text.includes(REUSABLE_MARKER));
-  const sections = runs.map(r => `## "${r.query}"${r.failed ? ' — ❌ SEARCH FAILED' : ''}\n\n${r.text}`);
+
+  // A miss carries one bit of information wrapped in the same "create your own
+  // label" paragraph as every other miss, so a batch of them buries both the
+  // verdict and any section that DID hit. Name the misses in a line; keep the
+  // full section for the runs that carry something — hits and failures.
+  const missed = runs.filter(r => !r.failed && r.text.includes(NO_HITS_MARKER));
+  const missedSet = new Set(missed.map(r => r.query));
+  const sections = runs
+    .filter(r => !missedSet.has(r.query))
+    .map(r => `## "${r.query}"${r.failed ? ' — ❌ SEARCH FAILED' : ''}\n\n${r.text}`);
+  if (missed.length > 0) {
+    sections.push(
+      `## No match — ${missed.length} phrasing(s)\n\n` +
+      `${missed.map(r => `"${r.query}"`).join(' · ')}\n\n` +
+      `Nothing in the index matches any of them. The advice below is the same for all of them, ` +
+      `so it is stated once.`,
+    );
+  }
 
   const notes = [
     duplicates > 0 ? `${duplicates} duplicate phrasing(s) folded` : '',
@@ -253,18 +292,45 @@ async function batchSearch(
   // returned a clean report whose verdict said "no label exists — create your own".
   // That is the one thing this line exists to state unambiguously, so failures
   // either replace the verdict or are named alongside it.
+  // What earlier calls already established, stated on WHICHEVER verdict follows.
+  //
+  // Both of these used to hang off the no-hit branch alone, which made the
+  // expensive path the quiet one: a batch where every phrasing missed got a hard
+  // "stop searching and create your own", while a batch where one phrasing landed
+  // on an unrelated SYS label got "at least one label this model can resolve came
+  // back" and no count at all. Run 7b8de4ba drew that encouraging verdict five
+  // times in a row and kept rephrasing — then escalated to reading the .label.txt
+  // files and asking the user. ~49 AIU, for an answer settled by call one.
+  //
+  // Excludes this batch's own phrasings — they are the current answer, not
+  // evidence of repetition. What is left is what earlier calls already asked.
+  const budgetStop = searchBudgetNotice();
+  const repeated = repeatSearchNotice(queries);
+  const priorWork = (budgetStop ? `\n${budgetStop}` : '') + (repeated ? `\n${repeated}` : '');
+
   const verdict = searched === 0
+    // A batch that never ran establishes nothing, so it inherits nothing either.
     ? `**Verdict:** NONE of these ${runs.length} searches ran — every one failed (see the sections below). ` +
       `This says nothing about whether a reusable label exists; fix the error and search again ` +
       `rather than creating a label on the strength of this answer.\n`
     : foundReusable
-      ? `**Verdict:** at least one reusable label was found — see the section(s) marked "${REUSABLE_MARKER}".\n`
+      // "Reusable" only ever meant "this model can resolve it" — the index
+      // matches words, not meaning. Overstating that sent callers back to
+      // rephrase and search again, so the verdict states what was established
+      // and carries the create call.
+      ? `**Verdict:** ${searched} search(es) ran and at least one label this model can resolve came back — ` +
+        `see the section(s) marked "${REUSABLE_MARKER}". Read the TEXT of those hits before adopting one: ` +
+        `the index matches wording, not meaning, so a hit is a candidate, not a verdict. ` +
+        `If none of them says what you need, do NOT rephrase and search again — nothing new will surface.\n` +
+        priorWork +
+        `\n${SOME_REUSE_ADVICE}`
       : `**Verdict:** none of these ${searched} phrasings found a label this model can resolve. ` +
         `Stop searching and create your own.\n` +
         (failed.length > 0
           ? `\n⚠️ ${failed.length} of ${runs.length} searches FAILED and were not part of that verdict: ` +
             `${failed.map(f => `"${f.query}"`).join(', ')}.\n`
           : '') +
+        priorWork +
         `\n${NO_REUSE_ADVICE}`;
 
   return {

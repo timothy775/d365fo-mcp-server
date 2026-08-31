@@ -26,6 +26,7 @@
  */
 
 import { z } from 'zod';
+import { KERNEL_ENUM_NAMES } from '../../knowledge/kernelEnums.js';
 import type { XppServerContext } from '../../types/context.js';
 import { canonicalSymbolName, distinctSymbolTypesNocase, lookupSymbolNocase } from '../../utils/symbolLookup.js';
 import {
@@ -56,12 +57,20 @@ export const resolveReferencesArgsSchema = z.object({
 // the aggregated array into the ListTools response.
 
 export interface ReferenceViolation {
+  /**
+   * The check could not run at all — the index held nothing to check against —
+   * as opposed to running and finding the reference acceptable. Carried
+   * separately from `severity` because the two audiences differ: a reader wants
+   * a warning, while the write gate must treat "unchecked" as unproven.
+   */
+  unverifiable?: boolean;
   kind:
     | 'unknown-type'
     | 'unknown-static-member'
     | 'unknown-method'
     | 'unknown-field'
     | 'unknown-label'
+    | 'label-placeholder-mismatch'
     | 'unknown-intrinsic-target'
     | 'arity-mismatch'
     | 'not-visible-from-model';
@@ -88,7 +97,7 @@ export interface ResolverDeps {
   getLabelById(
     labelId: string,
     labelFileId?: string,
-  ): Array<{ labelId: string; labelFileId: string }>;
+  ): Array<{ labelId: string; labelFileId: string; language?: string; text?: string }>;
   getLabelFileIds(): Array<{ labelFileId: string }>;
   /**
    * Optional Descriptor-backed answer to "may the target model see this type?".
@@ -157,12 +166,10 @@ const KERNEL_TYPES = new Set([
   'fileiopermission', 'runaspermission', 'datetimeutil', 'timezone', 'random',
   'runbase', 'image', 'clrinterop', 'clrobject', 'thread', 'webrequest',
   'webresponse', 'gc', 'session', 'infolog', 'debug', 'global',
-  // Kernel enums (not in metadata XML). 'exception' has no AxEnum at all, and the
-  // index does not prove 'noyes' — without both, every try/catch and NoYes:: use
-  // hard-errors in the static-access path.
-  'types', 'tablescope', 'utcdatetimeorder', 'dateorder', 'dateday',
-  'datemonth', 'dateyear', 'statementtype', 'concurrencymodel', 'isolationlevel',
-  'exception', 'noyes',
+  // Kernel ENUMS come from knowledge/kernelEnums.ts. They used to be spelled out
+  // here, which is why this path accepted NoYes:: while the XML <EnumType> checker
+  // hard-errored on the same enum — the knowledge existed in one path only.
+  ...KERNEL_ENUM_NAMES,
 ]);
 
 /** Methods available on every table buffer via the kernel xRecord/Common base. */
@@ -223,6 +230,16 @@ const INTRINSIC_TARGET_TYPES: Record<string, string[] | null> = {
   menuitemoutputstr: null,
   tilestr: null,
   resourcestr: null,
+  reportstr: ['report'],
+  // 2nd argument is the DESIGN name inside the report — not an indexed symbol,
+  // so only the report itself is resolved here (design existence is a build check).
+  ssrsreportstr: ['report'],
+  delegatestr: ['class', 'table', 'form', 'class-extension'],
+  staticdelegatestr: ['class', 'table', 'form', 'class-extension'],
+  attributestr: ['class', 'class-extension'],
+  indexstr: ['table', 'view', 'data-entity', 'table-extension'],
+  tablemethodstr: ['table', 'view', 'map', 'data-entity', 'table-extension'],
+  tablestaticmethodstr: ['table', 'view', 'map', 'data-entity', 'table-extension'],
 };
 
 interface CleanedCode {
@@ -339,10 +356,15 @@ function findMethod(
       `SELECT added_methods, coc_methods FROM extension_metadata
        WHERE base_object_name = ?`,
     ).all(owner) as Array<{ added_methods: string | null; coc_methods: string | null }>;
-    if (extRows.length === 0 && !ownerHit) {
-      // Owner not in symbols under any casing — nocase scan is bounded by
-      // extension_metadata, which is small (single-digit thousands of rows;
-      // indexing class extensions in #693 roughly doubled it).
+    if (extRows.length === 0) {
+      // An extension spells its base object however its own name spells it, and
+      // that need not match the object's own casing — see the note on
+      // extensionAddedFields below for the shipped metadata that proves it.
+      // This used to be gated on `!ownerHit`, which skipped the re-probe in
+      // exactly the case that needs it: the owner IS indexed, under the other
+      // casing. The nocase scan is bounded by extension_metadata, which is small
+      // (single-digit thousands of rows) and reached only after the binary probe
+      // came back empty.
       extRows = deps.db.prepare(
         `SELECT added_methods, coc_methods FROM extension_metadata
          WHERE base_object_name = ? COLLATE NOCASE`,
@@ -424,45 +446,190 @@ function checkModelVisibility(
   };
 }
 
+/**
+ * Extension kinds whose `added_fields` really are columns of a table-like
+ * object. `table-extension` alone was too narrow: `fieldExists` is reached for
+ * every TABLE_LIKE_TYPES buffer, so a column a VIEW extension contributes
+ * (DirPartyPostalAddressView.IsSimplifiedAddress_RU, and 21 more in the shipped
+ * metadata on a stock box) was reported as hallucinated.
+ *
+ * `query-extension` is deliberately absent: it adds a field to a query data
+ * source, not to the table, and a query commonly shares its name with the table
+ * it reads — so counting it would vouch for columns that do not exist.
+ */
+const FIELD_ADDING_EXTENSION_TYPES = [
+  'table-extension', 'view-extension', 'map-extension', 'data-entity-extension',
+] as const;
+
+const FIELD_ADDING_EXTENSION_PLACEHOLDERS =
+  FIELD_ADDING_EXTENSION_TYPES.map(() => '?').join(', ');
+
+/** Every field name the indexed extensions contribute to one table-like object. */
+function extensionAddedFields(deps: ResolverDeps, tableName: string): string[] {
+  let rows = deps.db.prepare(
+    `SELECT added_fields FROM extension_metadata
+     WHERE base_object_name = ? AND extension_type IN (${FIELD_ADDING_EXTENSION_PLACEHOLDERS})`,
+  ).all(tableName, ...FIELD_ADDING_EXTENSION_TYPES) as Array<{ added_fields: string | null }>;
+
+  if (rows.length === 0) {
+    // An extension spells its base object the way its OWN name spells it, and
+    // that need not match the object's own casing. This is not hypothetical:
+    // `vendVendorParametersStaging.*Extension` (4 models), `MarkUpTransTmp.*`
+    // and `HCMWorkerActionTerminate.*` all ship against tables the AOT spells
+    // `VendVendorParametersStaging`, `MarkupTransTmp`, `HcmWorkerActionTerminate`.
+    // The re-probe used to be gated on "the base object is not in the index",
+    // which skipped it in exactly the case that hits — the table IS indexed,
+    // under the other casing — and every field those extensions add came back
+    // `unknown-field`, an ERROR that refuses the write under GROUNDING_ENFORCE.
+    //
+    // NOCASE cannot use idx_em_base, so this is a scan; it is bounded by
+    // extension_metadata (~8k rows, ~0.8 ms) and runs only after the binary
+    // probe came back empty.
+    rows = deps.db.prepare(
+      `SELECT added_fields FROM extension_metadata
+       WHERE base_object_name = ? COLLATE NOCASE
+         AND extension_type IN (${FIELD_ADDING_EXTENSION_PLACEHOLDERS})`,
+    ).all(tableName, ...FIELD_ADDING_EXTENSION_TYPES) as Array<{ added_fields: string | null }>;
+  }
+
+  const names: string[] = [];
+  for (const ext of rows) {
+    if (!ext.added_fields) continue;
+    try {
+      for (const f of JSON.parse(ext.added_fields) as unknown[]) {
+        const name = typeof f === 'string' ? f : (f as { name?: string })?.name ?? '';
+        if (name) names.push(name);
+      }
+    } catch { /* malformed JSON — skip */ }
+  }
+  return names;
+}
+
+/**
+ * `AslFinSK_QualityTier` → `qualitytier`. A member added to another model's
+ * object carries that model's prefix (applyExtensionMemberPrefix mints it), so
+ * the name in the agent's X++ and the name on disk routinely differ by exactly
+ * this token.
+ */
+function withoutMemberPrefix(name: string): string {
+  const cut = name.indexOf('_');
+  return (cut > 0 ? name.slice(cut + 1) : name).toLowerCase();
+}
+
+/** A real field that differs from `wanted` only by a model prefix, if there is one. */
+function prefixVariantOf(wanted: string, candidates: readonly string[]): string | undefined {
+  const exact = wanted.toLowerCase();
+  const bare = withoutMemberPrefix(wanted);
+  return candidates.find(c => {
+    const lower = c.toLowerCase();
+    if (lower === exact) return false;
+    const cBare = withoutMemberPrefix(c);
+    return cBare === bare || cBare === exact || lower === bare;
+  });
+}
+
+/** What the index can say about `table.field`. */
+type FieldVerdict =
+  | { found: true }
+  /**
+   * `judgeable` is the honest part: false means the index holds NO field list
+   * for this object at all (no columns, no field-adding extension), so "not
+   * found" is a statement about the index, not about the code. Reporting that
+   * as an error blocks a write over a gap in our own data.
+   */
+  | { found: false; judgeable: boolean; suggestion?: string };
+
 /** Check a field on a table: indexed fields, system fields, extension fields. */
-function fieldExists(deps: ResolverDeps, tableName: string, fieldName: string): boolean {
-  if (TABLE_SYSTEM_FIELDS.has(fieldName.toLowerCase())) return true;
+function fieldVerdict(deps: ResolverDeps, tableName: string, fieldName: string): FieldVerdict {
+  if (TABLE_SYSTEM_FIELDS.has(fieldName.toLowerCase())) return { found: true };
   try {
     // Canonicalize the table once so the probes stay BINARY on the indexes
     // (see findMethod above for the rationale).
-    const tableHit = lookupSymbolNocase(deps.db, tableName);
-    const table = tableHit?.name ?? tableName;
+    const table = lookupSymbolNocase(deps.db, tableName)?.name ?? tableName;
     const row = deps.db.prepare(
       `SELECT 1 AS x FROM symbols
        WHERE parent_name = ? AND type = 'field' AND name = ? COLLATE NOCASE
        LIMIT 1`,
     ).get(table, fieldName);
-    if (row !== undefined) return true;
-    let extRows = deps.db.prepare(
-      `SELECT added_fields FROM extension_metadata
-       WHERE base_object_name = ? AND extension_type = 'table-extension'`,
-    ).all(table) as Array<{ added_fields: string | null }>;
-    if (extRows.length === 0 && !tableHit) {
-      extRows = deps.db.prepare(
-        `SELECT added_fields FROM extension_metadata
-         WHERE base_object_name = ? COLLATE NOCASE AND extension_type = 'table-extension'`,
-      ).all(tableName) as Array<{ added_fields: string | null }>;
-    }
+    if (row !== undefined) return { found: true };
+
+    const extFields = extensionAddedFields(deps, table);
     const target = fieldName.toLowerCase();
-    for (const ext of extRows) {
-      if (!ext.added_fields) continue;
-      try {
-        const names = JSON.parse(ext.added_fields) as unknown[];
-        if (names.some(f =>
-          (typeof f === 'string' ? f : (f as { name?: string })?.name ?? '')
-            .toLowerCase() === target,
-        )) {
-          return true;
-        }
-      } catch { /* malformed JSON — skip */ }
-    }
-  } catch { /* DB error — treat as not found */ }
-  return false;
+    if (extFields.some(f => f.toLowerCase() === target)) return { found: true };
+
+    // Missed. Only now is it worth paying for the full column list — to decide
+    // whether the index is even in a position to judge, and to name the field
+    // the caller most likely meant.
+    const ownFields = (deps.db.prepare(
+      `SELECT name FROM symbols
+       WHERE parent_name = ? AND type = 'field'
+       LIMIT 512`,
+    ).all(table) as Array<{ name: string }>).map(r => r.name);
+
+    return {
+      found: false,
+      judgeable: ownFields.length > 0 || extFields.length > 0,
+      suggestion: prefixVariantOf(fieldName, [...ownFields, ...extFields]),
+    };
+  } catch {
+    // DB error — say we could not look, rather than that the field is missing.
+    return { found: false, judgeable: false };
+  }
+}
+
+/**
+ * The diagnostic for a field the index could not confirm.
+ *
+ * The old text sent the caller to `get_object_info(objectType="table")`, which
+ * lists the table's OWN columns and nothing else — so an agent chasing a field a
+ * table extension contributes was pointed at the one reader that cannot show it.
+ * (Observed: a session called exactly that, learned nothing, and only got
+ * unstuck on the next call, to `objectType="table-extension"`.)
+ */
+function unknownFieldViolation(
+  verdict: Extract<FieldVerdict, { found: false }>,
+  tableName: string,
+  fieldName: string,
+  line: number,
+): ReferenceViolation {
+  const where =
+    `\`get_object_info(objectType="table", name="${tableName}")\` lists only ${tableName}'s own ` +
+    `columns; a field a table or view EXTENSION adds is under ` +
+    `\`get_object_info(objectType="table-extension", name="${tableName}")\`.`;
+
+  if (!verdict.judgeable) {
+    return {
+      kind: 'unknown-field',
+      severity: 'warning',
+      // Not an ordinary warning: nothing was checked. gateOnReferenceErrors
+      // refuses on this too, because "the index could not tell" is not the
+      // proof GROUNDING_ENFORCE exists to demand — and for maps the gap is
+      // total (377 of 377 carry no field rows), so without this the gate is
+      // simply off for every map buffer.
+      unverifiable: true,
+      line,
+      identifier: `${tableName}.${fieldName}`,
+      detail:
+        `Could not verify "${fieldName}" on ${tableName}: the index holds no column list for ` +
+        `${tableName} at all (0 fields, 0 field-adding extensions), so this is a gap in the ` +
+        `index, not evidence the field is missing. ${where}`,
+    };
+  }
+
+  const didYouMean = verdict.suggestion
+    ? ` Did you mean \`${verdict.suggestion}\`? (A member added to another model's object carries ` +
+      `that model's prefix.)`
+    : '';
+
+  return {
+    kind: 'unknown-field',
+    severity: 'error',
+    line,
+    identifier: `${tableName}.${fieldName}`,
+    detail:
+      `Field "${fieldName}" not found on ${tableName} (checked its own columns, the system ` +
+      `fields, and every table/view extension in the index).${didYouMean} ${where}`,
+  };
 }
 
 interface Arity { min: number; max: number }
@@ -651,8 +818,11 @@ export function resolveXppReferences(code: string, deps: ResolverDeps): ResolveR
     const legacy = s.value.match(/^@([A-Z]{2,4}\d+)$/);
     if (modern) {
       const [, fileId, labelId] = modern;
-      if (deps.getLabelById(labelId, fileId).length > 0) {
+      const hits = deps.getLabelById(labelId, fileId);
+      if (hits.length > 0) {
         verifiedCount++;
+        const v = checkLabelPlaceholders(hits, `@${fileId}:${labelId}`, cleaned, s.index, code);
+        if (v) violations.push(v);
       } else {
         // Known label file with missing id is an error; unknown file is a warning.
         const fileKnown = labelFileExists(deps, fileId);
@@ -667,7 +837,13 @@ export function resolveXppReferences(code: string, deps: ResolverDeps): ResolveR
         });
       }
     } else if (legacy) {
-      if (deps.getLabelById(legacy[1]).length > 0) {
+      // The whole literal, not the capture group (#888). The regex strips the
+      // '@' that the 27 legacy label files store as part of the key, so looking
+      // up `SYS12345` against an index holding `@SYS12345` could never hit and
+      // EVERY legacy label in X++ drew an unknown-label warning during write
+      // validation. getLabelById accepts either spelling; passing the literal
+      // keeps this branch honest even if that ever narrows again.
+      if (deps.getLabelById(s.value).length > 0) {
         verifiedCount++;
       } else {
         violations.push({
@@ -713,16 +889,11 @@ export function resolveXppReferences(code: string, deps: ResolverDeps): ResolveR
     // Second argument: fieldStr(T, F) / methodStr(C, m) / tableFieldGroupStr(T, G)
     if (member) {
       if (fn === 'fieldstr' || fn === 'fieldnum') {
-        if (fieldExists(deps, target, member)) {
+        const verdict = fieldVerdict(deps, target, member);
+        if (verdict.found) {
           verifiedCount++;
         } else {
-          violations.push({
-            kind: 'unknown-field',
-            severity: 'error',
-            line,
-            identifier: `${target}.${member}`,
-            detail: `Field "${member}" not found on ${target} (checked fields, system fields, table extensions). Use get_object_info(objectType="table", name="${target}").`,
-          });
+          violations.push(unknownFieldViolation(verdict, target, member, line));
         }
       } else if (fn === 'methodstr' || fn === 'staticmethodstr') {
         if (findMethod(deps, target, member)) {
@@ -783,7 +954,7 @@ export function resolveXppReferences(code: string, deps: ResolverDeps): ResolveR
         severity: 'error',
         line,
         identifier: `${typeName}::${member}`,
-        detail: `Static method "${member}" not found on ${typeName} (checked inheritance chain and extensions). Use get_object_info(objectType="class", name="${typeName}") or get_method(include="signature").`,
+        detail: `Static method "${member}" not found on ${typeName} (checked inheritance chain and extensions). Use get_object_info(objectType="class", name="${typeName}") — add options:{"method":"${member}","include":"signature"} for that one method.`,
       });
       continue;
     }
@@ -870,16 +1041,11 @@ export function resolveXppReferences(code: string, deps: ResolverDeps): ResolveR
           });
         }
       } else if (isTableLike) {
-        if (fieldExists(deps, typeName, member)) {
+        const verdict = fieldVerdict(deps, typeName, member);
+        if (verdict.found) {
           verifiedCount++;
         } else {
-          violations.push({
-            kind: 'unknown-field',
-            severity: 'error',
-            line,
-            identifier: `${typeName}.${member}`,
-            detail: `Field "${member}" not found on ${typeName} (checked fields, system fields, table extensions). Use get_object_info(objectType="table", name="${typeName}").`,
-          });
+          violations.push(unknownFieldViolation(verdict, typeName, member, line));
         }
       }
     }
@@ -905,6 +1071,108 @@ export function resolverModelVisibility(): ModelVisibility | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * A label's %n placeholders against the arguments the call site supplies.
+ *
+ * Both directions are silent at compile time and wrong at runtime: a label with
+ * %1 used without strFmt shows the user a literal "%1", and arguments passed to
+ * a label that has no placeholders are discarded.
+ */
+function checkLabelPlaceholders(
+  hits: Array<{ language?: string; text?: string }>,
+  identifier: string,
+  cleaned: string,
+  index: number,
+  code: string,
+): ReferenceViolation | null {
+  const preferred = hits.find(h => h.language?.toLowerCase() === 'en-us') ?? hits[0];
+  if (!preferred?.text) return null;
+
+  const needed = placeholderCount(preferred.text);
+  const supplied = strFmtArgs(cleaned, index);
+  const line = lineOf(code, index);
+  const quoted = `"${preferred.text}"`;
+
+  if (needed === 0 && supplied !== null && supplied > 0) {
+    return {
+      kind: 'label-placeholder-mismatch',
+      severity: 'error',
+      line,
+      identifier,
+      detail:
+        `${identifier} is ${quoted} — no %1 placeholder, so the ${supplied} strFmt argument(s) are discarded. ` +
+        `Drop strFmt, or add %1…%${supplied} to the label text with labels(action="update").`,
+    };
+  }
+  if (needed > 0 && supplied === null) {
+    return {
+      kind: 'label-placeholder-mismatch',
+      severity: 'error',
+      line,
+      identifier,
+      detail:
+        `${identifier} is ${quoted} — it takes ${needed} argument(s) and must be wrapped: ` +
+        `strFmt("${identifier}", …). Used bare, the user sees the literal %1.`,
+    };
+  }
+  if (needed > 0 && supplied !== null && supplied !== needed) {
+    return {
+      kind: 'label-placeholder-mismatch',
+      severity: 'error',
+      line,
+      identifier,
+      detail:
+        `${identifier} is ${quoted} — it takes ${needed} argument(s), strFmt supplies ${supplied}.`,
+    };
+  }
+  return null;
+}
+
+/** Highest %n in a label's text; 0 when it takes no arguments. */
+function placeholderCount(text: string): number {
+  let max = 0;
+  for (const m of text.matchAll(/%(\d+)/g)) max = Math.max(max, Number(m[1]));
+  return max;
+}
+
+/**
+ * How a label literal at `index` is being passed: as strFmt's format argument,
+ * and if so with how many further arguments.
+ *
+ * Scans backwards for the nearest unclosed `(` chain, so `checkFailed(strFmt(@X,
+ * a, b))` reports the strFmt, not the checkFailed. `literalStr(@X)` is
+ * transparent — it wraps the literal without changing who receives it.
+ */
+function strFmtArgs(cleaned: string, index: number): number | null {
+  let depth = 0;
+  let i = index - 1;
+  for (; i >= 0; i--) {
+    const c = cleaned[i];
+    if (c === ')') depth++;
+    else if (c === '(') {
+      if (depth === 0) break;
+      depth--;
+    }
+  }
+  if (i < 0) return null;
+
+  const callee = /([A-Za-z_]\w*)\s*$/.exec(cleaned.slice(0, i));
+  if (!callee) return null;
+  if (/^literalStr$/i.test(callee[1])) return strFmtArgs(cleaned, callee.index);
+  if (!/^strFmt$/i.test(callee[1])) return null;
+
+  // Commas at this call's own depth, from the format argument to the close.
+  let args = 0;
+  let d = 0;
+  for (let k = i + 1; k < cleaned.length; k++) {
+    const c = cleaned[k];
+    if (c === '(') d++;
+    else if (c === ')') { if (d === 0) break; d--; }
+    else if (c === ',' && d === 0) args++;
+  }
+  return args;
 }
 
 /** True when the label file id is present in the labels index. */
@@ -944,9 +1212,12 @@ export function gateOnReferenceErrors(
   } catch {
     return null; // never block writes on resolver failure
   }
-  const errors = result.violations.filter(v => v.severity === 'error');
-  if (errors.length === 0) return null;
-  const list = errors
+  // Unverifiable is blocking here even though it is only a warning elsewhere:
+  // this gate's promise is that every identifier was PROVEN, and a reference the
+  // index could not check has not been.
+  const blocking = result.violations.filter(v => v.severity === 'error' || v.unverifiable);
+  if (blocking.length === 0) return null;
+  const list = blocking
     .map(v => `  • [${v.kind}] line ${v.line}: \`${v.identifier}\` — ${v.detail}`)
     .join('\n');
   return {
@@ -957,7 +1228,10 @@ export function gateOnReferenceErrors(
         `❌ Unresolved references in ${operationDescription} (GROUNDING_ENFORCE=true).\n\n` +
         `The following identifiers could NOT be proven against the indexed codebase:\n\n` +
         `${list}\n\n` +
-        `Fix the identifiers (use the suggested lookup tools), then retry. ` +
+        `Some of these may be REAL and simply unindexed — the detail line says which. ` +
+        `Fix the ones that are wrong; for one the index cannot see, run ` +
+        `update_symbol_index on the object that declares it, or set GROUNDING_ENFORCE=false ` +
+        `for this write. Then retry. ` +
         `Run \`validate_code(mode="references")\` on the corrected code to confirm it is clean.`,
     }],
   };
