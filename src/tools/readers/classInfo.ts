@@ -9,6 +9,7 @@ import type { XppServerContext } from '../../types/context.js';
 import { validateWorkspacePath } from '../../workspace/workspaceUtils.js';
 import { buildObjectTypeMismatchMessage } from '../../utils/metadataResolver.js';
 import { tryBridgeClass } from '../../bridge/bridgeAdapter.js';
+import { COMPACT_METHODS_HINT, SOURCE_UNAVAILABLE_HINT, fullBodyHint } from '../../utils/methodBodyHint.js';
 
 const METHOD_PAGE_SIZE = 15;
 
@@ -73,7 +74,7 @@ export async function classInfoTool(request: CallToolRequest, context: XppServer
 
     // compact=true (default): serve entirely from DB — no filesystem access, instant response
     if (args.compact !== false) {
-      return buildDbOnlyResponse(args.className, classSymbol, symbolIndex, args.methodOffset ?? 0);
+      return buildDbOnlyResponse(args.className, classSymbol, symbolIndex, args.methodOffset ?? 0, 'compact');
     }
 
     // compact=false: parse XML for source bodies, with timeout guard to avoid hanging
@@ -91,7 +92,7 @@ export async function classInfoTool(request: CallToolRequest, context: XppServer
 
     if (!classInfo.success || !classInfo.data) {
       // Fallback to DB when XML not available (build agent, no D365FO install, timeout)
-      return buildDbOnlyResponse(args.className, classSymbol, symbolIndex, args.methodOffset ?? 0);
+      return buildDbOnlyResponse(args.className, classSymbol, symbolIndex, args.methodOffset ?? 0, 'source-unavailable');
     }
 
     const cls = classInfo.data;
@@ -107,6 +108,11 @@ export async function classInfoTool(request: CallToolRequest, context: XppServer
     }
     
     output += `**Model:** ${cls.model}\n`;
+    // Beside the model, because the two are only useful together: `internal` is
+    // package-scoped, so whether it blocks the reader depends on which model the
+    // reader is writing in. Stated as a fact, with no verdict attached (#902).
+    // The declaration was read here, so an absent modifier really is public.
+    output += `**Access:** ${cls.visibility ?? 'public'}\n`;
     output += `**Abstract:** ${cls.isAbstract ? 'Yes' : 'No'}\n`;
     output += `**Final:** ${cls.isFinal ? 'Yes' : 'No'}\n\n`;
 
@@ -139,7 +145,9 @@ export async function classInfoTool(request: CallToolRequest, context: XppServer
           output += `**Documentation:**\n${method.documentation}\n\n`;
         }
         
-        output += `\`\`\`xpp\n${method.source.substring(0, 200)}${method.source.length > 200 ? '\n// ... (use get_method(include="signature") for full body)' : ''}\n\`\`\`\n\n`;
+        // include="signature" returns the signature INSTEAD of the body, so the
+        // old text here named the one value that cannot answer "full body".
+        output += `\`\`\`xpp\n${method.source.substring(0, 200)}${method.source.length > 200 ? `\n// ... (${fullBodyHint(method.name)})` : ''}\n\`\`\`\n\n`;
       }
     }
 
@@ -177,6 +185,14 @@ async function buildDbOnlyResponse(
   classSymbol: any,
   symbolIndex: any,
   methodOffset: number,
+  /**
+   * Why this response carries signatures only. 'compact' means the caller never
+   * asked for bodies and `compact:false` will get them; 'source-unavailable'
+   * means they DID ask and the XML could not be read (no D365FO install, or the
+   * parse timed out), where repeating "pass compact:false" would send them
+   * round the same loop.
+   */
+  reason: 'compact' | 'source-unavailable',
 ): Promise<any> {
   const methods = symbolIndex.getClassMethods(className) as Array<{ name: string; signature?: string; isStatic?: boolean }>;
 
@@ -184,6 +200,10 @@ async function buildDbOnlyResponse(
   let output = `# Class: ${className}`;
   if (classSymbol.extendsClass) output += ` extends ${classSymbol.extendsClass}`;
   output += `\n**Model:** ${classSymbol.model}`;
+  // Only when the column holds something. Unlike the XML path this one has not
+  // read the source, and a database built before the column existed answers NULL
+  // for every class — which is "not indexed yet", not "public" (#902).
+  if (classSymbol.visibility) output += `  **Access:** ${classSymbol.visibility}`;
   if (classSymbol.implementsInterfaces) output += `  **Implements:** ${classSymbol.implementsInterfaces}`;
   output += '\n\n';
 
@@ -199,7 +219,15 @@ async function buildDbOnlyResponse(
   if (hasMore) {
     output += `\n> ⚠️ ${totalMethods - methodOffset - METHOD_PAGE_SIZE} more — call with \`methodOffset: ${methodOffset + METHOD_PAGE_SIZE}\`\n`;
   }
-  output += `\n> 💡 Use \`get_method(include="signature")\` for a full method body.\n`;
+  // Was: `Use get_method(include="signature") for a full method body` — which
+  // named the one `include` value that returns a signature INSTEAD of a body
+  // (getMethod.ts METHOD_INCLUDES is signature|source|both), on a tool that is
+  // no longer published in ListTools. An agent following it either got no body
+  // or called a name it could not see. Same wording as the bridge path now, so
+  // the two never disagree about the escape hatch.
+  output += totalMethods > 0
+    ? `\n${reason === 'compact' ? COMPACT_METHODS_HINT : SOURCE_UNAVAILABLE_HINT}\n`
+    : '';
 
   return { content: [{ type: 'text', text: output }] };
 }

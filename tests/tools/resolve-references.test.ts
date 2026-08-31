@@ -14,6 +14,7 @@ import {
   type ResolverDeps,
 } from '../../src/tools/write/resolveReferences';
 import { validateCodeTool } from '../../src/tools/analysis/validateCode';
+import { labelIdSpellings, parseLabelReference } from '../../src/utils/labelReference';
 
 const ORIGINAL_ENFORCE = process.env.GROUNDING_ENFORCE;
 
@@ -22,18 +23,30 @@ let db: ResolverDeps['db'];
 let deps: ResolverDeps;
 
 const LABELS: Record<string, string[]> = {
-  // labelFileId → known label ids
-  SYS: ['SYS12345'],
+  // labelFileId → known label ids, stored the way labelParser writes them: the
+  // `Key=` token verbatim. The 27 legacy AX-era files keep their sigil
+  // (`@SYS12345=…`), modern ones do not. This mock used to hold a bare
+  // 'SYS12345' — the opposite of the real index — and that is the only reason
+  // the legacy-label test passed while every `@SYSnnnnn` in real X++ drew an
+  // unknown-label warning (#888).
+  SYS: ['@SYS12345'],
   Contoso: ['MyLabel'],
 };
 
 function makeDeps(database: ResolverDeps['db']): ResolverDeps {
   return {
     db: database,
+    // Mirrors symbolIndex.getLabelById: the caller's spelling is normalised, the
+    // STORED id comes back.
     getLabelById: (labelId: string, labelFileId?: string) => {
+      const parsed = parseLabelReference(labelId);
+      const spellings = labelIdSpellings(parsed.labelId);
+      const file = labelFileId ?? parsed.labelFileId;
       const hit = (fileId: string) =>
-        (LABELS[fileId] ?? []).includes(labelId) ? [{ labelId, labelFileId: fileId }] : [];
-      if (labelFileId) return hit(labelFileId);
+        (LABELS[fileId] ?? [])
+          .filter(stored => spellings.includes(stored))
+          .map(stored => ({ labelId: stored, labelFileId: fileId }));
+      if (file) return hit(file);
       return Object.keys(LABELS).flatMap(hit);
     },
     getLabelFileIds: () => Object.keys(LABELS).map(labelFileId => ({ labelFileId })),
@@ -62,6 +75,10 @@ beforeAll(() => {
   sym('find', 'method', 'CustTable',
     'public static CustTable find(CustAccount _custAccount, boolean _forUpdate = false)');
   sym('SalesTable', 'table');
+  // A table the index knows with ZERO indexed columns — the "created this
+  // session, fields not indexed yet" shape the data-entity field check must
+  // stay silent about rather than report every column as missing.
+  sym('FieldlessTable', 'table');
   sym('SalesId', 'field', 'SalesTable', 'SalesIdBase');
   // Classes with inheritance
   sym('SalesFormLetter', 'class', undefined, undefined, 'RunBaseBatch');
@@ -632,20 +649,41 @@ describe('validateCodeTool references mode — xml-table EDT checking', () => {
       { params: { arguments: { mode: 'references', codeType: 'xml-table', code: xml } } } as any,
       context,
     );
-    expect(result.isError).toBe(true);
+    // Reported, but no longer fatal. This check is index-only, and on a real
+    // installation 44 enum names that shipped Microsoft metadata references cannot be
+    // resolved by it. A check that cannot tell "absent from the index" from "does
+    // not exist" must not fail the call: the agent obeys, swaps in a real-but-
+    // different enum out of search results, and the edit compiles clean meaning
+    // something else.
     expect(result.content[0].text).toContain('NoSuchEnum');
+    expect(result.content[0].text).toContain('warning');
+    expect(result.isError).toBeFalsy();
   });
 
-  it('accepts a known enum (NoYes) in <EnumType>', async () => {
+  // The shared fixture seeds sym('NoYes', 'enum'), so this passed for the wrong
+  // reason for the whole life of the check: the mock index was more generous than
+  // any real one, where NoYes has no AxEnum element and returns 0 rows. The X++
+  // side had already spotted the same trap and tested against emptyDeps (see
+  // "accepts NoYes:: even when the index does not prove NoYes"); the XML side had
+  // not, which is how <EnumType>NoYes</EnumType> shipped as a hard error.
+  it('accepts NoYes even when the index does NOT contain it', async () => {
     const xml = `<?xml version="1.0"?><AxTable><Name>MyTable</Name><Fields>
       <AxTableField i:type="AxTableFieldEnum"><Name>Active</Name>
         <EnumType>NoYes</EnumType></AxTableField>
     </Fields></AxTable>`;
+    // An index that proves nothing — exactly what a real one offers for NoYes.
+    const blindContext = {
+      symbolIndex: {
+        getReadDb: () => ({ prepare: () => ({ all: () => [], get: () => undefined }) }),
+        getLabelById: () => [],
+      },
+    } as any;
     const result = await validateCodeTool(
       { params: { arguments: { mode: 'references', codeType: 'xml-table', code: xml } } } as any,
-      context,
+      blindContext,
     );
     expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).not.toContain('NoYes" is not in the symbol index');
   });
 });
 
@@ -713,5 +751,135 @@ describe('label placeholders vs strFmt arguments', () => {
       resolveXppReferences('ret = checkFailed("@AslFinSK:Downgrade");', noText)
         .violations.filter(v => v.kind === 'label-placeholder-mismatch'),
     ).toHaveLength(0);
+  });
+});
+
+/**
+ * A data entity keeps its references under element names NONE of the generic
+ * scans use: the source table is <Table>, a mapped column is <DataField> paired
+ * with a <DataSource>, and a query column is <Field>. So references mode on an
+ * AxDataEntityView reported "all 0 reference(s) verified" — it had checked
+ * nothing, and a hallucinated field name passed the static gate in silence.
+ * Eval case L2-entity-query-range-roundtrip, 2026-08-23.
+ */
+describe('validateCodeTool references mode — AxDataEntityView', () => {
+  const context = {
+    symbolIndex: {
+      getReadDb: () => db,
+      getLabelById: (id: string, f?: string) => makeDeps(db).getLabelById(id, f),
+      getLabelFileIds: () => Object.keys(LABELS).map(labelFileId => ({ labelFileId })),
+    },
+  } as any;
+
+  const entity = (opts: {
+    table?: string; queryField?: string; mappedField?: string; dataSource?: string;
+  } = {}) => {
+    const table = opts.table ?? 'CustTable';
+    const ds = opts.dataSource ?? table;
+    return `<?xml version="1.0"?><AxDataEntityView><Name>MyEntity</Name>
+      <Fields>
+        <AxDataEntityViewField i:type="AxDataEntityViewMappedField">
+          <Name>Acct</Name>
+          <DataField>${opts.mappedField ?? 'AccountNum'}</DataField>
+          <DataSource>${ds}</DataSource>
+        </AxDataEntityViewField>
+      </Fields>
+      <ViewMetadata><Name>Metadata</Name><DataSources>
+        <AxQuerySimpleRootDataSource>
+          <Name>${ds}</Name>
+          <Table>${table}</Table>
+          <DataSources />
+          <Fields>
+            <AxQuerySimpleDataSourceField>
+              <Name>F</Name><Field>${opts.queryField ?? 'AccountNum'}</Field>
+            </AxQuerySimpleDataSourceField>
+          </Fields>
+        </AxQuerySimpleRootDataSource>
+      </DataSources></ViewMetadata>
+    </AxDataEntityView>`;
+  };
+
+  const run = (xml: string) => validateCodeTool(
+    { params: { arguments: { mode: 'references', codeType: 'xml-table', code: xml } } } as any,
+    context,
+  );
+
+  it('actually verifies something — it used to report 0 references checked', async () => {
+    const r: any = await run(entity());
+    const text = r.content[0].text as string;
+    expect(text, 'the entity pass must verify at least the source table').not.toContain('all 0 reference(s) verified');
+  });
+
+  it('flags a source table that does not exist', async () => {
+    const r: any = await run(entity({ table: 'NoSuchTable' }));
+    expect(r.content[0].text).toContain('NoSuchTable');
+  });
+
+  it('flags a query <Field> that is not a column of the data source table', async () => {
+    const r: any = await run(entity({ queryField: 'NotAColumn' }));
+    expect(r.content[0].text).toContain('NotAColumn');
+  });
+
+  it('flags a mapped <DataField> that is not a column of its <DataSource>', async () => {
+    const r: any = await run(entity({ mappedField: 'AlsoNotAColumn' }));
+    expect(r.content[0].text).toContain('AlsoNotAColumn');
+  });
+
+  it('accepts real columns without complaint', async () => {
+    const r: any = await run(entity({ queryField: 'CustGroup', mappedField: 'Blocked' }));
+    const text = r.content[0].text as string;
+    expect(text).not.toContain('CustGroup"');
+    expect(text).not.toContain('Blocked"');
+  });
+
+  it('stays silent about the fields of a table the index knows no columns for', async () => {
+    // A table created earlier in the SAME session may be indexed while its
+    // columns are not. Reporting every field as missing there would be a
+    // confident lie about output that is fine — the failure class this repo
+    // cares about most.
+    const r: any = await run(entity({
+      table: 'FieldlessTable', dataSource: 'FieldlessTable',
+      queryField: 'Whatever', mappedField: 'Whatever2',
+    }));
+    const text = r.content[0].text as string;
+    expect(text).not.toContain('Whatever');
+    expect(text).not.toContain('Whatever2');
+  });
+
+  it('but DOES judge the fields of a table whose columns are indexed', () => {
+    // The other half of the same rule — silence must be about missing evidence,
+    // not a blanket exemption.
+    return run(entity({ table: 'SalesTable', dataSource: 'SalesTable', queryField: 'NotOnSales' }))
+      .then((r: any) => expect(r.content[0].text).toContain('NotOnSales'));
+  });
+
+  it('resolves a JOINED data source to its own table, not the nearest one', async () => {
+    // Embedded data sources nest. A flat tag scan pairs <Field> with whichever
+    // <Table> is nearest in document order, which is how a check reports the
+    // wrong table with full confidence.
+    const xml = `<?xml version="1.0"?><AxDataEntityView><Name>MyEntity</Name>
+      <Fields />
+      <ViewMetadata><Name>Metadata</Name><DataSources>
+        <AxQuerySimpleRootDataSource>
+          <Name>CustTable</Name><Table>CustTable</Table>
+          <Fields>
+            <AxQuerySimpleDataSourceField><Name>A</Name><Field>AccountNum</Field></AxQuerySimpleDataSourceField>
+          </Fields>
+          <DataSources>
+            <AxQuerySimpleEmbeddedDataSource>
+              <Name>SalesTable</Name><Table>SalesTable</Table>
+              <Fields>
+                <AxQuerySimpleDataSourceField><Name>B</Name><Field>SalesId</Field></AxQuerySimpleDataSourceField>
+              </Fields>
+            </AxQuerySimpleEmbeddedDataSource>
+          </DataSources>
+        </AxQuerySimpleRootDataSource>
+      </DataSources></ViewMetadata>
+    </AxDataEntityView>`;
+    const r: any = await run(xml);
+    const text = r.content[0].text as string;
+    // SalesId is a column of SalesTable, not of CustTable — pairing it with the
+    // root table would flag it.
+    expect(text).not.toContain('SalesId');
   });
 });

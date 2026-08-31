@@ -1,6 +1,6 @@
 /**
  * Oracle / scoring-integrity regressions from the 2026-07-21 golden-capture sweep
- * (docs/eval-sweep-findings-2026-07-21.md #24, #2, #3).
+ * (the 2026-07-21 eval sweep, findings #24, #2, #3).
  *
  * All three are measurement defects: the oracle either failed a faithful
  * reproduction for a cosmetic reason, or reported a number that was never
@@ -199,6 +199,49 @@ describe('#2 — legacy golden FILENAMES pair with the actual files the VM produ
       expect(hit && path.basename(hit)).toBe('ConDemoEnumExtProbe.metadata.xml');
       const miss = resolveActualFile(dir, 'SomethingElse.AxClass.metadata.xml', GOLDEN_CAPTURE_PREFIXES, GOLDEN_CAPTURE_PREFIXES);
       expect(miss).toBeUndefined();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolveActualFile pairs a golden with the bare AOT .xml the VM writes', () => {
+    // --actual-dir pointed at <Model>/<Model>/AxClass sees plain .xml, not
+    // .metadata.xml. That used to match nothing and score every artifact missing —
+    // a silent zero (L2-attribute-authoring-reflection capture, 2026-08-30).
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'oracle-artifact-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'ConDemoRouteTargetAttribute.xml'), '<AxClass/>');
+      const hit = resolveActualFile(dir, 'ConDemoRouteTargetAttribute.metadata.xml', GOLDEN_CAPTURE_PREFIXES, GOLDEN_CAPTURE_PREFIXES);
+      expect(hit && path.basename(hit)).toBe('ConDemoRouteTargetAttribute.xml');
+
+      // A legacy golden name still reaches it through the logical key.
+      const legacy = resolveActualFile(dir, 'DemoRouteTargetAttribute.AxClass.metadata.xml', GOLDEN_CAPTURE_PREFIXES, GOLDEN_CAPTURE_PREFIXES);
+      expect(legacy && path.basename(legacy)).toBe('ConDemoRouteTargetAttribute.xml');
+
+      // A .metadata.xml neighbour wins when both shapes are present.
+      fs.writeFileSync(path.join(dir, 'ConDemoRouteTargetAttribute.metadata.xml'), '<AxClass/>');
+      const preferred = resolveActualFile(dir, 'DemoRouteTargetAttribute.AxClass.metadata.xml', GOLDEN_CAPTURE_PREFIXES, GOLDEN_CAPTURE_PREFIXES);
+      expect(preferred && path.basename(preferred)).toBe('ConDemoRouteTargetAttribute.metadata.xml');
+
+      // And an unrelated object still misses.
+      expect(resolveActualFile(dir, 'SomethingElse.metadata.xml', GOLDEN_CAPTURE_PREFIXES, GOLDEN_CAPTURE_PREFIXES)).toBeUndefined();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('buildActualArtifactsMap keys a bare AOT .xml in the golden filename shape', () => {
+    // Resolving the file is only half of it: keyed as ".xml" the pair still diffed
+    // as missing + extra, because the golden side keys as ".metadata.xml".
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'oracle-artifact-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'ConDemoRouteTargetAttribute.xml'), '<AxClass/>');
+      const { actualArtifacts, matchedActualFiles } = buildActualArtifactsMap(
+        dir, ['ConDemoRouteTargetAttribute.metadata.xml'], GOLDEN_CAPTURE_PREFIXES, GOLDEN_CAPTURE_PREFIXES);
+
+      expect(Object.keys(actualArtifacts)).toEqual(['ConDemoRouteTargetAttribute.metadata.xml']);
+      // …while the caller still learns which file on disk was actually consumed.
+      expect([...matchedActualFiles]).toEqual(['ConDemoRouteTargetAttribute.xml']);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

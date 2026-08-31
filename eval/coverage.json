@@ -1,14 +1,14 @@
 {
   "core": {
     "tier": "core",
-    "total": 44,
-    "covered": 44,
+    "total": 59,
+    "covered": 59,
     "percent": 100
   },
   "total": {
     "tier": "all",
-    "total": 78,
-    "covered": 78,
+    "total": 100,
+    "covered": 100,
     "percent": 100
   },
   "leaves": [
@@ -293,11 +293,8 @@
       "t": true,
       "covered": true,
       "cases": [
-        "L2-class-method-ops",
-        "L2-form-modify-controls",
-        "L2-table-modify-lifecycle",
-        "L3-form-add-datasource-lines",
-        "L4-master-security-slice"
+        "L2-exception-tts-retry",
+        "L2-occ-retry-basic"
       ]
     },
     {
@@ -311,6 +308,9 @@
       "t": true,
       "covered": true,
       "cases": [
+        "L2-date-effective-table",
+        "L2-multi-company-changecompany",
+        "L2-sysda-fluent-query",
         "L4-ssrs-report-advanced",
         "L4-ssrs-report-basic"
       ]
@@ -326,6 +326,7 @@
       "t": true,
       "covered": true,
       "cases": [
+        "L2-performance-set-based",
         "L4-ssrs-report-basic"
       ]
     },
@@ -410,31 +411,48 @@
         "L1-macro-library-flight",
         "L1-map-basic",
         "L1-table-basic",
+        "L2-args-record-caller",
+        "L2-attribute-authoring-reflection",
+        "L2-bp-suppression-lifecycle",
         "L2-business-event-basic",
         "L2-class-method-ops",
         "L2-coc-inherited-method",
         "L2-collections-map-list-container",
         "L2-config-key-gated-table",
+        "L2-data-types-conversions",
+        "L2-date-effective-table",
         "L2-datetime-timezone-range",
+        "L2-declarations-scope",
         "L2-delegate-basic",
         "L2-dimension-basic",
         "L2-direct-sql-connection",
+        "L2-display-edit-methods",
         "L2-dotnet-interop-clrerror",
         "L2-edt-extension-basic",
         "L2-feature-management-flight",
+        "L2-implicit-conversions",
         "L2-interface-abstract-basic",
+        "L2-intrinsic-functions",
         "L2-license-code-configkey",
         "L2-numberseq-basic",
         "L2-occ-retry-basic",
+        "L2-operators-precedence",
         "L2-reflection-dict-fieldwalk",
+        "L2-runtime-functions-arity",
+        "L2-select-find-options-joins",
+        "L2-statements-switch-loops",
         "L2-sysda-fluent-query",
         "L2-sysextension-plugin",
+        "L2-systest-authoring-basic",
         "L2-table-caching-basic",
         "L2-table-extension",
         "L2-table-inheritance-basic",
         "L2-table-modify-lifecycle",
         "L3-custom-service-basic",
-        "L3-form-detailstransaction"
+        "L3-form-detailstransaction",
+        "L3-form-event-handler-class",
+        "L3-report-dataset-extension",
+        "L3-sysoperation-dialog-attributes"
       ]
     },
     {
@@ -462,31 +480,47 @@
         "L1-macro-library-flight",
         "L1-map-basic",
         "L1-table-basic",
+        "L2-args-record-caller",
+        "L2-attribute-authoring-reflection",
         "L2-business-event-basic",
         "L2-class-method-ops",
         "L2-coc-inherited-method",
         "L2-collections-map-list-container",
         "L2-config-key-gated-table",
+        "L2-data-types-conversions",
+        "L2-date-effective-table",
         "L2-datetime-timezone-range",
+        "L2-declarations-scope",
         "L2-delegate-basic",
         "L2-dimension-basic",
         "L2-direct-sql-connection",
+        "L2-display-edit-methods",
         "L2-dotnet-interop-clrerror",
         "L2-edt-extension-basic",
         "L2-feature-management-flight",
+        "L2-implicit-conversions",
         "L2-interface-abstract-basic",
+        "L2-intrinsic-functions",
         "L2-license-code-configkey",
         "L2-numberseq-basic",
         "L2-occ-retry-basic",
+        "L2-operators-precedence",
         "L2-reflection-dict-fieldwalk",
+        "L2-runtime-functions-arity",
+        "L2-select-find-options-joins",
+        "L2-statements-switch-loops",
         "L2-sysda-fluent-query",
         "L2-sysextension-plugin",
+        "L2-systest-authoring-basic",
         "L2-table-caching-basic",
         "L2-table-extension",
         "L2-table-inheritance-basic",
         "L2-table-modify-lifecycle",
         "L3-custom-service-basic",
-        "L3-form-detailstransaction"
+        "L3-form-detailstransaction",
+        "L3-form-event-handler-class",
+        "L3-report-dataset-extension",
+        "L3-sysoperation-dialog-attributes"
       ]
     },
     {
@@ -574,6 +608,118 @@
       ]
     },
     {
+      "id": "data-types",
+      "label": "Data types, literals & conversions",
+      "domain": "Code",
+      "tier": "core",
+      "weight": 5,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L2-data-types-conversions"
+      ]
+    },
+    {
+      "id": "declarations-scope",
+      "label": "Declarations & scope (var/const/readonly/using)",
+      "domain": "Code",
+      "tier": "core",
+      "weight": 4,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L2-declarations-scope"
+      ]
+    },
+    {
+      "id": "operators",
+      "label": "Operators & precedence (&&/|| trap, like, is/as)",
+      "domain": "Code",
+      "tier": "core",
+      "weight": 4,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L2-operators-precedence"
+      ]
+    },
+    {
+      "id": "statements-flow",
+      "label": "Statements & flow (switch fallthrough, loops)",
+      "domain": "Code",
+      "tier": "core",
+      "weight": 4,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L2-statements-switch-loops"
+      ]
+    },
+    {
+      "id": "exceptions-tts",
+      "label": "Exceptions inside transactions (catchability, retry)",
+      "domain": "Code",
+      "tier": "core",
+      "weight": 4,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L2-exception-tts-retry"
+      ]
+    },
+    {
+      "id": "attributes",
+      "label": "Attribute authoring & reflection",
+      "domain": "Code",
+      "tier": "total",
+      "weight": 2,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L2-attribute-authoring-reflection"
+      ]
+    },
+    {
+      "id": "intrinsics",
+      "label": "Compile-time (intrinsic) functions",
+      "domain": "Code",
+      "tier": "core",
+      "weight": 4,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L2-intrinsic-functions"
+      ]
+    },
+    {
+      "id": "date-effective",
+      "label": "Date-effective tables (validTimeState)",
+      "domain": "Code",
+      "tier": "total",
+      "weight": 3,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L2-date-effective-table"
+      ]
+    },
+    {
       "id": "form",
       "label": "Form",
       "domain": "UI",
@@ -648,8 +794,12 @@
       "t": true,
       "covered": true,
       "cases": [
+        "L2-config-key-gated-table",
+        "L3-batch-basic",
         "L4-ssrs-report-advanced",
-        "L4-ssrs-report-multidataset"
+        "L4-ssrs-report-multidataset",
+        "L4-ssrs-report-preprocess",
+        "L4-ssrs-report-uibuilder"
       ]
     },
     {
@@ -720,7 +870,50 @@
       "t": true,
       "covered": true,
       "cases": [
-        "L3-print-management-report"
+        "L3-print-management-report",
+        "L3-print-mgmt-doctype-extension"
+      ]
+    },
+    {
+      "id": "report-contracts",
+      "label": "Report contracts (RDP/RDL/print/composite)",
+      "domain": "Reporting",
+      "tier": "core",
+      "weight": 3,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L4-ssrs-report-advanced"
+      ]
+    },
+    {
+      "id": "rdp-preprocess",
+      "label": "Pre-processed RDP (long-running reports)",
+      "domain": "Reporting",
+      "tier": "total",
+      "weight": 2,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L4-ssrs-report-preprocess"
+      ]
+    },
+    {
+      "id": "report-ui-builder",
+      "label": "Report dialog UI builders",
+      "domain": "Reporting",
+      "tier": "total",
+      "weight": 2,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L4-ssrs-report-uibuilder"
       ]
     },
     {
@@ -945,6 +1138,36 @@
       "covered": true,
       "cases": [
         "L3-warehouse-work-slice"
+      ]
+    },
+    {
+      "id": "warehouse-mobile-scanning",
+      "label": "Warehouse app / barcode scanning",
+      "domain": "Frameworks",
+      "tier": "total",
+      "weight": 2,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L3-warehouse-scan-resolve-slice"
+      ]
+    },
+    {
+      "id": "warehouse-app-screens",
+      "label": "Warehouse-app screens (ProcessGuide / legacy)",
+      "domain": "Frameworks",
+      "tier": "total",
+      "weight": 2,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L2-processguide-page-control",
+        "L3-legacy-workexecutedisplay-extend",
+        "L3-processguide-flow-slice"
       ]
     },
     {
@@ -1187,6 +1410,7 @@
       "cases": [
         "L2-coc-extension",
         "L2-event-handler-basic",
+        "L2-systest-authoring-basic",
         "L3-batch-basic"
       ]
     },
@@ -1215,43 +1439,185 @@
         "L1-macro-library-flight",
         "L1-map-basic",
         "L1-table-basic",
+        "L2-args-record-caller",
+        "L2-attribute-authoring-reflection",
         "L2-business-event-basic",
         "L2-class-method-ops",
         "L2-coc-inherited-method",
         "L2-collections-map-list-container",
         "L2-config-key-gated-table",
+        "L2-data-types-conversions",
+        "L2-date-effective-table",
         "L2-datetime-timezone-range",
+        "L2-declarations-scope",
         "L2-delegate-basic",
         "L2-dimension-basic",
         "L2-direct-sql-connection",
+        "L2-display-edit-methods",
         "L2-dotnet-interop-clrerror",
         "L2-edt-extension-basic",
         "L2-feature-management-flight",
+        "L2-implicit-conversions",
         "L2-interface-abstract-basic",
+        "L2-intrinsic-functions",
         "L2-license-code-configkey",
         "L2-numberseq-basic",
         "L2-occ-retry-basic",
+        "L2-operators-precedence",
         "L2-reflection-dict-fieldwalk",
+        "L2-runtime-functions-arity",
+        "L2-select-find-options-joins",
+        "L2-statements-switch-loops",
         "L2-sysda-fluent-query",
         "L2-sysextension-plugin",
+        "L2-systest-authoring-basic",
         "L2-table-caching-basic",
         "L2-table-extension",
         "L2-table-inheritance-basic",
         "L2-table-modify-lifecycle",
         "L3-custom-service-basic",
-        "L3-form-detailstransaction"
+        "L3-form-detailstransaction",
+        "L3-form-event-handler-class",
+        "L3-report-dataset-extension",
+        "L3-sysoperation-dialog-attributes"
+      ]
+    },
+    {
+      "id": "runtime-functions",
+      "label": "Run-time (predefined) functions",
+      "domain": "Code",
+      "tier": "core",
+      "weight": 4,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L2-runtime-functions-arity"
+      ]
+    },
+    {
+      "id": "implicit-conversions",
+      "label": "Implicit conversions & explicit converters",
+      "domain": "Code",
+      "tier": "core",
+      "weight": 3,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L2-implicit-conversions"
+      ]
+    },
+    {
+      "id": "select-find-options",
+      "label": "select find options, join kinds and clause order",
+      "domain": "Code",
+      "tier": "core",
+      "weight": 4,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L2-select-find-options-joins"
+      ]
+    },
+    {
+      "id": "args-navigation",
+      "label": "Args — record, caller and parameters",
+      "domain": "UI",
+      "tier": "core",
+      "weight": 3,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L2-args-record-caller"
+      ]
+    },
+    {
+      "id": "display-edit-methods",
+      "label": "display / edit methods",
+      "domain": "UI",
+      "tier": "core",
+      "weight": 3,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L2-display-edit-methods"
+      ]
+    },
+    {
+      "id": "form-event-handlers",
+      "label": "Form event handlers",
+      "domain": "UI",
+      "tier": "core",
+      "weight": 4,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L3-form-event-handler-class"
+      ]
+    },
+    {
+      "id": "sysoperation-ui",
+      "label": "SysOperation dialog from contract attributes",
+      "domain": "Frameworks",
+      "tier": "total",
+      "weight": 3,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L3-sysoperation-dialog-attributes"
+      ]
+    },
+    {
+      "id": "report-extension",
+      "label": "Extending a standard report",
+      "domain": "Reporting",
+      "tier": "core",
+      "weight": 4,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L3-report-dataset-extension"
+      ]
+    },
+    {
+      "id": "tdd-workflow",
+      "label": "TDD loop (red-first SysTest authoring)",
+      "domain": "Quality",
+      "tier": "core",
+      "weight": 4,
+      "k": true,
+      "e": true,
+      "t": true,
+      "covered": true,
+      "cases": [
+        "L2-systest-authoring-basic"
       ]
     }
   ],
   "orphans": {
-    "knowledge": [
-      "extensible-enums"
-    ],
+    "knowledge": [],
     "cases": [
       "L0-create-readback-no-reindex",
       "L2-batched-object-reads",
+      "L2-entity-query-range-roundtrip",
+      "L2-form-control-removal-lifecycle",
+      "L2-object-delete-and-entry-point-cleanup",
       "L2-oracle-discriminator-random-wrapper-name",
-      "L3-enum-field-form-downgrade-guard",
       "L4-headerlines-document-slice"
     ]
   }

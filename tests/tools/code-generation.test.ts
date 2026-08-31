@@ -125,6 +125,20 @@ describe('generate_code', () => {
     expect(result.content[0].text).toMatch(/SubscribesTo|static void/);
   });
 
+  it('ssrs-report-full controller uses the same design name as the scaffolded AxReport', async () => {
+    const result = await codeGenTool(
+      req('generate_code', { pattern: 'ssrs-report-full', name: 'TestRpt', modelName: 'MyModel' }),
+    );
+    expect(result.isError).toBeFalsy();
+    const text = result.content[0].text;
+    // ssrsReportStr(report, design) is compile-time checked against the AxReport design name
+    expect(text).toMatch(/ssrsReportStr\(\w*TestRpt, Report\)/);
+    expect(text).not.toContain(', Design)');
+    // The AxReport generator's default design name — the two paths must agree
+    const xml = XmlTemplateGenerator.generateAxReportXml('TestRpt');
+    expect(xml).toContain('<Name>Report</Name>');
+  });
+
   it('generates a security-privilege XML', async () => {
     const result = await codeGenTool(
       req('generate_code', { pattern: 'security-privilege', name: 'MyPrivilege', modelName: 'MyModel' }),
@@ -594,6 +608,41 @@ describe('XmlTemplateGenerator.generateAxSecurityPrivilegeXml', () => {
     expect(xml).toContain('<Read>Allow</Read>');
     expect(xml).not.toContain('<Create>');
   });
+
+  /**
+   * The `security-privilege` scaffold is a SECOND emitter of an entry-point
+   * <Grant>, independent of buildAxSecurityPrivilegeXml, and it carried the same
+   * out-of-alphabetical-order bug — silently dropping Create and Delete on the
+   * Maintain privilege it advertises as "Update/Create/Delete". Untested until
+   * now, which is why fixing the other emitter would have left this one wrong.
+   * See tests/tools/securityPrivilegeXml.test.ts for the measurement.
+   */
+  it('scaffolds both privileges with an ALPHABETICAL entry-point grant', async () => {
+    const result = await codeGenTool(
+      req('generate_code', {
+        pattern: 'security-privilege',
+        name: 'MyAsset',
+        targetObject: 'MyAssetMenuItem',
+        modelName: 'MyModel',
+      }),
+    );
+    expect(result.isError).toBeFalsy();
+    const xml = result.content[0].text as string;
+    expect(xml).toContain('MyAssetView');
+    expect(xml).toContain('MyAssetMaintain');
+
+    const grants = [...xml.matchAll(/<Grant>([\s\S]*?)<\/Grant>/g)]
+      .map(m => [...m[1].matchAll(/<([A-Za-z]+)>/g)].map(e => e[1]));
+    expect(grants.length).toBeGreaterThanOrEqual(2);
+    for (const g of grants) {
+      expect(g, `grant out of alphabetical order: ${g.join(',')}`).toEqual([...g].sort());
+    }
+    // The Maintain half must really carry the whole shape, not just be ordered.
+    // `Correct` belongs here: measured over PackagesLocalDirectory, 14034 of the
+    // full-CRUD entry-point grants Microsoft ships carry it, and ZERO match the
+    // Correct-less shape this line used to assert.
+    expect(grants.some(g => g.join(',') === 'Correct,Create,Delete,Read,Update')).toBe(true);
+  });
 });
 
 // ─── XmlTemplateGenerator.splitXppClassSource ────────────────────────────────
@@ -719,7 +768,7 @@ describe('XmlTemplateGenerator security duty/role generators', () => {
     // AxSecurityPrivilegeReference, NOT AxSecurityRolePermissionSet: the latter
     // deserializes into an empty privilege list, so xppbp reports
     // BPErrorDutyHasNoPrivileges / BPErrorPrivilegeNotCoveredByDuty for privileges
-    // that are physically in the file (docs/eval-sweep-findings-2026-07-21.md #31).
+    // that are physically in the file (the 2026-07-21 eval sweep, finding #31).
     expect(xml).toContain('<AxSecurityPrivilegeReference>\n\t\t\t<Name>MyView</Name>');
     expect(xml).not.toContain('AxSecurityRolePermissionSet');
     expect(xml).toContain('<Name>MyMaintain</Name>');

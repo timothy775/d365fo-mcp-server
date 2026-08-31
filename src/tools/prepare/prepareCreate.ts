@@ -17,10 +17,13 @@ import { z } from 'zod';
 import type { XppServerContext } from '../../types/context.js';
 import { createProvenanceToken } from '../../utils/provenanceStore.js';
 import { getConfigManager } from '../../utils/configManager.js';
+import { checkObjectNaming } from '../../utils/objectNamingRules.js';
 import { normalizeObjectName } from '../../utils/objectNaming.js';
 import { renderPrepareOpSpec } from '../specs/opSpecs.js';
 import { rankContext, renderRankedContext } from '../../workspace/contextRanker.js';
+import { budgetRankedContext } from './prepareChange.js';
 import { lookupSymbolsNocase, type SymbolHit } from '../../utils/symbolLookup.js';
+import { formatLabelReference } from '../../utils/labelReference.js';
 import { RESERVED_SYSTEM_FIELD_NAMES } from '../smart/generateSmartTable.js';
 
 export const prepareCreateArgsSchema = z.object({
@@ -84,8 +87,26 @@ function checkCollisions(
   }
 }
 
-/** Naming validation incl. the prefix create_d365fo_file will apply. */
-function validateNaming(baseName: string, finalName: string, modelName: string | undefined): string {
+/**
+ * Naming validation incl. the prefix create_d365fo_file will apply.
+ *
+ * The CONVENTION rules come from utils/objectNamingRules.ts — the same ones
+ * validate_object_naming runs. They used to be reimplemented here, weaker: this
+ * function answered "✅ Naming looks valid" for a name that checker warns is
+ * missing the model prefix, because it had no prefix rule, no underscore rule and
+ * no type-specific conventions at all.
+ *
+ * The checks BELOW stay local on purpose. They guard the name the prefix step
+ * COMPOSED (finalName), where an unrepresentable character can enter a name the
+ * caller never typed (#892/#901); the shared rules see the name the caller wrote.
+ */
+async function validateNaming(
+  baseName: string,
+  finalName: string,
+  objectType: string,
+  modelName: string | undefined,
+  context: XppServerContext,
+): Promise<string> {
   const issues: string[] = [];
   if (finalName.length > 81) {
     issues.push(`❌ Final name "${finalName}" exceeds the 81-char AOT limit (${finalName.length}).`);
@@ -93,16 +114,54 @@ function validateNaming(baseName: string, finalName: string, modelName: string |
   if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(baseName)) {
     issues.push('❌ Name may contain only letters, digits and underscores, and must not start with a digit.');
   }
-  if (!/^[A-Z]/.test(baseName)) {
+  // An extension name is derived from a base name the caller did not choose —
+  // `{Base}{Prefix}_Extension` for a class, `Base.Suffix` for an element — and
+  // the product ships camelCase classes, so the derived name legitimately starts
+  // lowercase. Requiring PascalCase for those contradicts the extension rule
+  // checkObjectNaming enforces below, leaving no name that satisfies both.
+  const isExtensionForm = /_Extension$/.test(baseName) || baseName.includes('.');
+  if (!/^[A-Z]/.test(baseName) && !isExtensionForm) {
     issues.push('❌ Name must start with an uppercase letter (PascalCase).');
   }
+  // The charset check above sees the name the CALLER typed. The name that actually
+  // gets written is finalName, which the prefix/model-name step composed — and that
+  // step is where an unrepresentable character can enter a name the caller never
+  // typed (#892). Extension forms legitimately carry one dot.
+  if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)?$/.test(finalName)) {
+    issues.push(
+      `❌ Final name "${finalName}" is not a valid AOT name — letters, digits and underscores only ` +
+        '(plus one dot for extension elements). Check the model name and prefix configuration.'
+    );
+  }
+  // Convention rules, from the one place that has them. A failure here must not
+  // fail the prepare: the checks above still stand without an index.
+  let shared: Awaited<ReturnType<typeof checkObjectNaming>> | undefined;
+  try {
+    shared = await checkObjectNaming(context.symbolIndex.getReadDb(), {
+      proposedName: baseName,
+      objectType,
+      modelName,
+    });
+  } catch {
+    // index unavailable
+  }
+  for (const e of shared?.errors ?? []) issues.push(`❌ ${e}`);
+  for (const w of shared?.warnings ?? []) issues.push(`⚠️  ${w}`);
+
   const lines = [
     `Base name   : ${baseName}`,
     `Final name  : ${finalName}${finalName !== baseName ? ' _(prefix auto-applied by d365fo_file(action="create"))_' : ''}`,
     `Model       : ${modelName ?? '(not configured — set modelName or .mcp.json)'}`,
   ];
-  if (issues.length > 0) lines.push(...issues);
-  else lines.push('✅ Naming looks valid.');
+  if (issues.length > 0) {
+    lines.push(...issues);
+    // One suggestion, not the validator's full list: prepare is already at its
+    // response cap and the first is the corrected name.
+    const fix = shared?.suggestions?.[0];
+    if (fix) lines.push(`→ ${fix}`);
+  } else {
+    lines.push('✅ Naming looks valid.');
+  }
   return lines.join('\n');
 }
 
@@ -188,7 +247,12 @@ function findReusableLabels(baseName: string, context: XppServerContext): string
     const rows = context.symbolIndex.searchLabels(words, { language: 'en-US', limit: 5 });
     if (rows.length > 0) {
       return rows
-        .map(r => `  @${r.labelFileId}:${r.labelId} = "${r.text}" (${r.model})`)
+        // Not `@${labelFileId}:${labelId}` (#888): a legacy row's id already
+        // carries its file id, so hand-building the reference re-created the
+        // doubled `@GLS:@GLS4170035` that #33/#41 removed everywhere else —
+        // xppbp answers BPErrorLabelIsText — and prepare offers these for reuse
+        // immediately before a write.
+        .map(r => `  ${formatLabelReference(r.labelFileId, r.labelId)} = "${r.text}" (${r.model})`)
         .join('\n') + '\n_Reuse instead of creating duplicates (rule: labels before labels)._';
     }
   } catch {
@@ -247,10 +311,14 @@ export async function prepareCreateTool(request: any, context: XppServerContext)
   // a name that never gets written, so a real collision read as "No collision".
   const finalName = normalizeObjectName(objectName, objectType, modelName);
 
+  // Naming is the one asynchronous check (the shared rules await model detection),
+  // so it is started first and collected below — the rest still run in one tick.
+  const namingPromise = validateNaming(objectName, finalName, objectType, modelName, context);
+
   // All lookups are synchronous index queries — run them in one tick.
   const [collisions, naming, similar, edts, labels, propertyDefaults] = [
     checkCollisions(finalName, objectName, context),
-    validateNaming(objectName, finalName, modelName),
+    await namingPromise,
     findSimilarObjects(objectName, objectType, context),
     fieldsHint && fieldsHint.length > 0 ? suggestEdtsForFields(fieldsHint, context) : '',
     findReusableLabels(objectName, context),
@@ -264,21 +332,44 @@ export async function prepareCreateTool(request: any, context: XppServerContext)
     proposedName: finalName,
   });
 
+  // SECTION ORDER IS LOAD-BEARING — same measurement as prepare(change): with a
+  // p90 response of 5,011 chars against a 5,000-char cap, whatever sits last is
+  // what gets cut. The write contract and the grounding token are the deliverable,
+  // so they lead; discovery follows; the ranked-context block is last and budgeted.
   const lines: string[] = [
     `# prepare(mode="create") — ${objectType} \`${finalName}\``,
     '',
     `**Goal:** ${goal}`,
     '',
-    '### Collision check _(symbol index)_',
-    collisions,
-    '',
-    '### Naming',
-    naming,
-    '',
-    '### Similar existing objects _(copy patterns from these)_',
-    similar,
-    '',
   ];
+
+  // The write contract for this objectType, so the flow does not spend a round
+  // trip on get_knowledge(kind="op-spec") right after this call.
+  lines.push(...renderPrepareOpSpec({ mode: 'create', objectType }));
+
+  lines.push(`**Grounding token:** \`${token}\``);
+  lines.push('');
+  // Was: "generate the object, run validate_code(mode='references') +
+  // validate_code(mode='syntax') on the result, then d365fo_file(action='create')"
+  // — three round trips where one does. The write path already runs the
+  // syntax/BP lint inline (src/tools/write/inlineXppValidation.ts) and resolves
+  // references inline when GROUNDING_ENFORCE=true, so both validate_code calls
+  // re-ran checks the write was going to run anyway, and each re-bills the whole
+  // cached context.
+  lines.push(
+    `Next: call \`d365fo_file(action="create", objectType="${objectType}", objectName="${objectName}", groundingToken=...)\` ` +
+    '— pass the BASE name, the prefix is applied for you. Syntax/BP linting and (under GROUNDING_ENFORCE=true) ' +
+    'reference resolution run INSIDE that call, so no separate validate_code round trip is needed; ' +
+    'use `validate_code(mode="both")` only as an optional pre-check on hand-written X++. ' +
+    'The token is bound to this object and expires in 30 minutes.',
+  );
+  lines.push('');
+  lines.push('---');
+  lines.push('');
+
+  lines.push('### Collision check _(symbol index)_', collisions, '');
+  lines.push('### Naming', naming, '');
+  lines.push('### Similar existing objects _(copy patterns from these)_', similar, '');
   if (edts) {
     lines.push('### EDT suggestions for planned fields _(edt index)_', edts, '');
   }
@@ -287,29 +378,17 @@ export async function prepareCreateTool(request: any, context: XppServerContext)
     lines.push('### Property defaults _(mined from standard models)_', propertyDefaults, '');
   }
 
-  // Surface existing code relevant to the goal; best-effort, omit on failure
+  // Surface existing code relevant to the goal; best-effort, omit on failure,
+  // and deliberately last — see the section-order note above.
   try {
     const ranked = rankContext(context, {
       intent: `${goal} ${objectName} ${(fieldsHint ?? []).join(' ')}`,
       activeObject: { name: objectName, type: objectType },
     });
-    lines.push(...renderRankedContext(ranked), '');
+    lines.push(...budgetRankedContext(renderRankedContext(ranked)), '');
   } catch {
     // Additive — omit on failure.
   }
-
-  // The write contract for this objectType, so the flow does not spend a round
-  // trip on get_knowledge(kind="op-spec") right after this call.
-  lines.push(...renderPrepareOpSpec({ mode: 'create', objectType }));
-
-  lines.push('---');
-  lines.push(`**Grounding token:** \`${token}\``);
-  lines.push('');
-  lines.push(
-    'Next: generate the object, run `validate_code(mode="references")` + `validate_code(mode="syntax")` on the result, ' +
-    `then call \`d365fo_file(action="create", objectType="${objectType}", objectName="${objectName}", groundingToken=...)\`. ` +
-    'The token is bound to this object and expires in 30 minutes.',
-  );
 
   return {
     content: [{ type: 'text', text: lines.join('\n') }],

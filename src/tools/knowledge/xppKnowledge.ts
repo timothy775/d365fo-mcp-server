@@ -15,6 +15,7 @@
 
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
+import { READ_METHOD_OPTIONS } from '../../utils/methodBodyHint.js';
 
 // ─── Schema ─────────────────────────────────────────────────────────────────
 
@@ -163,8 +164,11 @@ class MyProcessContract
       'OCC (Optimistic Concurrency Control) is the default — always handle UpdateConflict exceptions.',
     rules: [
       'ALWAYS pair ttsbegin with ttscommit — unbalanced calls cause runtime crash',
-      'NEVER put try/catch INSIDE ttsbegin..ttscommit — transaction is already rolled back when exception is caught',
-      'Put try/catch OUTSIDE the tts block, catch UpdateConflict, then retry',
+      'Inside an open transaction only TWO exceptions are catchable by a catch INSIDE the tts scope: Exception::UpdateConflict and the duplicate-key exception — and only when named EXPLICITLY; a bare catch-all inside tts does NOT catch them',
+      'Every other exception thrown inside tts aborts the transaction and transfers control to the first catch OUTSIDE the tts block — an inner catch-all is dead code',
+      'The NotRecovered variants (UpdateConflictNotRecovered) and Timeout cannot be caught inside a transaction at all',
+      'throw inside an open transaction implicitly aborts it before unwinding; finally blocks still run',
+      'Recommended pattern: try/catch OUTSIDE the tts block, catch UpdateConflict, then retry with a counter',
       'Use forupdate keyword on select when modifying records',
       'Use pessimisticlock for high-concurrency scenarios (e.g. number sequences)',
       'NEVER call ttsabort() as normal flow — it\'s for unrecoverable situations only',
@@ -215,6 +219,26 @@ catch
     // tts is already broken — this does NOT help
 }
 ttscommit; // ← will crash: tts level mismatch`,
+      },
+      {
+        label: 'DuplicateKeyException — the other exception a tts catch may name',
+        code: `public boolean insertGroup(CustGroup _custGroup)
+{
+    try
+    {
+        ttsbegin;
+        _custGroup.insert();
+        ttscommit;
+    }
+    catch (Exception::DuplicateKeyException)
+    {
+        // Only UpdateConflict and DuplicateKeyException may be named for a tts block;
+        // the transaction is already aborted when control gets here
+        return false;
+    }
+
+    return true;
+}`,
       },
     ],
     related: ['set-based', 'error-handling'],
@@ -346,7 +370,7 @@ while (qr.next())
     rules: [
       'Extension class MUST be [ExtensionOf(classStr/tableStr/formStr(Target))]',
       'Extension class MUST be final',
-      'Method signature MUST match the original exactly (use get_method(include="signature") tool)',
+      `Method signature MUST match the original exactly (use ${READ_METHOD_OPTIONS})`,
       'The target may INHERIT the method rather than declare it — that compiles, and the signature is then validated against the declaring base class. See class-inheritance',
       'ALWAYS call next <methodName>() — skipping it breaks the chain for other extensions',
       'Cannot access private members of the original class',
@@ -356,6 +380,8 @@ while (qr.next())
       'Naming: <TargetClass>_<YourModel>_Extension (e.g. SalesTable_ContosoExt_Extension)',
       'Form CoC: [ExtensionOf(formStr(CustTable))] — wraps form methods like init(), run()',
       'Form datasource CoC: wrap datasource methods like init(), validateWrite()',
+      'next may sit inside try/catch/finally (PU21+) — still exactly once, still unconditional',
+      'Tables/data entities: system methods (insert, update, validateWrite, …) can be wrapped even when the target never declared them (PU22+) — wrap the implicit method directly',
     ],
     examples: [
       {
@@ -422,6 +448,9 @@ final class SalesFormLetter_MyModel_Extension
       'NEVER use SubscribesTo + delegateStr for standard table data events — use DataEventHandler',
       'REUSE BEFORE CREATING: call extension_info(mode="events") first — if a handler class for the target already exists in the custom model, add the new handler method there instead of creating a parallel class',
       'Both _EH and _EventHandler handler-class naming styles exist — follow the style already used in the model; never introduce a feature-named handler class (<Form>_<Feature>_EH) unless the user explicitly asks for a separate class',
+      'Declare a delegate on the OWNING class: delegate void myThresholdCrossed(int _newValue) { } — void return, EMPTY body; raise it by simply calling this.myThresholdCrossed(x)',
+      'Runtime subscription: instance.myDelegate += eventhandler(this.onSomething) or += eventhandler(MyObserver::onSomethingStatic); -= unsubscribes',
+      'Attribute-subscribed handlers have NO guaranteed firing order — never encode ordering assumptions across handlers',
     ],
     examples: [
       {
@@ -552,8 +581,10 @@ class MyReportDP extends SrsReportDataProviderBase
       'ALWAYS use label references in info(), warning(), error() — never hardcoded strings (BPErrorLabelIsText)',
       'checkFailed(): posts error to infolog AND returns false — use in validateWrite/validateField',
       'Return pattern: ret = ret && checkFailed("@Label:Message") — accumulates all errors before returning',
-      'Exception types: Error, Warning, Info, Deadlock, UpdateConflict, DuplicateKeyConflict, CLRError',
+      'Exception enum values include: Error, Warning, Info, Deadlock, DuplicateKeyException, UpdateConflict (+ NotRecovered variants of both), CLRError, Numeric, Internal, Break, Timeout, Sequence',
       'Catch specific exceptions — avoid bare catch without type',
+      'retry (valid only inside catch) jumps back to the START of the try block and discards infolog messages logged since try entry — ALWAYS guard it with a counter or changed state; an unguarded retry on a deterministic error loops forever',
+      'finally runs on every path — normal exit, caught, uncaught propagation',
       'CLR interop: catch(Exception::CLRError) then use CLRInterop::getLastException() for details',
       'Global::error() = same as error() — both post to infolog',
       'NEVER swallow exceptions silently — at minimum log them',
@@ -616,7 +647,7 @@ class MyReportDP extends SrsReportDataProviderBase
       'systemDateGet() → see the datetime-timezones topic — BPUpgradeCodeSystemDate',
       'SysEntryPointAttribute on CUSTOM SERVICE operations → obsolete in AX7 ("This attribute is deprecated in AX7"); still REQUIRED on SysOperation service entry points — see the custom-services topic',
       '[SysObsolete] attribute: ALWAYS read the message — it names the replacement',
-      'When get_method(include="source") returns a method with [SysObsolete], do NOT call it — use the stated replacement',
+      'When a method read with include:"source" carries [SysObsolete], do NOT call it — use the stated replacement',
       // Everything below is a deprecation an agent is likely to "remember" but that
       // is not real. Listing them here — rather than silently omitting them — is the
       // only way a keyword search for "curext"/"infolog" lands on the correction
@@ -707,6 +738,9 @@ switch (category)
 }
 
 // ✅ Persist/transport the symbol, never the ordinal
+// NB: two arguments because the symbol functions need the enum id. The
+//     LABEL function does not — enum2Str(category), one argument. The two
+//     are not interchangeable in either respect; see enum-conversions.
 str symbol = enum2Symbol(enumNum(MyVehicleCategory), any2Int(category));
 
 // ❌ WRONG — the ordinal of an extension value is assigned at deployment
@@ -714,7 +748,86 @@ str symbol = enum2Symbol(enumNum(MyVehicleCategory), any2Int(category));
 // if (any2Int(category) == 3) { … }`,
       },
     ],
-    related: ['sysextension', 'labels', 'feature-management'],
+    related: ['sysextension', 'labels', 'feature-management', 'enum-conversions'],
+  },
+
+  // ── Enum ↔ text conversions ─────────────────────────────────────────────
+  // Documented because the base used to teach these ONLY as a by-product of the
+  // extensible-enum topic above, whose single conversion example is the
+  // 2-argument enum2Symbol. Asked point-blank for "enum2str … convert enum value
+  // to label text", the base answered with that topic and no mention of enum2Str
+  // at all; the caller generalised the shape it had been shown and shipped
+  // `enum2Str(enumNum(X), value)`, which cost a 76 s failed build and two more.
+  // These functions disagree about their arity, so the arity IS the topic.
+  {
+    id: 'enum-conversions',
+    title: 'Enum ↔ text: enum2Str, enum2Symbol, symbol2Enum, DictEnum (and their argument counts)',
+    keywords: ['enum2str', 'enum2symbol', 'symbol2enum', 'enumnum', 'enum2int', 'value2label', 'value2symbol',
+      'dictenum', 'sysdictenum', 'convert enum', 'enum conversion', 'enum to string', 'enum to text',
+      'enum label', 'enum symbol', 'enum name', 'global function', 'session language', 'arity'],
+    summary:
+      'Converting an enum to text has two answers and they are not interchangeable: enum2Str returns the value\'s translated LABEL, enum2Symbol returns its untranslated AOT NAME. ' +
+      'They also disagree about how many arguments they take — enum2Str takes the value alone, the symbol functions take an enum id AND a value — which is the mistake xppc reports as ' +
+      '"\'enum2Str\' expects 1 argument(s), but 2 specified".',
+    rules: [
+      'enum2Str(value) — ONE argument. Returns the <Label> of that value in the session language. It needs no enum id because the type is known at compile time from the value itself. This is the one for user-facing text',
+      'enum2Symbol(enumNum(MyEnum), value) — TWO arguments. Returns the AOT element name ("Gold"), which is never translated. Correct for logs, filenames, keys and anything persisted; wrong in a message (see BP005)',
+      'symbol2Enum(enumNum(MyEnum), symbolString) — TWO arguments, the inverse of enum2Symbol',
+      'enumNum(MyEnum) — ONE argument, and it is the enum TYPE name, not a value. It yields the compile-time enum id the two-argument functions ask for, which is exactly why those take two and enum2Str does not',
+      'enum2int(value) — ONE argument, returns the underlying ordinal. Safe for a base enum; for an EXTENSIBLE enum the ordinal is assigned at deployment time and differs per environment — see extensible-enums',
+      'When the enum type is known only at RUNTIME, none of the above applies: new DictEnum(enumId).value2Label(value) for the label, .value2Symbol(value) for the symbol',
+      'Getting the count wrong is a compile error, not a warning, and it is caught offline: the FN001 rule reports it in the reply to the d365fo_file call that writes the code, before any build',
+      'In a validateWrite/CoC message the idiom is checkFailed(strFmt("@MyModel:MyLabel", enum2Str(a), enum2Str(b))) — the label carries the %1/%2 placeholders and enum2Str fills them with translated text',
+    ],
+    examples: [
+      {
+        label: 'The two conversions side by side',
+        code: `MyQualityTier tier = this.MyQualityTier;
+
+// ✅ Translated label — ONE argument. For anything a user reads.
+str shown = enum2Str(tier);
+
+// ✅ Untranslated AOT name — TWO arguments. For logs, keys, persistence.
+str symbol = enum2Symbol(enumNum(MyQualityTier), enum2int(tier));
+
+// ✅ Back again
+MyQualityTier restored = symbol2Enum(enumNum(MyQualityTier), symbol);
+
+// ❌ WRONG — enum2Str does not take an enum id. xppc:
+//    "'enum2Str' expects 1 argument(s), but 2 specified."
+// str shown = enum2Str(enumNum(MyQualityTier), tier);`,
+      },
+      {
+        label: 'Blocking a downgrade with a translated message',
+        code: `[ExtensionOf(tableStr(MyTable))]
+final class MyTable_Extension
+{
+    public boolean validateWrite()
+    {
+        boolean ret = next validateWrite();
+
+        if (ret && this.MyQualityTier < this.orig().MyQualityTier)
+        {
+            // ✅ enum2Str on each value — one argument each, both translated
+            ret = checkFailed(strFmt("@MyModel:QualityTierDowngradeError",
+                enum2Str(this.orig().MyQualityTier),
+                enum2Str(this.MyQualityTier)));
+        }
+
+        return ret;
+    }
+}`,
+      },
+      {
+        label: 'Enum type known only at runtime',
+        code: `// No compile-time type, so the global functions cannot help.
+DictEnum dictEnum = new DictEnum(enumId);
+
+str shown  = dictEnum.value2Label(value);   // translated
+str symbol = dictEnum.value2Symbol(value);  // AOT name`,
+      },
+    ],
+    related: ['extensible-enums', 'labels', 'coc-authoring'],
   },
 
   // ── Number Sequences ────────────────────────────────────────────────────
@@ -863,7 +976,7 @@ MyRentEquipmentId newId = numSeq.num();
       'Data sources: add via d365fo_file(action="modify", operation="add-data-source")',
       'NEVER use PowerShell or read_file to inspect form XML — use get_object_info(objectType="form", name=...)',
       'A user-provided example form is a PATTERN CONTRACT: read it with get_object_info(objectType="form", name=...), keep the same pattern family, and verify the generated form keeps the required scaffolding (datasources, design pattern/version, ActionPane/Body/Tab/FastTab/grid/QuickFilter) — missing pattern elements are a failed generation even if the XML is well-formed',
-      'Edits must be additive: never drop unrelated <Controls>, <DataSources>, <DataSourceModifications>, methods, or pattern metadata — use targeted d365fo_file(action="modify") operations and verify the diff with review_workspace_changes afterwards',
+      'Edits must be additive: never drop unrelated <Controls>, <DataSources>, <DataSourceModifications>, methods, or pattern metadata — use targeted d365fo_file(action="modify") operations and verify the diff with get_workspace_info(changes=true) afterwards',
     ],
     related: ['coc', 'event-handlers', 'formrun-lifecycle'],
   },
@@ -920,20 +1033,22 @@ MyRentEquipmentId newId = numSeq.num();
     summary:
       'D365FO uses SysTestCase for unit tests and ATL (Acceptance Test Library) for integration tests.',
     rules: [
-      'Test class: extends SysTestCase — must have methods starting with "test"',
+      'Test class: extends SysTestCase (ApplicationFoundation, and it extends SysTestAssert — the asserts are inherited, not a separate class) — methods start with "test" or carry [SysTestMethod]',
       'SysTestMethodAttribute: [SysTestMethod] on each test method',
-      'Assert methods: this.assertEquals(), this.assertTrue(), this.assertFalse(), this.assertNotNull()',
-      'setUp() / tearDown(): run before/after each test method',
+      'Assert methods, the full inherited set: assertEquals, assertNotEqual, assertEquivalent, assertNotEquivalent, assertTrue, assertFalse, assertNull, assertNotNull, assertSame, assertNotSame, assertObjectEquals, assertRealEquals, assertUTCDateTimeEquals, fail. There is NO assertExpectedException — declare the expectation first with this.parmExceptionExpected(true) (optionally with the message), then run the code that should throw',
+      'setUp() / tearDown(): run before/after each test method; setUpTestCase() / tearDownTestCase() run once per class',
       'ATL (Acceptance Test Library): entry point is AtlDataRootNode::construct(); navigate via data.invent()/data.sales()/… and use the Creators/Commands/Queries/Specifications concepts (AtlCommand* family) — there is NO AtlScenario or AtlDataHelper class',
       'Test data: use the ATL data root (AtlDataRootNode) creators or setUp() to create transient test records',
-      'Run with: run_systest_class MCP tool or Visual Studio Test Explorer',
+      'Run with: run_systest_class (it passes SysTestConsole.exe /unattended, which skips the debugger-attach prompt — the runner is NOT interactive-only) or Visual Studio Test Explorer',
       'Naming: <TestedClass>Test (e.g. CustTableTest) — the repo systests use this suffix; pick ONE convention per model and keep it consistent',
       'See the unit-testing topic for the detailed SysTestCase rules (transaction rollback, SysTestSuite, mocking)',
     ],
     examples: [
       {
         label: 'Basic unit test',
-        code: `[SysTestTarget(classStr(MyHelper), MethodStr(MyHelper, calculateDiscount))]
+        code: `// SysTestTarget(str _name, utilElementType _type = UtilElementType::Class)
+// — the second argument is the element TYPE, not a method name.
+[SysTestTarget(classStr(MyHelper), UtilElementType::Class)]
 class MyHelperTest extends SysTestCase
 {
     [SysTestMethod]
@@ -942,6 +1057,16 @@ class MyHelperTest extends SysTestCase
         MyHelper helper = new MyHelper();
         Amount result = helper.calculateDiscount(0, 100);
         this.assertEquals(0, result, 'Discount should be 0 for zero quantity');
+    }
+
+    [SysTestMethod]
+    public void testCalculateDiscount_RejectsNegativeQty()
+    {
+        MyHelper helper = new MyHelper();
+
+        // No assertExpectedException in X++: declare the expectation, then call.
+        this.parmExceptionExpected(true);
+        helper.calculateDiscount(-1, 100);
     }
 
     [SysTestMethod]
@@ -1138,11 +1263,11 @@ ttscommit;`,
       'Tables with SaveDataPerCompany=No: shared across all companies (e.g. DirPartyTable, RefRecId tables)',
       'changeCompany("DAT") { ... }: switch company context for a code block — closes and re-opens connection',
       'crosscompany select: use when querying data across multiple companies in one query',
-      // The container form needs the colon AND a container VARIABLE — an inline
-      // literal after crossCompany does not parse, and `from` is only legal after
-      // a field list. Spelling it out because the shorthand people reach for,
-      // `select crosscompany [co1, co2] from t`, fails all three ways at once.
-      'crosscompany containers: declare a container variable, then `while select crossCompany : companies <fieldlist> from myTable` — the colon is required and the company list must be a variable, not an inline literal',
+      // xppc 7.0.7996.33, probe: the colon is required, but the operand may be a
+      // variable, an inline container literal or a parenthesised expression. The
+      // earlier "variable only" wording was wrong — the platform itself ships
+      // `while select crosscompany:[rootCompany] *` (LedgerJournalMultiPost).
+      'crosscompany company list: the COLON is required — `select crossCompany : companies myTable`. The operand may be a container variable, an inline literal (`crossCompany : [\'dat\', \'dmo\']`) or an expression (`crossCompany : (c + [\'dmo\'])`). Note `from` is only legal after a field list',
       'crossCompany binds to the DRIVING buffer only — `select crossCompany custTable join custInvoiceJour`, never `join crossCompany custInvoiceJour` (validate_code rule SEL003)',
       'NEVER hardcode DataAreaId — always use curExt() (returns the current DataAreaId; not deprecated) or CompanyInfo::current().DataArea',
       'changeCompany is expensive — avoid inside loops; batch operations cross-company instead',
@@ -1198,8 +1323,10 @@ while select crosscompany : companies
       'To open the Print management setup: go to Accounts receivable → Setup → Print management',
       'For new document types: also add an entry in PrintMgmtReportFormat (links document type to report design)',
       'Original vs copy: the base enum is PrintCopyOriginal (Original/Copy), carried on the report contract as parmPrintCopyOriginal() — there is no PrintCopyType enum or parmPrintCopyType()',
+      'Wiring a NEW document type to its report happens through the delegate subscriptions on PrintMgmtDocType — getDefaultReportFormatDelegate answers with the report design reference, getQueryTableIdDelegate with the driving table — plus the module\'s PrintMgmtNode subclass so the type appears in the setup tree',
+      'Scaffold the controller side with generate_object(mode="scaffold", objectType="report", controllerType="printMgmt") — then replace the PrintMgmtReportRun::construct(hierarchy, node, documentType) placeholders in initPrintMgmtReportRun() with the real ones; runPrintMgmt() is abstract on SrsPrintMgmtController (mandatory) and there is NO parmPrintMgmtDocType (VM-verified)',
     ],
-    related: ['ssrs-reports'],
+    related: ['ssrs-reports', 'ssrs-contracts'],
   },
 
   // ── Unit Testing ─────────────────────────────────────────────────────────
@@ -1214,14 +1341,19 @@ while select crosscompany : companies
       'Test class: extends SysTestCase, must be in the same model as the code under test (or a test model)',
       'Test methods: public void testXxx() — method name MUST start with "test" (case-insensitive)',
       'Setup/teardown: override setUp() and tearDown() — called before/after EACH test method',
-      'Assertions: assertEquals, assertNotNull, assertNull, assertTrue, assertFalse, fail()',
-      'SysTestSuite: groups multiple SysTestCase classes for batch execution',
+      'Assertions (inherited from SysTestAssert): assertEquals, assertNotEqual, assertEquivalent, assertNotEquivalent, assertTrue, assertFalse, assertNull, assertNotNull, assertSame, assertNotSame, assertObjectEquals, assertRealEquals, assertUTCDateTimeEquals, fail',
+      'Expected exceptions: this.parmExceptionExpected(true [, message [, messageIsRegEx]]) before the call that must throw — assertExpectedException does not exist. clearExceptionExpected() resets it',
+      'SysTestSuite groups SysTestCase classes; override createSuite() on the test case to pick a variant. The ones that exist: SysTestSuite, SysTestSuiteCompanyIsolateClass, SysTestSuiteCompanyIsolateMethod, SysTestSuiteCompIsolateClassWithTts, SysTestSuiteTTS, SysTestSuiteNoCleanup, SysTestSuiteActor, SysTestSuiteProvider',
+      'Filtering and selection attributes that exist: [SysTestMethod], [SysTestCheckInTest] / [SysTestNonCheckInTest], [SysTestInactiveTest], [SysTestTarget], [SysTestGranularity], [SysTestRow(...)] and [SysTestRowInactive(...)] for data-driven rows (10.0.25+), [SysTestCaseDataDependency], [SysTestCaseUseSingleInstance], [SysTestFeatureDependency], [SysTestFixture], [SysTestKey], [SysTestSecurity], [SysTestTransaction]. [SysTestCategory], [SysTestOwner], [SysTestPriority] and [SysTestAreaPath] live in TestEssentials, so the test model must reference it. There is NO SysTestCaseAutoRollback attribute — rollback is the framework default',
       'Transaction rollback: all DML in a test is rolled back after each test — no cleanup needed for DB state',
       'For methods that call ttsbegin internally: wrap test in try/catch and expect a clean state',
       'Mock dependencies: use delegation pattern or extract interfaces — X++ has no built-in mocking framework',
       'Naming convention: <ClassName>Test (e.g. MyServiceTest) — matches the repo systests and the testing topic; avoid mixing the <ClassName>_Test variant in the same model',
-      'Attributes: [SysTestMethodAttribute] optional — but helps categorize tests',
+      'Attributes: [SysTestMethod] is optional when the method name starts with "test", and required otherwise',
       'Run tests: Visual Studio → Test → Run All Tests, or SysTestSuite.run() in a batch job',
+      'RED FIRST: write the test before the behaviour and RUN it — a test that passes on its first run has proven nothing about the assertion inside it. The scaffold generate_object(mode="pattern", pattern="systest", name=<TargetClass>) emits exactly that: one [SysTestMethod] per target method, each ending in this.fail(...) until you write the assertion',
+      'The loop the server supports: prepare(mode="test", objectName=<TargetClass>) → generate_object(pattern="systest") → d365fo_file(action="create") → build_d365fo_project (must COMPILE — red means a failing assertion, not a broken file) → run_systest_class (expect failures) → implement → build → run again (expect green) → run_bp_check',
+      'run_systest_class reports per METHOD: it parses the /xml: document the runner writes (SysTestListenerXML: test-case/@name, @success and a failure/message child), so a green run is not mis-read as failed because a method is called testErrorHandling',
     ],
     examples: [
       {
@@ -1620,6 +1752,8 @@ MySalesConfirmedBusinessEvent::newFromContract(contract).send();`,
       'ER classes ARE extensible by CoC (ERParameters, ERInvoicingServiceParameters and others carry class extensions); what cannot be edited in code is the configuration, not the framework',
       'ER format file path: System administration > Electronic reporting > Reporting configurations',
       'Country-specific ER formats loaded via localization features — check ERSolutionRepositoryTable',
+      'Choosing the technology: SSRS (RDP) for interactive/analytical documents and print-management output; ER for regulatory and localizable FILES (XML, JSON, TEXT, SEPA, VAT) and formats customers reconfigure without deployment; Business document management (Word/Excel templates on ER) when power users should edit document layouts themselves',
+      'SSRS platform notes (2024-26): custom code/assemblies in report properties are unsupported in the cloud service, and embedded drill-through links in service-rendered documents were removed — keep new designs free of both',
     ],
     examples: [
       {
@@ -1753,20 +1887,212 @@ if (SecurityRights::hasTableAccess(tableNum(MyCustomTable), AccessType::Read))
   {
     id: 'ssrs-reports',
     title: 'SSRS Reports (DP → TmpTable → RDL)',
-    keywords: ['ssrs', 'report', 'rdl', 'dp class', 'data provider', 'srsreportdataproviderbase', 'contract', 'controller', 'design'],
+    keywords: ['ssrs', 'report', 'rdl', 'dp class', 'data provider', 'srsreportdataproviderbase', 'contract',
+               'controller', 'design', 'ssrsreportstr', 'preprocess', 'dataset', 'multi-dataset', 'output menu item'],
     summary:
-      'D365FO SSRS reports use: TmpTable (TempDB) → DataContract → DP class → Controller → AxReport with RDL design.',
+      'D365FO SSRS reports use: TmpTable (TempDB) → DataContract → DP class → Controller → AxReport with RDL design. ' +
+      'The scaffolded design is always named "Report"; ssrsReportStr is compile-time checked against it.',
     rules: [
-      '5 objects: TmpTable (TempDB), Contract (DataContractAttribute), DP (extends SrsReportDataProviderBase), Controller (extends SrsReportRunController), AxReport XML',
+      '6 objects: TmpTable (TempDB), Contract (DataContractAttribute), DP (extends SrsReportDataProviderBase), Controller (extends SrsReportRunController), AxMenuItemOutput, AxReport XML with RDL design',
+      'Scaffold ALL of them in one call: generate_object(mode="scaffold", objectType="report", name=..., fieldsHint=..., contractParams=[...]) — never hand-author the AxReport XML/RDL',
       'TmpTable: MUST be TableType=TempDB (NOT InMemory) — required for SSRS data connection',
-      'DP class: [SrsReportParameterAttribute(classStr(MyContract))], processReport() fills TmpTable',
-      'DP getter: [SRSReportDataSetAttribute(tableStr(MyTmp))] public MyTmp getMyTmp()',
-      'Controller: sets report name via ssrsReportStr(), opens dialog, runs report',
+      'DP class: [SrsReportParameterAttribute(classStr(MyReportContract))], processReport() fills TmpTable',
+      'DP getter: [SRSReportDataSetAttribute(tableStr(MyReportTmp))] public MyReportTmp getMyReportTmp() — one getter per dataset; extra datasets via additionalDatasets=[...] in the scaffold',
+      'Controller main(): controller.parmReportName(ssrsReportStr(MyReport, Report)) — every scaffolded AxReport names its design "Report"; ssrsReportStr is compile-time checked, so any other design name (e.g. "Design") fails the build',
+      'Long-running report (>10 min interactive SSRS timeout)? Scaffold with preProcess=true → DP base class becomes SrsReportDataProviderPreProcessTempDB (data staged on the AOS before rendering, into the TempDB tmp table; [SrsReportParameterAttribute] stays)',
+      'Print-management output: scaffold with controllerType="printMgmt" → controller base becomes SrsPrintMgmtController; the scaffold implements its abstract runPrintMgmt() and an initPrintMgmtReportRun() with PrintMgmtReportRun::construct(...) placeholders — see print-management topic',
+      'RDL layout options: designStyle="SimpleList" (default) or "GroupedWithTotals" (row group + SUM totals); query-based DP via aotQuery=...; pre-fill contract from caller record via callerTableName=...',
       'AxReport XML: DataSet with DataSourceType=ReportDataProvider, Query=SELECT * FROM DPClass.TmpTable',
-      'Use generate MCP tool to generate all 5 objects at once',
       'For existing reports, use get_object_info(objectType="report", name=...) — NEVER read report XML with PowerShell',
     ],
-    related: ['temp-tables', 'sysoperation'],
+    examples: [
+      {
+        label: 'DP class — fills the TmpTable dataset',
+        code: `[SrsReportParameterAttribute(classStr(MyReportContract))]
+public class MyReportDP extends SrsReportDataProviderBase
+{
+    MyReportTmp tmpTable;
+
+    [SRSReportDataSetAttribute(tableStr(MyReportTmp))]
+    public MyReportTmp getMyReportTmp()
+    {
+        select * from tmpTable;
+        return tmpTable;
+    }
+
+    public void processReport()
+    {
+        MyReportContract contract = this.parmDataContract() as MyReportContract;
+        date fromDate = contract.parmFromDate();
+
+        delete_from tmpTable;
+
+        insert_recordset tmpTable (ItemId, Qty)
+            select ItemId, Qty
+            from MySourceTable
+            where MySourceTable.TransDate >= fromDate;
+    }
+}`,
+      },
+      {
+        label: 'Controller — design name must match the AxReport design',
+        code: `public class MyReportController extends SrsReportRunController
+{
+    public static void main(Args _args)
+    {
+        MyReportController controller = new MyReportController();
+        // 'Report' is the design name inside the scaffolded AxReport — compile-time checked
+        controller.parmReportName(ssrsReportStr(MyReport, Report));
+        controller.parmArgs(_args);
+        controller.startOperation();
+    }
+}`,
+      },
+    ],
+    related: ['temp-tables', 'sysoperation', 'print-management', 'ssrs-contracts', 'ssrs-rdp-preprocess', 'ssrs-ui-builder'],
+  },
+  {
+    id: 'ssrs-contracts',
+    title: 'SSRS Contract Taxonomy (RDP / RDL / print / composite)',
+    keywords: ['report contract', 'rdl contract', 'print settings', 'print destination', 'srsprintdestinationsettings',
+               'srsreportdatacontract', 'parmreportcontract', 'composite contract', 'report parameters'],
+    summary:
+      'Four contract kinds meet in one report run: the RDP contract (your DataContractAttribute class), the RDL ' +
+      'contract (design-level parameters), the print contract (destination/format/copies) and the COMPOSITE that ' +
+      'aggregates them for the controller. Mutate the parts — never replace the composite.',
+    rules: [
+      'RDP contract: your DataContractAttribute-decorated class with DataMemberAttribute parm methods — the one your DP reads via parmDataContract(); nested contracts are supported (a parm method returning another contract)',
+      'RDL contract (SrsReportRdlDataContract): parameters modeled in the report DESIGN (query ranges, company, language) — set them in controller overrides, do not subclass it',
+      'Print contract (SRSPrintDestinationSettings): destination medium, file format, printer, copies, orientation — reachable as parmPrintSettings() on the composite',
+      'Composite (SrsReportDataContract): aggregates RDP + RDL + print + query contracts; the controller hands it out via parmReportContract() — MUTATE its parts, never assign a new composite',
+      'Controller override points: prePromptModifyContract (before the dialog — pre-fill from args.record()), preRunModifyContract (after OK, before render — company/language/print defaults)',
+      '"Print straight to PDF/file": in preRunModifyContract fetch parmPrintSettings(), set the file medium + format + fileName, and run with controller.parmShowDialog(false) when no dialog is wanted',
+      'Dialog persistence is automatic: parameter values round-trip via SysLastValue per user+report — no code needed',
+      'Mandatory parameters: enforce in the RDP contract validate() with checkFailed — a false blocks the dialog OK (there is no per-parameter mandatory attribute)',
+    ],
+    examples: [
+      {
+        label: 'Controller — mutate the composite\'s parts, never replace it',
+        code: `public class MyRecapController extends SrsReportRunController
+{
+    protected void preRunModifyContract()
+    {
+        SrsReportDataContract       composite     = this.parmReportContract();
+        SRSPrintDestinationSettings printSettings = composite.parmPrintSettings();
+        MyRecapContract             rdpContract   = composite.parmRdpContract() as MyRecapContract;
+        TransDate                   fromDate      = rdpContract.parmFromDate();
+
+        // Print straight to a PDF file: set the print contract's medium/format/name.
+        // The composite stays the one the controller handed out.
+        printSettings.printMediumType(SRSPrintMediumType::File);
+        printSettings.fileFormat(SRSReportFileFormat::PDF);
+        printSettings.fileName(strFmt('Recap_%1.pdf', fromDate));
+
+        super();
+    }
+}`,
+      },
+    ],
+    related: ['ssrs-reports', 'sysoperation', 'ssrs-ui-builder', 'print-management'],
+  },
+  {
+    id: 'ssrs-rdp-preprocess',
+    title: 'Pre-Processed Report Data Providers (long-running reports)',
+    keywords: ['preprocess', 'pre-process', 'long running report', 'report timeout', 'srsreportdataproviderpreprocess',
+               'createdtransactionid', 'staging', 'report performance'],
+    summary:
+      'Interactive SSRS rendering times out around 10 minutes — a DP whose processReport() runs longer must stage ' +
+      'its data BEFORE the render request via a pre-processed base class.',
+    rules: [
+      'Trigger: the report times out interactively but the same query succeeds in batch, or processReport() takes minutes on production volumes',
+      'Two staging bases: SrsReportDataProviderPreProcess (stages into a REGULAR table whose rows are keyed by createdTransactionId) and SrsReportDataProviderPreProcessTempDB (stages into TempDB tables)',
+      'Regular-table staging: the staging table needs a createdTransactionId column; the platform deletes the rows after rendering, and concurrent runs are isolated by transaction id',
+      'Migration from a plain DP: swap the base class, adjust the staging table type to match it, keep the SRSReportDataSetAttribute getters unchanged, and make sure the menu item points at the CONTROLLER',
+      'Scaffold: generate_object(mode="scaffold", objectType="report", preProcess=true) — emits the TempDB pre-process base, keeps [SrsReportParameterAttribute] and adds NO extra hook method: processReport() itself runs before the render request. VM-verified 2026-08-30 — the framework interface SrsReportDataProviderPreProcessInterface has only cleanUp/initialize/parm* members, and xppc accepts either base with either table type, so the pairing is a runtime contract the compiler will not catch',
+      'Do NOT default to preprocess — the staging machinery costs complexity; profile processReport() first and try set-based population (insert_recordset) before reaching for it',
+    ],
+    examples: [
+      {
+        label: 'Pre-processed DP over a TempDB staging table (VM-verified shape)',
+        code: `[SrsReportParameterAttribute(classStr(MyRecapContract))]
+public class MyRecapDP extends SrsReportDataProviderPreProcessTempDB
+{
+    MyRecapTmp recapTmp;
+
+    [SRSReportDataSetAttribute(tableStr(MyRecapTmp))]
+    public MyRecapTmp getMyRecapTmp()
+    {
+        select * from recapTmp;
+        return recapTmp;
+    }
+
+    // Runs on the AOS BEFORE the SSRS render request — this method IS the
+    // pre-processing step; the framework has no separate preProcess() hook.
+    public void processReport()
+    {
+        MyRecapContract    contract = this.parmDataContract() as MyRecapContract;
+        TransDate          fromDate = contract.parmFromDate();
+        LedgerJournalTrans journalTrans;
+
+        delete_from recapTmp;
+
+        insert_recordset recapTmp (JournalNum, AmountCurDebit)
+            select JournalNum, AmountCurDebit from journalTrans
+            where journalTrans.TransDate >= fromDate;
+    }
+}`,
+      },
+    ],
+    related: ['ssrs-reports', 'temp-tables', 'transactions'],
+  },
+  {
+    id: 'ssrs-ui-builder',
+    title: 'Report Dialog UI Builders (SrsReportDataContractUIBuilder)',
+    keywords: ['ui builder', 'uibuilder', 'report dialog', 'dialog field', 'custom lookup', 'sysoperationcontractprocessing',
+               'srsreportdatacontractuibuilder', 'dialog customization', 'dependent fields'],
+    summary:
+      'A UI builder customizes the report parameter dialog — filtered lookups, dependent fields, field events. ' +
+      'It derives from SrsReportDataContractUIBuilder and is bound on the CONTRACT via the ' +
+      'SysOperationContractProcessing attribute.',
+    rules: [
+      'The builder class derives from SrsReportDataContractUIBuilder; the CONTRACT declares it via the SysOperationContractProcessing attribute naming the builder class — the controller needs no change',
+      'Override build(): call super() FIRST, then fetch fields with this.bindInfo().getDialogField(contractInstance, the parm method) and attach behaviour',
+      'Custom lookup / events: dialogField.registerOverrideMethod binds a FormControl event to a method ON THE BUILDER (FormStringControl-style signature)',
+      'Dependent fields: react in one field\'s modified override, then enable/disable or re-filter the other via its DialogField',
+      'The automatic dialog needs NO builder — plain parameters render themselves; reach for a builder only for filtered lookups, cascading fields, or layout beyond group attributes',
+      'Scaffold: generate_object(mode="scaffold", objectType="report", uiBuilder=true) emits the builder class and binds it on the contract',
+      'Identical mechanics drive SysOperation dialogs (SysOperationAutomaticUIBuilder base) — see sysoperation',
+    ],
+    examples: [
+      {
+        label: 'UI builder — filtered lookup on a contract parameter',
+        code: `public class MyRecapUIBuilder extends SrsReportDataContractUIBuilder
+{
+    DialogField custGroupField;
+
+    public void build()
+    {
+        MyRecapContract contract;
+
+        super();
+
+        contract       = this.dataContractObject() as MyRecapContract;
+        custGroupField = this.bindInfo().getDialogField(contract, methodStr(MyRecapContract, parmCustGroup));
+        custGroupField.registerOverrideMethod(methodStr(FormStringControl, lookup), methodStr(MyRecapUIBuilder, custGroupLookup), this);
+    }
+
+    private void custGroupLookup(FormStringControl _control)
+    {
+        SysTableLookup lookup = SysTableLookup::newParameters(tableNum(CustGroup), _control);
+
+        lookup.addLookupfield(fieldNum(CustGroup, CustGroup));
+        lookup.addLookupfield(fieldNum(CustGroup, Name));
+        lookup.performFormLookup();
+    }
+}`,
+      },
+    ],
+    related: ['ssrs-reports', 'ssrs-contracts', 'sysoperation', 'form-patterns'],
   },
 
   // ── Inventory Management ────────────────────────────────────────────────
@@ -2015,7 +2341,8 @@ else
     id: 'warehouse-management',
     title: 'Warehouse Management (WHS / WMS)',
     keywords: ['warehouse', 'whs', 'wms', 'wave', 'work', 'location directive', 'whswork',
-               'whsworktable', 'whsworkline', 'whswavetemplate', 'pick', 'put', 'replenishment'],
+               'whsworktable', 'whsworkline', 'whswavetemplate', 'pick', 'put', 'replenishment',
+               'work template', 'work order', 'cycle count', 'wave step'],
     summary:
       'D365FO Warehouse Management (WHS) manages advanced warehouse operations: wave processing, ' +
       'work creation, pick/put execution, location directives, and mobile device flows. ' +
@@ -2026,14 +2353,273 @@ else
       'Wave processing: WHSWaveTemplate defines steps (wave template) — allocate, create work, etc.',
       'Location directives: WHSLocDirTable rules determine where to pick from and put to',
       'Work templates: define the work action sequence (Pick → Put, Count, etc.)',
-      'Mobile device: WHSMobileAppFlow — flows are customizable via extensions',
+      'Mobile device / scanner flows are NOT forms and not part of this topic: the warehouse app is a stateless container protocol over the work-execution display classes — read warehouse-mobile-app before touching a step, and barcode-scanning before treating a scanned string as an ItemId',
       'For custom wave steps: extend WHSWaveStepBase and register in wave template config',
       'NEVER directly update WHSWorkTable.WorkStatus — use the WHSWorkExecute class hierarchy',
       'Use WHSLocationProfile for zone/location type configuration',
       'Performance: wave processing is batch-capable — always use batch for large volumes',
       'For extensions: use CoC on WHSPostEngine* classes for custom post-processing logic',
     ],
-    related: ['inventory-management', 'sysoperation'],
+    related: ['inventory-management', 'sysoperation', 'warehouse-mobile-app', 'barcode-scanning'],
+  },
+
+  // ── Warehouse app / mobile device (scanners) ────────────────────────────
+  {
+    id: 'warehouse-mobile-app',
+    title: 'Warehouse app & mobile device flows (scan → action, work execution)',
+    keywords: ['warehouse app', 'mobile device', 'mobile app', 'scanner', 'scan', 'scanning',
+               'handheld', 'rf device', 'rf gun', 'wmdp', 'warehouse mobile device portal',
+               'whsworkexecute', 'whsworkexecutedisplay', 'whsrfcontroldata', 'whsrfmenuitemtable',
+               'mobile device menu item', 'warehouse app step', 'app field name', 'work user',
+               'whsworkuser', 'license plate', 'undo work', 'device session',
+               'scan action', 'indirect activity', 'work confirmation', 'pick confirmation',
+               'adjustment in', 'adjustment out', 'device journal', 'activity code'],
+    summary:
+      'The warehouse app (and its predecessor the warehouse mobile device portal, WMDP) is NOT a form. ' +
+      'It is a stateless request/response protocol: the work-execution display classes build a screen ' +
+      'server-side as a container, the device posts the whole screen back, and the next round trip may ' +
+      'land on a different AOS. Menu items, menus, app steps and field names are CONFIGURED data — the ' +
+      'only AOT surface you customize is the display/execute class hierarchy plus the extensible ' +
+      'activity enum. Treating a step like a form (member state, form events, direct table writes) is ' +
+      'the failure mode this topic exists to prevent. What a scan DOES is decided by configuration, not ' +
+      'by code: the device menu item binds a mode and an activity, and that pair picks the class that runs. ' +
+      'The action it runs must complete inside the one server call that received the scan.',
+    rules: [
+      'TWO FRAMEWORKS build these screens and you must know which one owns the flow BEFORE you touch it: ProcessGuide (current — controller/step/page builder/data processor/navigation agent/action, see process-guide-framework) and the legacy WHSWorkExecuteDisplay hierarchy (one displayForm per mode doing all of it). Both are instantiated by SysExtension off the same WHSWorkExecuteMode attribute, so the way to tell them apart is what the registered class derives from. New flows go to ProcessGuide where it exists',
+      'A warehouse-app screen is a CONTAINER of controls built server-side — there is no FormRun, no datasource, no control event. Nothing in formrun-lifecycle or form-patterns applies to a scanner step',
+      'Every round trip is STATELESS and may be served by a different AOS: carry state in the pass-through data the framework round-trips (the WHSRFControlData / container payload), NEVER in class member variables, static fields or globals. Member state survives a single-box dev machine and silently loses the worker\'s progress under load balancing',
+      'Define the layout of the pass-through container in ONE place. Two methods that each hard-code conPeek indexes is the classic cause of "wrong value after the operator pressed back"',
+      'Mobile device menu items (WHSRFMenuItemTable) and mobile device menus are CONFIGURED DATA, not AOT elements. "Add a scanner menu item" is setup or a data package — do not try to create an AOT object for it. The AOT half of a custom flow is the activity value and the display/execute class behind it',
+      'A custom activity goes on the extensible activity enum (WHSWorkActivity) via an enum extension — see extensible-enums for why the XML must not carry <Value> elements. Confirm the exact factory/registration member with get_object_info before writing it: it differs across platform versions and is the single most hallucinated part of a warehouse-app customization',
+      'NEVER write WHSWorkTable / WHSWorkLine directly from a step. Work status, work-line transactions and inventory move together through the WHSWorkExecute hierarchy; a direct update leaves the work header, the inventory transactions and the license plate inconsistent, and the standard undo cannot roll it back',
+      'Undo is a first-class requirement, not a nice-to-have: the worker can undo the last executed work line. A custom step that bypasses the framework has no undo and no compensating transaction — decide that deliberately, do not discover it in production',
+      'License plate and inventory status are WHS-only InventDim fields (LicensePlateId, InventStatusId). A scanning flow resolves item + dimensions through InventDim exactly like any other inventory code — see inventory-management; never carry loose dimension strings from screen to screen',
+      'Prompt and field text shown on the device comes from labels, and in recent versions from the warehouse app field-name configuration. Never emit a raw string literal from a step: BPErrorLabelIsText fails the build and the text cannot be translated for the shop floor',
+      'The work user (WHSWorkUser) is NOT the D365FO user: a device signs in as a work user with its own credentials and menu, while X++ runs under the linked system user. Resolve the current worker through the work-user / session record — reading curUserId() gives you the service account, not the operator',
+      'Performance is per screen, not per batch: every step is a server round trip over a handheld network. Keep each query indexed and firstonly, keep display methods off the step path, and never scan a table in a step (see performance)',
+      'A scanned string is NOT an item number, a license plate is not a container id by convention, and a GS1 label packs several fields into one scan — resolve it through the barcode setup first (see barcode-scanning)',
+      'WHAT A SCAN DOES is configuration, not code: the device menu item binds a MODE (work-driven vs indirect activity) and an ACTIVITY, and that pair selects the class that runs. "The scanner does nothing" is therefore a setup question first — check the menu item mode/activity before debugging X++',
+      'Pick the action family BEFORE writing anything, because retrofitting is a rewrite. WORK-DRIVEN: the scan confirms a work line and the framework hands back the next one — you execute work, you do not post inventory yourself. INDIRECT (no work at all: adjustment in/out, movement, counting, inquiry): the action is a document you build and post through its own framework, and the work tables are not involved',
+      'ONE ROUND TRIP = ONE TRANSACTION. ttsbegin/ttscommit can never span screens: the device may never come back (battery, out of range, the operator walks away), so an action started on screen 1 and finished on screen 3 leaves a half-posted document nobody is watching. If the action cannot complete in one call, it needs its own recoverable document, not a longer conversation',
+      'The device RETRIES and the operator re-scans: make the action idempotent, keyed on something the device sent, and put the guard INSIDE the transaction — a check-then-act around it double-posts under two sessions on the same license plate. "It never happened in test" is not idempotency',
+      'Validate BEFORE acting and answer as a screen: an unknown code, a blocked batch, a wrong warehouse or work assigned to another worker are normal outcomes — return the same step with a label and the field cleared. A throw inside the transaction rolls back and ends the device session, so the operator also loses the lines already confirmed (see error-handling)',
+      'Most scan actions end in a POSTED document — an inventory journal (movement, adjustment, counting), an arrival registration, a production feedback. Build and post it through the journal/posting framework, never by writing InventTrans or a journal transaction table directly: the framework check/post methods carry the validation the shop floor depends on (see posting-engine, inventory-management)',
+      'Put the action in its own service class and let the display class only render and dispatch. A scanner is ONE caller of the action — an integration, a second flow or a SysTest are others — and only a service class can be tested without a device',
+      'The action answers with the next screen: confirmation or the next work line, in the same response. Deferring the real work to a batch gives the operator no feedback and no error, so the failure surfaces hours later in a journal nobody reads; if it truly must be asynchronous, say so on the device and give the operator the next instruction',
+      'Test the step logic VM-side by driving the class with the container the device would post — there is nothing to click. SysTest coverage belongs on the state machine and the resolution logic, not on the rendering (see unit-testing)',
+    ],
+    examples: [
+      {
+        label: 'Stateless step state — pack it once, read it once',
+        code: `// A warehouse-app step must survive being served by a different AOS on the
+// next round trip, so the screen state travels in the container the framework
+// passes back - never in a member variable of the display class.
+//
+// One pair of helpers owns the layout. A step added later cannot shift the
+// indexes under an existing step, which is what breaks "operator pressed back".
+public static container packScanState(str _licensePlate, str _itemId, real _qty)
+{
+    return [_licensePlate, _itemId, _qty];
+}
+
+public static str licensePlateOfState(container _state)
+{
+    // conLen guards the container written by an OLDER build of the flow:
+    // a device can post back a screen created before the last deployment.
+    return conLen(_state) >= 1 ? conPeek(_state, 1) : '';
+}`,
+      },
+      {
+        label: 'Scan → action: one round trip, one transaction, idempotent',
+        code: `// The action a scan triggers must finish inside the SINGLE server call that
+// received the scan. The device can vanish between screens (battery, out of
+// range, the operator walks away), so ttsbegin cannot span round trips.
+//
+// The device also retries, and operators re-scan. The same scan arriving twice
+// must not post twice, so the action is keyed on what the device sent and the
+// guard sits INSIDE the transaction - a check-then-act around it double-posts
+// when two sessions work the same license plate.
+public static container executeScanAction(container _state, str _scannedCode)
+{
+    str actionKey;
+    str message;
+
+    // Resolve and validate FIRST. An unknown code, a blocked batch or work that
+    // belongs to another worker is a normal outcome: it goes back as the same
+    // screen with a label. A throw inside the transaction would roll back and
+    // end the session, losing the lines the operator already confirmed.
+    message = MyScanFlow::validateScan(_state, _scannedCode);
+
+    if (message)
+    {
+        return [false, message];
+    }
+
+    actionKey = MyScanFlow::actionKeyFor(_state, _scannedCode);
+
+    ttsbegin;
+
+    if (!MyScanActionService::alreadyExecuted(actionKey))
+    {
+        // The action lives in a service class, not in the display class: the
+        // scanner is one caller of it, an integration or a SysTest is another.
+        // It posts through the journal/work framework - never a raw insert.
+        MyScanActionService::execute(actionKey, _state, _scannedCode);
+    }
+
+    ttscommit;
+
+    // The answer IS the next screen: confirm now, do not defer to a batch.
+    return [true, '@MyModel:ScanConfirmed'];
+}`,
+      },
+    ],
+    related: ['process-guide-framework', 'warehouse-management', 'barcode-scanning', 'inventory-management', 'posting-engine'],
+  },
+
+  // ── Process guide framework ─────────────────────────────────────────────
+  {
+    id: 'process-guide-framework',
+    title: 'ProcessGuide framework — the current mobile flow/screen model',
+    keywords: ['process guide', 'processguide', 'processguidecontroller', 'processguidestep',
+               'processguidepagebuilder', 'processguidenavigationagent', 'processguideaction',
+               'processguidedataprocessor', 'page builder', 'navigation route', 'step name',
+               'mobile flow framework', 'screen framework', 'addfollowingstep', 'iscomplete',
+               'adddatacontrols', 'addactioncontrols'],
+    summary:
+      'ProcessGuide is the framework the warehouse app flows are being rebuilt on, and the one to use for ' +
+      'anything new. It splits what the legacy WHSWorkExecuteDisplay did in one displayForm method into six ' +
+      'classes with one responsibility each, and every one of them is an extension point. It carries NO WHS ' +
+      'prefix on purpose — production and inventory processes use it too. The catch is registration: classes ' +
+      'are found by attribute through SysExtension, so a class with the right base and the wrong (or missing) ' +
+      'attribute compiles cleanly and never runs.',
+    rules: [
+      'Six responsibilities, one class each: CONTROLLER owns the process, STEP is one screen, PAGE BUILDER makes its controls, DATA PROCESSOR handles what the worker typed, NAVIGATION AGENT decides what comes next, ACTION is a button. If your change does not fit one of those, it is going in the wrong class',
+      'Registration is by ATTRIBUTE, not by editing a factory: the controller carries WHSWorkExecuteMode, the step carries ProcessGuideStepName, the page builder carries ProcessGuidePageBuilderName, the action carries ProcessGuideActionName. Forgetting the attribute is the signature failure here — it compiles, and the screen simply never appears',
+      'Name values are the class name through classStr, never a string literal: a literal survives a rename and fails at run time on a device instead of at compile time',
+      'The request arrives as XML on one custom service endpoint, is turned into a container and then into a typed request — session state (mode, pass, controller, current step) plus the page. You never parse the container yourself in a flow class',
+      'The controller entry point builds the response: it resolves the step (the initial one, or the one in session state), executes it, saves state and returns. Do not call steps directly from other steps',
+      'A step WITH a screen names its page builder and answers isComplete. The base marks a screen complete on OK alone, so a screen that collects a value and does not override isComplete moves on before your validation ran',
+      'A step WITHOUT a screen derives from the without-prompt base and does the work in doExecute — that is where a post, a journal or a work confirmation belongs, running silently right after the confirm screen',
+      'OK and the two Cancel actions are special: they call back into the step (run the data processor, then rebuild the page or complete the step; reset to the first step; exit the process). Never reimplement them as custom actions',
+      'Default data processing delegates to the legacy WhsRfControlData, which already validates the standard fields — item, location, license plate. Write a data processor only for a field the platform does not know',
+      'Error UI is free: on a validation failure the base rebuilds the page, clears the scanned value and adds the error control. Override rebuildFromRequestPage, isErrorState or reuseRequestPageOnError only to deviate deliberately',
+      'Navigation is a route map of "after this step, that step". Conditional branching needs its own navigation agent plus a factory, wired by overriding the agent factory on the controller — faking a branch by mutating the route breaks every other extension of that flow',
+      'Extending an existing flow, by intent: add a control → wrap addDataControls on the page builder; replace a screen → a new page builder plus a wrapper on pageBuilderName; insert a screen → wrap the route initializer and RE-POINT BOTH EDGES; change when a step finishes → wrap isComplete',
+      'State lives in the pass-through keyed by the framework data-type names, shared with the legacy flows — that is why a converted flow keeps working with existing data, and why a class member is still the wrong place for it',
+      'An exception inside a step is handled by the framework: the process rolls back to the previous step. Do not wrap a step body in try/catch to keep the worker where they were — you will swallow the rollback',
+      'Naming follows <FunctionalArea>ProcessGuide<ProcessName>Controller and the matching Step / PageBuilder names. It is a convention, not a compiler rule, but the factories and the reader both depend on it',
+      'Copy-ready skeletons for all of this — create a flow, add a control, replace a screen, insert a step — are in object_patterns(domain="mobile-app"). This topic is the rules; that is the template',
+    ],
+    related: ['warehouse-mobile-app', 'warehouse-management', 'coc-authoring', 'sysextension'],
+  },
+
+  // ── Barcodes & scanner input ────────────────────────────────────────────
+  {
+    id: 'barcode-scanning',
+    title: 'Barcodes & scanner input (GS1 application identifiers, item barcodes)',
+    keywords: ['barcode', 'bar code', 'barcode setup', 'barcodesetup', 'item barcode',
+               'inventitembarcode', 'gs1', 'gs1-128', 'ean128', 'ean13', 'gtin', 'sscc', 'upc',
+               'code39', 'code128', 'qr code', 'data matrix', 'application identifier',
+               'check digit', 'barcode font', 'keyboard wedge', 'wedge scanner', 'scanned value',
+               'serial number scan', 'batch number scan', 'barcode mask'],
+    summary:
+      'Barcodes are two unrelated problems in D365FO and mixing them is the usual defect. PRINTING goes ' +
+      'through the Barcode class hierarchy, which encodes a value into the font string an SSRS report ' +
+      'renders — it decodes nothing. SCANNING delivers already-decoded text, either as keyboard input in ' +
+      'the rich client or as a field in a warehouse-app step. That text is rarely a bare item number: a ' +
+      'GS1-128 label packs GTIN, batch, serial and expiry into one string with application identifiers, ' +
+      'so code that assigns the scan straight to an ItemId works on the test label and fails on the first ' +
+      'real one.',
+    rules: [
+      'PRINTING: the Barcode class hierarchy (construct by barcode type, then encode the value) returns a FONT-ENCODED string, adding start/stop characters and the check digit. Rendering that string in a normal font produces a label no scanner reads — the matching barcode font must be installed on the report server (see ssrs-reports)',
+      'SCANNING is the opposite direction and shares no code with printing: a scanner hands you decoded text. Never run scanned input back through the encoder to "normalize" it',
+      'Barcode setup (BarcodeSetup) says which symbology a code uses; item barcodes (InventItemBarcode) map a code to item, unit, quantity and inventory dimensions, flagged separately for input and for printing. Resolve a scan through that table — a string compare against ItemId is wrong, because one item legitimately carries many codes (per unit, per pack size, an old vendor code)',
+      'A barcode string is not a key: the same value can resolve under more than one barcode setup, and a print-only code must not resolve on input. Filter on the use-for-input flag and treat "more than one match" as a real branch, not an assert',
+      'INSIDE the warehouse app, DO NOT WRITE A GS1 PARSER. The platform parses the scan before it reaches the flow and fills the controls: global options live on Warehouse management parameters (the prefix characters that mark a scan as GS1, the printable stand-in for the ASCII 29 group separator, and the unknown-application-identifier policy — Error refuses the WHOLE scan for one unmapped element), the identifier list is setup data, and a bar-code data policy on the mobile device menu item is what makes ONE scan fill SEVERAL fields. A hand-rolled parser duplicates all of it and diverges on the next standard change',
+      'The scanner HARDWARE is part of that configuration: it must add a prefix the system recognises (the AIM identifiers ]C1 GS1-128, ]e0 GS1 DataBar, ]d2 GS1 DataMatrix, ]Q3 GS1 QR, ]J1 GS1 DotCode) and convert the non-printable group separator to the character named in the parameters. A scan that behaves as plain text usually means the scanner, not the code',
+      'Multiple-field scanning changes WHEN a flow has its values — a step you assumed would run can be skipped because the scan already filled it. Test a custom flow with the policy on AND off',
+      'OUTSIDE the app (a rich-client form, an integration) there is no menu item to hang a policy on, so that path parses in code: GS1-128 (formerly EAN-128) carries application identifiers — (00) SSCC, (01) GTIN, (10) batch/lot, (17) expiry as YYMMDD, (21) serial number, (30)/(37) count. Parse AI by AI: a fixed-length AI runs straight into the next one, a variable-length AI ends at the group separator or at end of scan. Slicing at fixed offsets is the classic defect',
+      'A GTIN is not an item number: it identifies item + unit and often a pack quantity, so one scan of a case can mean 12 EA. Take the unit and quantity from the barcode record and convert through the unit-of-measure setup — never post the raw scanned quantity',
+      'Batch and serial numbers read off a GS1 label must be applied as inventory dimensions through the dimension API (see inventory-management). Writing batch/serial onto a line without going through findOrCreate leaves an orphan dimension and on-hand that does not add up',
+      'Keyboard-wedge scanners TYPE the value and finish with Enter or Tab: in the rich client the whole string arrives in one modified() call, not keystroke by keystroke. Put the resolution in modified() or the lookup, and make it idempotent — a double trigger must not book the quantity twice',
+      'Scanned strings carry invisible payload: leading zeros that are significant, a trailing CR/LF, the FNC1 separator and a check digit. Strip control characters explicitly and keep the value in a string type — storing a code in an int silently drops leading zeros and changes the code',
+      'An unresolved scan is a normal business case (unknown code, wrong warehouse, blocked batch), not an exception path. Report it with a label and let the operator rescan; an unhandled throw inside a transaction on a device step kills the session and rolls back work the operator already did (see error-handling)',
+      'GS1 setup, GTIN tables and the warehouse barcode-mask configuration differ by version and by whether Warehouse management is enabled. Confirm the tables, fields and methods exist in the installed model with search / get_object_info before writing against them — do not code from the newest documentation screenshot',
+    ],
+    examples: [
+      {
+        label: 'Split a GS1-128 scan by application identifier (OUTSIDE the warehouse app only)',
+        code: `// Inside a warehouse-app flow the platform already did this - see the GS1
+// rules above and object_patterns(domain="mobile-app", pattern="gs1-scan-input").
+// This is the shape for the paths that have no menu item: a rich-client
+// form or an integration.
+//
+// Returns a container of [ai, value] pairs. Fixed-length AIs are followed
+// immediately by the next AI; variable-length ones end at the FNC1 group
+// separator (ASCII 29) or at the end of the scan. Slicing at fixed offsets
+// instead is what breaks on the first real customer label.
+public static container splitGs1(str _scan, container _fixedLengths)
+{
+    str       rest = strLRTrim(_scan);
+    container pairs;
+    str       groupSeparator = num2char(29);
+
+    while (strLen(rest) >= 2)
+    {
+        str ai = subStr(rest, 1, 2);
+        rest   = subStr(rest, 3, strLen(rest) - 2);
+
+        // _fixedLengths maps a two-digit AI to its fixed value length, 0 when
+        // the AI is variable-length. Keep it as setup data, not as a literal
+        // ladder in code - the AI list grows.
+        int fixedLen = conFind(_fixedLengths, ai) ? conPeek(_fixedLengths, conFind(_fixedLengths, ai) + 1) : 0;
+        int endPos   = fixedLen > 0 ? fixedLen : strScan(rest, groupSeparator, 1, strLen(rest)) - 1;
+
+        if (endPos <= 0)
+        {
+            endPos = strLen(rest);
+        }
+
+        pairs = conIns(pairs, conLen(pairs) + 1, [ai, subStr(rest, 1, endPos)]);
+        rest  = subStr(rest, endPos + 1, strLen(rest) - endPos);
+
+        // Drop the separator that terminated a variable-length value.
+        if (subStr(rest, 1, 1) == groupSeparator)
+        {
+            rest = subStr(rest, 2, strLen(rest) - 1);
+        }
+    }
+
+    return pairs;
+}`,
+      },
+      {
+        label: 'Wedge-scanner input on a form field — one value, one resolution',
+        code: `// The scanner types the whole code and presses Enter, so modified() fires
+// ONCE with the complete value. Resolve here, not per keystroke, and make it
+// idempotent: an operator who scans the same label twice must not book twice.
+public boolean modified()
+{
+    boolean ret = super();
+    str     scanned;
+
+    // Control characters ride along with the scan (CR/LF, FNC1). Strip them
+    // before anything looks the value up.
+    scanned = strRem(strLRTrim(this.text()), num2char(13) + num2char(10) + num2char(29));
+
+    if (scanned && scanned != lastResolvedScan)
+    {
+        lastResolvedScan = scanned;
+        // Resolve through the barcode setup - never assign a scan to an ItemId.
+        this.resolveScannedCode(scanned);
+    }
+
+    return ret;
+}`,
+      },
+    ],
+    related: ['warehouse-mobile-app', 'process-guide-framework', 'inventory-management', 'ssrs-reports'],
   },
 
   // ── Trade Agreements ────────────────────────────────────────────────────
@@ -2146,18 +2732,23 @@ else
       'Complete grammar reference for X++ select/while select. Statement order: [FindOptions] [FieldList from] tableBuffer [index] [order by / group by] [where …] [join … [where …]]. ' +
       'FindOptions go BETWEEN "select" and the table buffer. Each joined buffer has its own where clause immediately after it.',
     rules: [
-      'FindOptions (crossCompany, firstOnly, forUpdate, forceNestedLoop, forceSelectOrder, forcePlaceholders, pessimisticLock, optimisticLock, repeatableRead, validTimeState, noFetch, reverse, firstFast) go BETWEEN "select" and the table buffer / field list',
+      'FindOptions (crossCompany, firstOnly, firstOnly1/10/100/1000, forUpdate, forceNestedLoop, forceSelectOrder, forcePlaceholders, forceLiterals, pessimisticLock, optimisticLock, repeatableRead, generateOnly, validTimeState, noFetch, reverse, firstFast) go BETWEEN "select" and the table buffer / field list',
+      'firstOnly variants: firstOnly (1 row), firstOnly10, firstOnly100, firstOnly1000 — row-count hints to the plan; firstFast is a priority hint only and does NOT limit rows',
+      'exists join / notexists join are semi-joins: the joined buffer fetches NO fields and cannot be read in the loop body — its conditions go in its own where clause',
       'crossCompany belongs on the OUTER (driving) buffer — never on a joined buffer. Optional container filter: select crossCompany : myContainer table …',
       'Each joined buffer gets its own "where" clause immediately after it; order by / group by appear after the full join chain',
-      '"in" operator: "where field in container" — container = X++ container type; works with str/int/int64/real/enum/boolean/date/utcDateTime. NOT a Set, List class, or subquery',
-      'forceLiterals is FORBIDDEN — SQL injection risk; use forcePlaceholders (default for non-join selects) or omit',
+      '"in" operator is far narrower than it looks (xppc-verified): the LEFT side must be an ENUM field and the RIGHT side a container VARIABLE. A str, int64, real or date field answers "Types \'str(CustAccount)\' and \'container\' are not compatible with operator \'in\'", an inline list answers "Container literals in \'in\' expression are not supported. Declare container variable instead", and a Set or List is rejected outright. For a non-enum field write the OR chain or a QueryBuildRange',
+      'forceLiterals reveals the where-clause values to the optimiser: avoid it, and never use it with values that came from user input (SQL injection). It is not forbidden — xppc accepts it and standard code uses it where the plan measurably needs the literal; use forcePlaceholders (the default for non-join selects) or omit the hint',
+      'The force* FindOptions are exactly forceLiterals, forcePlaceholders, forceNestedLoop, forceSelectOrder — "forceLaterals" is NOT a keyword (xppc-verified: parsed as a buffer name, "join expected")',
       'No function calls in WHERE — assign result to a local variable first (performance + BP compliance)',
       'outer join is LEFT OUTER only — no RIGHT outer, no "left" keyword; check joined buffer.RecId == 0 to detect "no match"',
       'Join criteria use "where", not "on" — X++ has no "on" keyword',
       '"index hint" requires buffer.allowIndexHint(true) to be called first; otherwise silently ignored — use only when measured',
       'Aggregates (sum/avg/count/minof/maxof): when sum would be null X++ returns NO row — guard with "if (buffer)" after the select',
       'Non-aggregated fields in select list must appear in "group by" when aggregates are used',
-      'validTimeState(dateFrom, dateTo): use for date-effective tables (ValidTimeStateFieldType ≠ None)',
+      'validTimeState(dateFrom, dateTo) or validTimeState(asOf): use for date-effective tables (ValidTimeStateFieldType ≠ None). The arguments must be variables or literals — a call expression inside the parentheses is a parse error ("Invalid token \'::\'"), so assign DateTimeUtil::utcNow() to a variable first',
+      'order by / group by belong BEFORE the where of the same segment: "select t order by f where c" is legal, "select t where c order by f" is a compile error ("\'join\' expected"). After a join the next segment starts over, so "… join u order by u.f where u.c" is correct',
+      'A select EXPRESSION names the TABLE, not a buffer: str s = (select firstOnly CustGroup).Name; passing a declared buffer answers "Table \'cg\' is not found"',
       'doInsert/doUpdate/doDelete bypass overridden methods and event handlers — reserved for data-fix/migration scenarios only',
       'For dynamic queries from user input: use executeQueryWithParameters API — NEVER concatenate into where clause',
     ],
@@ -2200,10 +2791,11 @@ select salesTable where salesTable.ShippingDateRequested == cutoffDate;`,
   {
     id: 'coc-authoring',
     title: 'CoC Authoring Non-negotiables',
-    keywords: ['coc', 'chain of command', 'next', 'default parameter', 'wrappable', 'hookable', 'final', 'extensionof', 'wrapper', 'form coc', 'formdatasourcestr', 'static coc', 'replaceable', 'pre', 'post', 'wrap'],
+    keywords: ['coc', 'chain of command', 'next', 'default parameter', 'wrappable', 'hookable', 'final', 'extensionof', 'wrapper', 'form coc', 'formdatasourcestr', 'static coc', 'replaceable', 'pre', 'post', 'wrap',
+      'validatewrite', 'validatefield', 'validatedelete', 'modifiedfield', 'table coc', 'orig', 'pre-image', 'old value', 'xrecord'],
     summary:
       'Strict rules for authoring CoC wrappers. The most common mistake is copying default parameter values. ' +
-      'next must always be called at first-level scope. Always use get_method(include="signature") before writing any wrapper.',
+      `next must always be called at first-level scope. Always use ${READ_METHOD_OPTIONS} before writing any wrapper.`,
     rules: [
       'NEVER copy default parameter values into the wrapper signature — wrapper uses bare parameter types only',
       'next must be at first-level statement scope: NOT inside if/while/for, NOT after return, NOT inside a logical expression. PU21+: permitted inside try/catch/finally',
@@ -2216,7 +2808,9 @@ select salesTable where salesTable.ShippingDateRequested == cutoffDate;`,
       'Form-nested wrapping uses formdatasourcestr, formdatafieldstr, formControlStr. Cannot ADD new methods via CoC — only wrap existing ones (init, validateWrite, clicked, …)',
       'Wrappers can read/call protected members of the augmented class (PU9+); cannot reach private',
       'Pre-processing: call business logic before next. Post-processing: call next first, then business logic. Wrap: call next inside the logic',
-      'Use get_method(include="signature") tool to get exact parameter types before writing the wrapper',
+      `Use ${READ_METHOD_OPTIONS} to get exact parameter types before writing the wrapper`,
+      'On a TABLE wrapper (validateWrite/validateField/update/delete/modifiedField) the record is already in hand: `this` carries the new values and `this.orig()` the values it was fetched with. NEVER re-read the row — no `select … where x.RecId == this.RecId`, no `MyTable::findRecId(this.RecId)`. That is a database round trip on every write and it returns the current stored state, not this buffer\'s pre-image. On an insert `this.orig()` is empty, so `this.orig().RecId == 0` is the "new record" test. Rule COC006 flags the re-read',
+      'The table data methods are declared by kernel types (xRecord/Common), so the symbol index has no row for them and "not found" there is not evidence they do not exist — prepare(mode="change") and get_object_info options:{"method":...} answer for them from a built-in contract instead',
       'REUSE BEFORE CREATING: if a CoC extension class for the target already exists in the custom model (prepare(mode="change") / extension_info(mode="coc") lists them), add the wrapper there — never create a parallel feature-named class (<Target>_<Feature>_Extension) unless the user explicitly requests separation',
       'The class suffix comes from EXTENSION_NAMING_STYLE and existing related artifacts — never from feature names, tickets, or customer names; if it cannot be derived, ask the user',
     ],
@@ -2257,7 +2851,10 @@ public void post()
 }`,
       },
     ],
-    related: ['coc', 'event-handlers', 'class-inheritance'],
+    // enum-conversions carries the worked validateWrite example (orig() + enum2Str
+    // + a label with placeholders). The link was one-directional, so a query about
+    // validateWrite reached these rules and never the example.
+    related: ['coc', 'event-handlers', 'class-inheritance', 'enum-conversions'],
   },
 
   // ── X++ Class & Method Rules ─────────────────────────────────────────────
@@ -2271,7 +2868,8 @@ public void post()
       'Class default access = public. Removing "public" does NOT make a class non-public. Use internal, final, abstract deliberately',
       'Instance fields default = protected — NEVER make them public; expose via parmFoo() accessors',
       'Constructor pattern: new() is protected, public static construct() factory; init() for post-construction setup',
-      'Method modifier order: [edit|display] [public|protected|private|internal] [static|abstract|final]',
+      'Method modifier order: [edit|display] [public|protected|private|internal] [static|abstract|final]. `internal protected` compiles in either order, but display/edit and static are MUTUALLY EXCLUSIVE — "display static Name m()" is "Conflicting modifiers \'static display\'" (xppc-verified). Keep to the documented order so the AOT diff stays readable',
+      'Combined access modifiers: "protected internal" COMPILES (xppc-verified); "private protected" does NOT — xppc rejects it as "Conflicting modifiers"',
       'Override visibility: must be at least as accessible as the base method. private is not overridable',
       'Optional parameters must come after required ones; all preceding parameters must be supplied. Use prmIsDefault(_x) to detect "was this passed"',
       'All parameters are pass-by-value — mutating a parameter does NOT affect the caller\'s variable',
@@ -2280,8 +2878,14 @@ public void post()
       'Constants over macros: public const str FOO = "bar"; at class scope; reference via ClassName::FOO or unqualified inside the class',
       '"var" keyword only when the type is obvious from initialization; skip when ambiguous',
       'Declare variables close to first use, smallest scope; compiler rejects shadowing',
+      'NO method overloading and NO constructor overloading — one new() per class; simulate with optional parameters or distinct static newFromX()/construct() factories',
+      'NO C# property syntax — the accessor-pair convention is the parm method: public FromDate parmFromDate(FromDate _v = fromDate) { fromDate = _v; return fromDate; }',
+      'NO generics, NO lambdas/anonymous methods — .NET-only features; generic types are reachable only through .NET interop',
+      'Local (nested) functions may be declared anywhere in a method body — before or after statements — and see the locals declared above them; legacy feature, prefer private methods',
+      'Static constructor: static void TypeNew() runs once on first use of the class — the supported place for one-time static-state init',
+      'Interfaces: implement a comma-separated list; interface members are implicitly public; name prefix convention is I',
     ],
-    related: ['coc-authoring', 'coc', 'class-inheritance'],
+    related: ['coc-authoring', 'coc', 'class-inheritance', 'xpp-declarations'],
   },
 
   // ── Class Inheritance ───────────────────────────────────────────────────
@@ -3212,14 +3816,15 @@ if (deserialized == effective.ValidFrom)
       'fully qualified everywhere because no `using` alias was declared.',
     rules: [
       'Declare `using System.Text;` above the class declaration to shorten names; without it every CLR type must be fully qualified (System.Text.StringBuilder)',
-      'CLR calls must execute where the assembly is deployed — put them in a `server` static method (or a class with RunOn = Server). A client-tier CLR call against a server-only assembly fails at runtime, not at compile time',
+      'Do NOT mark the method `server`: xppc compiles the modifier but answers "The \'Server\' keyword has been deprecated, please remove it from the method definition" — in finance and operations all X++ already runs on the AOS tier. What still matters is that the assembly is referenced by the model and deployed with it',
       'Assert interop permission before calling out: new InteropPermission(InteropKind::ClrInterop).assert(); — required for CAS-protected interop, and it documents the boundary',
       'Catch CLR failures with `catch (Exception::CLRError)` and pull the real message from CLRInterop::getLastException() — a bare `catch (Exception::Error)` will NOT catch a CLR exception and the diagnostic is lost',
+      'The typed form catches one .NET exception type, but the variable must be DECLARED first and the catch names it alone: `System.ArgumentException ex; try { … } catch (ex) { error(ex.Message); }`. C#-style `catch (System.ArgumentException ex)` is a parse error ("\')\' expected")',
       'Marshalling: X++ str ↔ System.String and X++ real/int ↔ the matching CLR primitives convert implicitly; anytype needs CLRInterop::getAnyTypeForObject() / CLRInterop::getObjectForAnyType()',
       'CLR enums are reached by value with CLRInterop::parseClrEnum(\'System.StringComparison\', \'OrdinalIgnoreCase\') — an X++ enum literal will not bind to a CLR enum parameter',
-      'A CLR array is a System.Array — index it with get_Item()/set_Item(), not with X++ [] syntax; property getters/setters are get_X()/set_X()',
+      'A CLR array is a System.Array: create it with `new System.String[3]()` and read/write it with GetValue/SetValue — X++ [] indexing on it is a compile error ("The array indexing syntax can only be applied to X++ array types. Use the SetValue and GetValue methods on managed array types"). Properties are reachable as `obj.Name` or `obj.get_Name()`',
       'null checks use `if (clrObject == null)`; do NOT compare a CLR object with an X++ empty value',
-      'Dispose deterministic resources explicitly (streams, readers) in a finally block — X++ has no `using` STATEMENT, only the using DECLARATION for namespaces',
+      'X++ HAS the `using` statement for IDisposable: `using (var reader = new System.IO.StreamReader(path)) { … }` compiles and disposes on every exit path (the platform ships 8,306 of them). Reach for try/finally + Dispose() only when the object must outlive one block',
       'Reference the assembly from the model (References node) so the compiler resolves it; a runtime-only GAC assembly compiles but breaks on a clean build machine',
       'Prefer an X++ equivalent when one exists (strFmt, Set/Map, System.IO only when the X++ file APIs cannot do it) — interop costs marshalling and blocks the compiler from checking anything',
     ],
@@ -3228,7 +3833,7 @@ if (deserialized == effective.ValidFrom)
         label: 'Server-tier CLR call with proper CLRError handling',
         code: `using System.Text;
 
-public static server str buildCsvLine(container _values)
+public static str buildCsvLine(container _values)
 {
     str result;
 
@@ -3552,6 +4157,651 @@ public class MyPostingLimits
     ],
     related: ['configuration-keys', 'feature-management', 'security'],
   },
+
+  // ── Language Core (X++ grammar) ─────────────────────────────────────────
+  {
+    id: 'xpp-data-types',
+    title: 'X++ Data Types, Literals & Conversions (primitives, null-equivalents)',
+    keywords: ['data type', 'primitive', 'literal', 'str', 'int', 'int64', 'real', 'date literal', 'utcdatetime',
+               'timeofday', 'guid', 'anytype', 'null', 'null value', 'conversion', 'str2int', 'int2str', 'num2str',
+               'str2date', 'verbatim string', 'truncation', 'edt extends'],
+    summary:
+      'X++ value types have no null references — each type has a null-EQUIVALENT value (0, empty string, 1900-01-01). ' +
+      'Conversions are explicit functions, not casts, and declared string lengths truncate silently.',
+    rules: [
+      'Primitives: boolean, int (32-bit), int64, real (128-bit decimal — no float drift; exponent literals like 1.0e3), str, date, utcdatetime, timeOfDay (seconds since midnight, 0–86400), guid, enum, container, anytype. There are NO unsigned integer types',
+      'Date literals use backslashes day\\month\\year (21\\11\\1998); date range 1900-01-01..2154-12-31 (maxDate()); utcdatetime literal form 1988-07-20T13:34:45',
+      'str is unlimited Unicode by default; a declared length (str 20 code;) TRUNCATES silently on assignment — prefer EDT-typed variables so the length lives in metadata',
+      'Prefix @ makes a verbatim string (backslashes literal — file paths, regex)',
+      'No null for value types — the null-EQUIVALENT values are: 0, 0.0, empty string, false, 1900-01-01, time 0, enum value 0. Only class and table-buffer references can be genuinely null',
+      'Conversions are FUNCTIONS, not casts: str2Int, int2Str, str2Int64, str2Num, num2Str(value, digits, decimals, sep1, sep2), str2Date(text, sequence), date2Str — the numeric format arguments are positional and easy to get wrong',
+      'anytype adopts the first type assigned and locks to it; any2Int / any2Str / any2Date / any2Real / any2Enum / any2Guid convert out — prefer a concrete type wherever possible',
+      'guid: newGuid() creates one, guid2Str / str2Guid convert',
+      'An EDT "extends" a primitive or another EDT in METADATA only — an EDT is not a class: is/as do not apply, and two EDTs over the same primitive assign to each other with no warning',
+      'For enum ↔ text conversions see enum-conversions; for date/time formatting and time zones see datetime-timezones; for container vs collection classes see xpp-collections',
+    ],
+    examples: [
+      {
+        label: 'Null-equivalents, truncation, anytype locking',
+        code: `// Value types initialize to their null-EQUIVALENT, never null
+date emptyDate;          // 1900-01-01
+str  emptyText;          // ''
+int  zero;               // 0
+
+// Declared-length strings truncate silently
+str 3 shortCode = 'ABCDEF';   // holds 'ABC' — no error, no warning
+
+// anytype locks to the first assignment
+anytype v = 42;          // v is now an int
+str asText = any2Str(v);`,
+      },
+    ],
+    related: ['enum-conversions', 'xpp-collections', 'datetime-timezones', 'extensible-enums'],
+  },
+  {
+    id: 'xpp-declarations',
+    title: 'Declarations & Scope (var, const, readonly, using)',
+    keywords: ['declaration', 'scope', 'shadowing', 'var', 'const', 'readonly', 'using', 'namespace', 'alias',
+               'disposable', 'inline declaration', 'block scope', 'loop scope'],
+    summary:
+      'X++ allows declare-anywhere with block scope and REJECTS shadowing at compile time. const/readonly replace ' +
+      'macros for constants; using has two unrelated meanings (namespace import clause vs disposable statement).',
+    rules: [
+      'Declare anywhere; scope is the enclosing block. The compiler REJECTS shadowing an outer variable — rename instead of nesting the same name',
+      '"var" requires an initializer and infers its type; not allowed for fields or parameters; skip it when the right side is not obviously typed',
+      'const = compile-time constant, initializer required at the declaration; readonly = assignable at the declaration OR in new(), immutable afterwards',
+      'Multiple declarations share one statement (int i, j;); for (int i = 0; …) scopes i to the loop',
+      'using clause at file top imports a .NET namespace (using System.Collections;) or aliases one (using IO = System.IO;) — only .NET interop needs it, X++ types never do',
+      'using (expr) { } STATEMENT scopes a .NET IDisposable — Dispose runs on exit even on exception; X++ classes do not implement it',
+      'Fields may have inline initializers; they run before new() executes',
+      'Optional parameters come after required ones and cannot be skipped in the middle; prmIsDefault(_p) detects "was this supplied" — details in xpp-class-rules',
+    ],
+    examples: [
+      {
+        label: 'const vs readonly, loop scope',
+        code: `public class MyRetryPolicy
+{
+    public const int MaxAttempts = 5;   // compile-time constant
+    readonly int timeoutSec;            // frozen after the constructor
+
+    protected void new(int _timeoutSec)
+    {
+        timeoutSec = _timeoutSec;       // last assignable moment
+    }
+
+    public int totalBudget()
+    {
+        int total;
+        for (int i = 0; i < MaxAttempts; i++)   // i is loop-scoped
+        {
+            total += timeoutSec;
+        }
+        return total;
+    }
+}`,
+      },
+    ],
+    related: ['xpp-class-rules', 'dotnet-interop', 'macros'],
+  },
+  {
+    id: 'operators-precedence',
+    title: 'Operators & Precedence (&& / || equal-precedence trap, like, is/as)',
+    keywords: ['operator', 'precedence', 'logical operator', 'parentheses', 'div', 'mod', 'like', 'wildcard',
+               'ternary', 'is as', 'cast', 'downcast', 'increment', 'bitwise', 'string concatenation'],
+    summary:
+      'X++ operator precedence differs from C# in one dangerous place: && and || have EQUAL precedence and evaluate ' +
+      'left-to-right. Casting uses is/as functions-of-the-language, and ++/-- are statements, not expressions.',
+    rules: [
+      'TRAP: && and || have EQUAL precedence, evaluated left-to-right — a || b && c means (a || b) && c, NOT a || (b && c) as in C#. ALWAYS parenthesize mixed &&/|| chains',
+      'Precedence (high→low): unary (- ~ !) → * / DIV MOD << >> & ^ → + - | → relational (< <= == != > >= like as is) → && and || (equal) → ?:',
+      'DIV = integer division, MOD = remainder — keywords, not / and %: 7 DIV 2 == 3, 7 MOD 2 == 1. Plain / always divides as real, even between ints',
+      '++ and -- are STATEMENTS with no prefix/postfix value distinction — `int y = i++;` is a syntax error ("\';\' expected"); increment on its own line',
+      'Assignment operators: = += -= *= /= (xppc-verified — *= and /= do compile, contrary to the language reference, and the platform ships 59 uses). There is no %=, no <<= and no ??=',
+      'Implicit conversions are narrower than they look: int→real, int→int64, int↔enum, int↔boolean all compile, but real→int is a compile ERROR ("The type conversion from \'real\' to \'int\' loses range and precision") and so are int→str, str→int, date→int, enum→str and boolean→str. int64→int and real→int64 compile with a warning. Convert explicitly (real2int, int2Str, any2Str…)',
+      'like matches SQL-style wildcards: * = any run, ? = one character; works in where clauses (translated to SQL LIKE) and on str values in code',
+      'String concatenation is +; there is NO string interpolation ($"…" does not exist) — use strFmt("%1 / %2", a, b)',
+      'is tests the runtime type; as downcasts and yields null on failure — check the result before use. Both apply to class/table hierarchies only, never to EDTs',
+      'Ternary cond ? a : b requires type-compatible branches',
+      'Bitwise & | ^ ~ << >> operate on int/int64',
+    ],
+    examples: [
+      {
+        label: 'The equal-precedence trap',
+        code: `boolean isAdmin   = true;
+boolean isOwner   = false;
+boolean isEnabled = false;
+
+// X++ evaluates left-to-right: (isAdmin || isOwner) && isEnabled → FALSE
+if (isAdmin || isOwner && isEnabled)
+{
+    // an admin does NOT get here — surprise
+}
+
+// The C#-style intent needs explicit parentheses → TRUE for an admin
+if (isAdmin || (isOwner && isEnabled))
+{
+    // correct
+}`,
+      },
+    ],
+    related: ['select-statement', 'xpp-data-types', 'switch-loops'],
+  },
+  {
+    id: 'switch-loops',
+    title: 'switch Fallthrough & Loop Statements',
+    keywords: ['switch', 'case', 'fallthrough', 'fall through', 'break', 'continue', 'default', 'while', 'do while',
+               'for loop', 'loop', 'pause', 'removed keywords'],
+    summary:
+      'X++ switch FALLS THROUGH between cases unless you break — the opposite of C#. case accepts comma lists and ' +
+      'non-constant expressions; pause/window are removed keywords, client/server are parsed but ignored.',
+    rules: [
+      'switch FALLS THROUGH: without break, execution continues into the next case (opposite of C#) — end every case with break and comment any deliberate fallthrough',
+      'case accepts comma-separated lists (case 1, 2, 3:) and non-constant expressions (case y:, case y + 1:); default: is optional but MUST be the last case item — placing it first is a compile error ("A default part must be the last case item in the switch statement")',
+      'switch works on int, enum, str and other primitives',
+      'Loops: while, do { } while (…);, for (init; test; increment) — break exits the innermost loop, continue jumps to the next iteration',
+      'break inside a switch that sits inside a loop exits only the SWITCH — use a flag or restructure to leave the loop',
+      'pause, window, tableLock and changeSite were REMOVED — they are no longer keywords, so xppc reports them as syntax errors ("Invalid token", "does not denote a class, a table, or an extended data type"). print and breakpoint still compile but go nowhere useful in the cloud — use info() with a label',
+      'client and server modifiers still COMPILE, with a deprecation warning ("The \'Client\' keyword has been deprecated, please remove it from the method definition") — delete them in new code; everything runs on the AOS tier',
+      'Assignment operators are = += -= *= /= and the ++ / -- STATEMENTS. *= and /= compile (the platform ships 59 uses); ++ and -- have no value, so `int y = i++;` is a syntax error ("\';\' expected") — increment on its own line',
+    ],
+    examples: [
+      {
+        label: 'Fallthrough — the missing break',
+        code: `MyDocStatus status = MyDocStatus::Posted;
+int handled;
+
+switch (status)
+{
+    case MyDocStatus::Draft, MyDocStatus::Review:
+        handled = 1;
+        break;              // remove this and Draft ALSO runs the Posted branch
+
+    case MyDocStatus::Posted:
+        handled = 2;
+        break;
+
+    default:
+        handled = 0;
+}`,
+      },
+    ],
+    related: ['operators-precedence', 'xpp-declarations', 'error-handling'],
+  },
+  {
+    id: 'attributes-authoring',
+    title: 'Authoring & Reading Attributes (SysAttribute, literal-only args)',
+    keywords: ['attribute', 'sysattribute', 'custom attribute', 'annotation', 'decorator', 'reflection',
+               'getallattributes', 'obsolete', 'sysobsolete', 'attribute suffix'],
+    summary:
+      'An attribute class is a plain X++ class deriving from SysAttribute, applied in square brackets with ' +
+      'LITERAL-only constructor arguments and read back via reflection. Instances are constructed lazily.',
+    rules: [
+      'An attribute class is a non-abstract X++ class deriving from SysAttribute; the name conventionally ends in "Attribute" and that suffix may be OMITTED at the usage site',
+      'Constructor arguments at the usage site MUST be compile-time literals of primitive types (str/int/boolean/enum value/date) — a variable is "Invalid token \',\'", a call is "Invalid token \'(\'". A #define MACRO is legal, because it expands to a literal before the compiler sees it',
+      'Attributes apply to classes, interfaces, methods, class fields and table methods; several stack comma-separated in one bracket or in separate brackets',
+      'Attribute arguments are positional only — X++ has no named-argument syntax',
+      'Instances are constructed LAZILY when reflection reads them — a throwing attribute constructor surfaces at the READER, far from the declaration site',
+      'Read back via reflection: DictClass / DictMethod expose getAllAttributes, getAttribute and getAttributedClasses — see reflection-dict. Attribute scanning is the backbone of the SysExtension plug-in pattern (see sysextension)',
+      'SysObsoleteAttribute("message", makeError, date) on a class/method/field turns every REFERENCE into a compile warning (false) or error (true) — the supported deprecation mechanism (see deprecated). Pass ALL THREE arguments even though the constructor defaults them: xppbp answers BPCheckSysObsoleteAttributeParametersMismatch otherwise, and positional arguments mean the date cannot be skipped',
+    ],
+    examples: [
+      {
+        label: 'Usage site — suffix optional, literal args only',
+        code: `// The declaration is a plain class deriving from SysAttribute (one line,
+// a str field, a parm method). Consuming it is reflection — see reflection-dict.
+[MyIntegrationTarget('CustomerSync'), MyPriority(10)]
+public class MyCustomerSyncStrategy
+{
+}`,
+      },
+      {
+        label: 'Declaration — a SysAttribute subclass with one literal argument',
+        code: `public class MyIntegrationTargetAttribute extends SysAttribute
+{
+    str targetName;
+
+    public void new(str _targetName)
+    {
+        super();
+        targetName = _targetName;
+    }
+
+    public str parmTargetName()
+    {
+        return targetName;
+    }
+}`,
+      },
+      {
+        label: 'Deprecating a class — every reference becomes a compile warning (true = error)',
+        code: `[SysObsolete('Use MyCustomerSyncStrategyV2 instead', false, 31\\12\\2026)]
+public class MyCustomerSyncStrategy
+{
+}`,
+      },
+    ],
+    related: ['reflection-dict', 'sysextension', 'deprecated', 'xpp-class-rules'],
+  },
+  {
+    id: 'intrinsic-functions',
+    title: 'Compile-Time (Intrinsic) Functions — the full catalog',
+    keywords: ['intrinsic', 'compile-time function', 'tablestr', 'classstr', 'fieldstr', 'methodstr', 'fieldnum',
+               'tablenum', 'enumnum', 'identifierstr', 'literalstr', 'ssrsreportstr', 'menuitemstr', 'formstr',
+               'metadata assertion'],
+    summary:
+      'Intrinsics are compile-time metadata assertions: the argument must be a literal element name, the compiler ' +
+      'fails the build when the element does not exist, and the call costs nothing at runtime. Always prefer them ' +
+      'over string literals.',
+    rules: [
+      'Arguments must be LITERAL element names — never variables; the compiler validates existence and (for member forms) membership',
+      'Element names: classStr, tableStr, formStr, queryStr, reportStr, menuStr, enumStr, extendedTypeStr, attributeStr, resourceStr, tileStr, dutyStr, privilegeStr, roleStr, tableCollectionStr, workflowTypeStr, workflowTaskStr, workflowApprovalStr, workflowCategoryStr, measureStr, measurementStr, dimensionHierarchyStr',
+      'Member forms take the owner first: fieldStr(MyTable, MyField), tableMethodStr, tableStaticMethodStr, methodStr(MyClass, myMethod), staticMethodStr, delegateStr(MyClass, myDelegate), staticDelegateStr, indexStr(MyTable, MyIdx), tableFieldGroupStr(MyTable, MyGroup), enumLiteralStr(MyEnum, MyValue)',
+      'Form internals: formControlStr(MyForm, MyControl), formDataSourceStr(MyForm, MyDs), formDataFieldStr(MyForm, MyDs, MyField), formMethodStr; queries: queryDatasourceStr(MyQuery, MyDs), queryMethodStr',
+      'Menu items are kind-specific: menuItemDisplayStr / menuItemActionStr / menuItemOutputStr — the display form fails the build on an action item',
+      'Numeric ids for API calls: tableNum, classNum, enumNum, fieldNum(MyTable, MyField), indexNum; enumCnt(MyEnum) = number of values',
+      'Reports: ssrsReportStr(MyReport, MyDesign) — TWO arguments, report AND design name, both validated (see ssrs-reports)',
+      'Data entities: dataEntityDataSourceStr(MyEntity, MyDs)',
+      'identifierStr does NO existence check — a last resort for names outside metadata; literalStr passes a label id through without label lookup; varStr returns a local variable\'s name',
+      'maxInt / minInt / maxDate are compile-time constants',
+    ],
+    examples: [
+      {
+        label: 'Compile-time validated references',
+        code: `// A typo in any of these fails the BUILD, not production
+str tableName  = tableStr(MyBonusTable);
+str methodName = methodStr(MyBonusService, calculate);
+str designRef  = ssrsReportStr(MyBonusReport, Report);`,
+      },
+    ],
+    related: ['select-statement', 'ssrs-reports', 'labels', 'reflection-dict', 'runtime-functions'],
+  },
+
+  // ── Args: what one object gets when it is opened from another ───────────
+  {
+    id: 'args-object',
+    title: 'Args — the record, caller and parameters an object is opened with',
+    keywords: ['args', 'args.record', 'args.caller', 'parmenum', 'parmobject', 'menuitemname',
+               'openmode', 'lookupfield', 'lookupvalue', 'menufunction', 'element.args',
+               'caller', 'pass parameter', 'open form with record', 'dataset'],
+    summary:
+      'Every menu item, form and report is entered through an Args instance: the record it was ' +
+      'opened on, who opened it, and any extra parameter. Reading it wrongly is how a form silently ' +
+      'opens on the wrong record, so each accessor below was checked against the compiler.',
+    rules: [
+      'Reach it from a form with element.args(), and from a class with the Args parameter of main(Args _args)',
+      'The record: _args.record() returns the caller\'s cursor as a table buffer — assign it to a typed buffer, and check _args.dataset() (the table id) BEFORE trusting it, because any caller can pass any table',
+      'The caller: _args.caller() returns an Object. Test it with `is` and downcast with `as` (Object and FormRun are late-bound, so a call on the wrong type fails at RUNTIME, not at compile time): `FormRun callerForm = _args.caller() as FormRun;`',
+      'Extra values: _args.parm() carries one string, _args.parmEnum() one enum value with _args.parmEnumType() naming its type (set it with enumNum(MyEnum)), and _args.parmObject() any object. Each is get/set — passing the value is the same call with an argument',
+      'Which entry point was used: _args.menuItemName() and _args.menuItemType(); _args.openMode() distinguishes New/Edit/View; _args.lookupField() and _args.lookupValue() carry a lookup\'s field and value',
+      'Opening something WITH arguments: build the Args, then run the menu function — `Args args = new Args(); args.record(myBuffer); args.parm(myId); new MenuFunction(menuItemDisplayStr(MyForm), MenuItemType::Display).run(args);`. `new Args(formStr(MyForm))` sets the name in the constructor; args.name(...) sets it afterwards',
+      'Never read _args.record() without checking dataset() first, and never assume caller() is a form — a batch, a service or another class reaches the same code with caller() null',
+    ],
+    examples: [
+      {
+        label: 'Entry point that only accepts the record it understands',
+        code: `public static void main(Args _args)
+{
+    MyOrderTable order;
+
+    if (!_args || _args.dataset() != tableNum(MyOrderTable))
+    {
+        throw error("@MyModel:OpenFromOrderListOnly");
+    }
+
+    order = _args.record();
+
+    // The caller is a form only when a user opened it; a batch reaches here too.
+    FormRun callerForm = _args.caller() as FormRun;
+
+    MyOrderProcessor::construct().process(order, _args.parm());
+}`,
+      },
+    ],
+    related: ['formrun-lifecycle', 'menu-navigation', 'sysoperation', 'form-event-handlers'],
+  },
+
+  // ── display / edit methods ──────────────────────────────────────────────
+  {
+    id: 'display-edit-methods',
+    title: 'display and edit methods (computed and writable columns)',
+    keywords: ['display method', 'edit method', 'computed column', 'sysclientcachedatamethod',
+               'display cache', 'calculated field', 'form column', 'unbound control'],
+    summary:
+      'A display method shows a value that is not stored; an edit method shows one and takes it back. ' +
+      'Both are ordinary X++ methods with one modifier — and the modifier will not combine with static.',
+    rules: [
+      'display <ReturnType> name() — the value is computed and READ-ONLY on the form or report. Declare it on the table when every form should see it, on the form when only that form should',
+      'edit <ReturnType> name(boolean _set, <ReturnType> _value) — the same, but writable: _set is false while painting and true when the user types, and the method returns the value to show. On a FORM the signature carries the data source buffer as well: edit <T> name(boolean _set, <Table> _buffer, <T> _value)',
+      'display/edit and static are MUTUALLY EXCLUSIVE: `display static Name m(CustTable _ct)` is a compile error, "Conflicting modifiers \'static display\'" (xppc-verified). The access modifier is free — `public display Name m()` compiles',
+      'The return type must be an EDT or a primitive the form can render; returning a container or an object gives a control with nothing to show',
+      'A display method runs ONCE PER VISIBLE ROW, every refresh. Anything that queries in it multiplies by the row count — that is the usual cause of a grid that scrolls slowly',
+      'Cache it when it is expensive and its inputs change only with the record: [SysClientCacheDataMethodAttribute(true)] on the method (the platform ships ~2,800 of these). The cache is per record, so a method that depends on anything else must NOT be cached',
+      'A display method on a table cannot be used in a select/where — it is X++, not SQL. For filtering, add a real field or a view',
+      'Neither is deprecated (see deprecated): they remain the supported way to show a computed value',
+    ],
+    examples: [
+      {
+        label: 'A cached display method and an editable one',
+        code: `/// <summary>
+/// Shown on every row — cached because it only changes with the record.
+/// </summary>
+[SysClientCacheDataMethodAttribute(true)]
+public display CustName displayPrimaryContact()
+{
+    return MyContactHelper::primaryContactName(this.AccountNum);
+}
+
+/// <summary>
+/// Writable: _set is false while painting, true when the user commits.
+/// </summary>
+public edit MyNote editInternalNote(boolean _set, MyNote _value)
+{
+    if (_set)
+    {
+        MyNoteStore::save(this.RecId, _value);
+    }
+
+    return MyNoteStore::load(this.RecId);
+}`,
+      },
+    ],
+    related: ['formrun-lifecycle', 'performance', 'caching', 'deprecated'],
+  },
+
+  // ── SysOperation dialog attributes ──────────────────────────────────────
+  {
+    id: 'sysoperation-ui-attributes',
+    title: 'SysOperation dialog: grouping, order and visibility from the contract',
+    keywords: ['sysoperationgroup', 'sysoperationgroupmember', 'sysoperationdisplayorder',
+               'sysoperationlabel', 'sysoperationhelptext', 'sysoperationcontrolvisibility',
+               'sysoperationinitializable', 'contract dialog', 'batch dialog', 'parameter dialog',
+               'sysoperationcontractprocessing'],
+    summary:
+      'The dialog of a SysOperation is generated from the data contract, and its layout is controlled ' +
+      'by attributes on the parm methods — no dialog code, no UI builder, until you need behaviour.',
+    rules: [
+      'Every dialog field is a parm method carrying [DataMemberAttribute(\'Name\')]. Without it the property is not on the contract and not in the dialog',
+      'Caption and tooltip: [SysOperationLabelAttribute(literalStr("@MyModel:FromDate"))] and [SysOperationHelpTextAttribute(literalStr("@MyModel:FromDateHelp"))] — literalStr passes the label id through without resolving it at compile time',
+      'Grouping: declare the group on the CLASS with [SysOperationGroupAttribute(\'Dates\', "@MyModel:Dates", \'1\')] (name, label, sequence) and put fields in it with [SysOperationGroupMemberAttribute(\'Dates\')] on each parm method',
+      'Order within a group: [SysOperationDisplayOrderAttribute(\'1\')] — a STRING, not an int',
+      'Visibility: [SysOperationControlVisibilityAttribute(false)] hides a contract member that must exist but not be shown (a value the caller sets in code)',
+      'Attributes stack in one bracket, comma-separated, on the same parm method. All of the above compile together (xppc-verified)',
+      'Validation belongs in the contract\'s validate() — return false after checkFailed(...) and the dialog will not close',
+      'Implement SysOperationInitializable on the contract when it needs to fill defaults before the dialog is shown; its initialize() runs first',
+      'Reach for a UI builder ([SysOperationContractProcessing(classStr(MyUIBuilder))]) only when the attributes cannot express it — a custom lookup, a field that reacts to another, or a control the framework does not generate. See ssrs-ui-builder',
+      'Do NOT put [SysEntryPointAttribute] on the service method: xppc answers "\'SysEntryPointAttribute\' is obsolete: This attribute is deprecated in AX7."',
+    ],
+    examples: [
+      {
+        label: 'A contract whose dialog needs no dialog code',
+        code: `[DataContractAttribute,
+ SysOperationGroupAttribute('Dates', "@MyModel:Dates", '1')]
+public class MyPostingContract implements SysOperationInitializable
+{
+    private TransDate fromDate;
+    private NoYes     includeposted;
+
+    public void initialize()
+    {
+        fromDate = DateTimeUtil::date(DateTimeUtil::utcNow());
+    }
+
+    [DataMemberAttribute('FromDate'),
+     SysOperationLabelAttribute(literalStr("@MyModel:FromDate")),
+     SysOperationHelpTextAttribute(literalStr("@MyModel:FromDateHelp")),
+     SysOperationGroupMemberAttribute('Dates'),
+     SysOperationDisplayOrderAttribute('1')]
+    public TransDate parmFromDate(TransDate _fromDate = fromDate)
+    {
+        fromDate = _fromDate;
+        return fromDate;
+    }
+
+    /// <summary>
+    /// On the contract, not on the dialog: the caller sets it in code.
+    /// </summary>
+    [DataMemberAttribute('IncludePosted'),
+     SysOperationControlVisibilityAttribute(false)]
+    public NoYes parmIncludePosted(NoYes _includePosted = includeposted)
+    {
+        includeposted = _includePosted;
+        return includeposted;
+    }
+
+    public boolean validate()
+    {
+        boolean ret = true;
+
+        if (!fromDate)
+        {
+            ret = checkFailed("@MyModel:FromDateRequired");
+        }
+
+        return ret;
+    }
+}`,
+      },
+    ],
+    related: ['sysoperation', 'ssrs-ui-builder', 'ssrs-contracts', 'custom-services'],
+  },
+
+  // ── Extending a report that already exists ──────────────────────────────
+  {
+    id: 'report-extension-patterns',
+    title: 'Extending a STANDARD report (dataset, design, menu item) without overlayering',
+    keywords: ['report extension', 'extend report', 'customize report', 'posthandlerfor', 'prehandlerfor',
+               'xppprepostargs', 'dataset extension', 'custom design', 'printmgmtdoctype',
+               'getdefaultreportformatdelegate', 'menu item extension', 'ssrs customization',
+               'duplicate report', 'report design', 'controller extension'],
+    summary:
+      'Three techniques cover almost every "change a standard report" request: add columns to its dataset, ' +
+      'give it a custom design, or point a menu item at your own report. All three are pure extension — ' +
+      'no overlayering — and each has an exact shape the compiler accepts.',
+    rules: [
+      'ADD COLUMNS TO AN EXISTING DATASET: extend the RDP\'s temp table with your fields (table extension), then fill them either in bulk with [PostHandlerFor(classStr(MyReportDP), methodStr(MyReportDP, processReport))] — one pass over the finished temp table — or per row with [DataEventHandler(tableStr(MyReportTmp), DataEventType::Inserting)]. Bulk for a lookup-per-set, row-by-row for a calculation; avoid a joined query in the row handler',
+      'The post-handler signature is public static void h(XppPrePostArgs _args), and the argument object gives you: _args.getThis() (the DP instance — downcast with as), _args.getReturnValue() / _args.setReturnValue(v), _args.getArg(\'_paramName\') / _args.setArg(\'_paramName\', v). All verified against xppc. For a static target use staticMethodStr in the attribute',
+      'A handler whose parameter profile does not match is a COMPILE error, not a runtime surprise: "Method \'void X.h(str _s)\' cannot be used as an event handler for method \'real Y.calc(int _qty)\' because the parameter profile does not match"',
+      'CUSTOM DESIGN FOR A BUSINESS DOCUMENT: duplicate the report in your model, rename it, then (1) subclass the standard controller and give it a main() shaped like every shipped one — parmArgs(_args), parmReportName(ssrsReportStr(MyReportExt, <DesignName>)), startOperation(). There is NO initArgs on SrsReportRunController or anywhere in its hierarchy (xppc-verified); and the second argument of ssrsReportStr is the DESIGN inside the report, which is compile-time checked — read it off the AxReport instead of assuming "Report", (2) subscribe to the print-management delegate — [SubscribesTo(classStr(PrintMgmtDocType), delegateStr(PrintMgmtDocType, getDefaultReportFormatDelegate))] public static void h(PrintMgmtDocumentType _docType, EventHandlerResult _result) — and _result.result(ssrsReportStr(MyReportExt, Report)) for the document type you are replacing, and (3) create an extension of the menu item and set its Object property to your controller',
+      'PrintMgmtDocType exposes seven delegates, all with the (PrintMgmtDocumentType, EventHandlerResult) shape: getDefaultReportFormatDelegate, getQueryTableIdDelegate, getQueryRangeFieldsDelegate, getPartyTypeDelegate, getPartyRecIdDelegate, getEmailAddressDelegate, getDestinationPartyTypeAndIdDelegate',
+      'REDIRECT A MENU ITEM: create an extension of the existing output menu item and change the report/design or the controller reference. It avoids hunting down every reference to the standard report, and it works for query-based and RDP-based reports alike',
+      'A post-handler on the CONTROLLER\'s construct() is the light-touch variant of the same idea: [PostHandlerFor(classStr(MyReportController), staticMethodStr(MyReportController, construct))] then controller.parmReportName(ssrsReportStr(MyReportExt, Report)) on the returned instance',
+      'Microsoft\'s guidance is that RDP classes are not extended directly — the extension points above exist for that reason. The compiler is less strict than the guidance (a CoC wrapper on SrsReportDataProviderBase.processReport compiles), so treat "use the handler" as a design rule, not something the build will enforce',
+      'Whichever route you take, the duplicated report keeps consuming the STANDARD data contract, so a platform change to the contract or the DP still reaches your report — that is the point of duplicating the design rather than the solution',
+      'Deploy the report after building (Deploy Reports in Visual Studio, or the DeployAllReportsToSsrs script) — a design change that is not deployed shows the old layout with no error',
+    ],
+    examples: [
+      {
+        label: 'Adding a column to a standard report dataset',
+        code: `public final class MyRentalsByCustHandler
+{
+    /// <summary>
+    /// One pass over the finished temp table — cheaper than a per-row lookup.
+    /// </summary>
+    [PostHandlerFor(classStr(FMRentalsByCustDP), methodStr(FMRentalsByCustDP, processReport))]
+    public static void processReportPostHandler(XppPrePostArgs _args)
+    {
+        FMRentalsByCustDP dp        = _args.getThis() as FMRentalsByCustDP;
+        TmpFMRentalsByCust tmpTable = dp.getTmpFMRentalsByCust();
+        FMRentalCharge     charge;
+
+        ttsBegin;
+
+        while select forUpdate tmpTable
+        {
+            select firstOnly Description from charge
+                where charge.RentalId == tmpTable.RentalId;
+
+            tmpTable.MyChargeDescription = charge.Description;
+            tmpTable.update();
+        }
+
+        ttsCommit;
+    }
+}`,
+      },
+      {
+        label: 'Pointing print management at a custom design',
+        code: `public final class MyPrintMgmtDocTypeHandler
+{
+    [SubscribesTo(classStr(PrintMgmtDocType), delegateStr(PrintMgmtDocType, getDefaultReportFormatDelegate))]
+    public static void getDefaultReportFormatDelegate(
+        PrintMgmtDocumentType _docType,
+        EventHandlerResult    _result)
+    {
+        switch (_docType)
+        {
+            case PrintMgmtDocumentType::SalesOrderConfirmation:
+                _result.result(ssrsReportStr(MySalesConfirm, Report));
+                break;
+        }
+    }
+}`,
+      },
+    ],
+    related: ['ssrs-reports', 'print-management', 'event-handlers', 'coc-authoring', 'ssrs-contracts'],
+  },
+
+  // ── Form event handlers ─────────────────────────────────────────────────
+  {
+    id: 'form-event-handlers',
+    title: 'Form Event Handlers (the four attributes and their signatures)',
+    keywords: ['formeventhandler', 'formcontroleventhandler', 'formdatasourceeventhandler',
+               'formdatafieldeventhandler', 'form event', 'onclicked', 'onmodified', 'onvalidated',
+               'onactivated', 'oninitialized', 'lookup', 'xformrun', 'formcontrol', 'formdatasource',
+               'formdataobject', 'formeventargs', 'form handler', 'subscribe form'],
+    summary:
+      'A form is extended from OUTSIDE by subscribing to its events: four attributes, four event-type ' +
+      'enums, and four handler signatures that differ in the sender type. Getting the sender type wrong ' +
+      'is the usual failure, and the compiler reports it as a parameter-profile mismatch.',
+    rules: [
+      'The four attributes and their senders (shipped signatures): [FormEventHandler(formStr(MyForm), FormEventType::Initialized)] public static void h(xFormRun _sender, FormEventArgs _e) — note xFormRun, not FormRun; [FormControlEventHandler(formControlStr(MyForm, MyButton), FormControlEventType::Clicked)] public static void h(FormControl _sender, FormControlEventArgs _e); [FormDataSourceEventHandler(formDataSourceStr(MyForm, MyTable), FormDataSourceEventType::Activated)] public static void h(FormDataSource _sender, FormDataSourceEventArgs _e); [FormDataFieldEventHandler(formDataFieldStr(MyForm, MyTable, MyField), FormDataFieldEventType::Modified)] public static void h(FormDataObject _sender, FormDataFieldEventArgs _e)',
+      'Event types that actually occur in shipped handlers — FormEventType: Initializing, Initialized, PostRun, Activated, Closing. FormControlEventType: Clicked, Modified, Lookup, Validating, Validated, Enter, GotFocus, PageActivated, SelectionChanged, TabChanged, JumpRef, Expanded. FormDataSourceEventType: Initialized, Activated, Created, Written, Writing, ValidatingWrite, ValidatedWrite, Deleting, Deleted, ValidatingDelete, ValidatedDelete, InitValue, QueryExecuting, QueryExecuted, SelectionChanged, LeavingRecord, MarkChanged, PostLinkActive. FormDataFieldEventType: Modified, Validating, Validated, JumpRef',
+      'The handler is static and lives in any class — one handler class per form is the readable convention; the compiler does not care where it sits',
+      'Reach the form from the sender: FormRun formRun = _sender as FormRun (or _sender.formRun() on a control/datasource), then formRun.dataSource(formDataSourceStr(MyForm, MyTable)) and formRun.design().controlName(formControlStr(MyForm, MyControl))',
+      'Lookup is the one event you usually want on a control: subscribe to FormControlEventType::Lookup, build a SysTableLookup, then call CancelSuperCall() to replace the standard lookup — without it BOTH lookups run. The method is NOT on the declared parameter: `_e.CancelSuperCall()` is a compile error, "Class \'FormControlEventArgs\' does not contain a definition for \'CancelSuperCall\'" (xppc-verified). Narrow it first: `FormControlCancelableSuperEventArgs cancelArgs = _e as FormControlCancelableSuperEventArgs;` and test the result before calling',
+      'A data source write is cancelled the same way and with its own args type: in a ValidatingWrite handler, `FormDataSourceCancelEventArgs cancelArgs = _e as FormDataSourceCancelEventArgs;` then `cancelArgs.cancel(true)` (xppc-verified)',
+      'A datasource event fires per RECORD (Activated, SelectionChanged) or per WRITE (Writing/Written/ValidatingWrite). Validation belongs in ValidatingWrite where returning false through the args stops the write; Written is too late',
+      'Prefer a form event handler over Chain of Command on the form when you only need to react. CoC on a FormRun method is possible but couples you to the form\'s internals; the event surface is the supported one — see coc-authoring for the choice',
+      'Event handlers on a form have no guaranteed ORDER between subscribers, so never depend on another handler having run first (see event-handlers)',
+    ],
+    examples: [
+      {
+        label: 'Reacting to a field change and replacing a lookup',
+        code: `public final class MyFormEventHandler
+{
+    [FormDataFieldEventHandler(formDataFieldStr(MyForm, MyTable, MyField), FormDataFieldEventType::Modified)]
+    public static void MyField_OnModified(FormDataObject _sender, FormDataFieldEventArgs _e)
+    {
+        FormDataSource dataSource = _sender.datasource();
+        MyTable        record     = dataSource.cursor();
+
+        record.MyDerivedField = MyHelper::derive(record.MyField);
+    }
+
+    [FormControlEventHandler(formControlStr(MyForm, MyFieldControl), FormControlEventType::Lookup)]
+    public static void MyFieldControl_OnLookup(FormControl _sender, FormControlEventArgs _e)
+    {
+        FormControlCancelableSuperEventArgs cancelArgs = _e as FormControlCancelableSuperEventArgs;
+        SysTableLookup                      lookup     = SysTableLookup::newParameters(tableNum(MyTable), _sender);
+
+        lookup.addLookupField(fieldNum(MyTable, MyField));
+        lookup.performFormLookup();
+
+        // Without this the standard lookup runs as well. The method is not on
+        // FormControlEventArgs, so the args have to be narrowed first.
+        if (cancelArgs)
+        {
+            cancelArgs.CancelSuperCall();
+        }
+    }
+}`,
+      },
+    ],
+    related: ['event-handlers', 'formrun-lifecycle', 'form-patterns', 'coc-authoring'],
+  },
+
+  // ── Run-time (predefined) functions ─────────────────────────────────────
+  {
+    id: 'runtime-functions',
+    title: 'Run-Time (Predefined) Functions — the catalog the compiler actually has',
+    keywords: ['runtime function', 'predefined function', 'global function', 'strlen', 'substr', 'strfmt',
+               'conpeek', 'conlen', 'any2str', 'str2int', 'num2str', 'date2str', 'mkdate', 'round', 'decround',
+               'abs', 'power', 'today', 'curext', 'curuserid', 'funcname', 'prmisdefault', 'newguid', 'sleep',
+               'arity', 'argument count', 'does not denote a predefined function', 'strsplit', 'strreplace'],
+    summary:
+      'The ~170 functions that are not members of any class. The compiler is the authority on which ' +
+      'exist and how many arguments each takes (validate_code checks it as FN001/FN002 from a captured ' +
+      'table), and it disagrees with the language reference in both directions.',
+    rules: [
+      'Call them unqualified. X++ requires this./ClassName:: for methods, so a bare name(…) is a predefined function, a Global:: static or a local function — never an instance method',
+      'Conversion: any2Date/Enum/Guid/Int/Int64/Real/Str, str2Date(text, sequence), str2Datetime(text, sequence), str2Enum(typeVar, text), str2Guid, str2Int, str2Int64, str2Num, str2Time, int2Str, int642Str, uint2Str (use it for RecIds — int2Str overflows), num2Str(value, chars, decimals, sep1, sep2) — all five arguments, num2Char, char2Num(text, position), date2Num, num2Date, guid2Str, enum2Str(value), enum2Symbol(enumNum(E), value), symbol2Enum(enumNum(E), text), enum2int, enum2Value',
+      'String: strLen, strUpr, strLwr, subStr(text, position, number) 1-based, strDel, strIns, strRep, strFind/strScan/strNFind (all FOUR arguments: text, chars, start, count), strKeep, strRem, strLTrim, strRTrim, strLRTrim, strAlpha, strCmp, strColSeq, strLine, strPoke, strPrompt, strReplace(text, from, to), strSplit(text, separator) — returns a List, not a container, strStartsWith, strEndsWith, strContains, strLFix/strRFix (2 or 3 args), match(pattern, text)',
+      'Container: conLen, conPeek(container, position) 1-based, conDel(container, start, number), conNull, con2Str, str2Con. conIns, conFind and conPoke are VARIADIC — no argument count to check',
+      'Date: today, timeNow, systemDateGet/systemDateSet, year, mthOfYr, dayOfMth, dayOfWk, dayOfYr, wkOfYr, mkDate(day, month, year), endMth, nextMth/nextQtr/nextYr, prevMth/prevQtr/prevYr, dayName, mthName, dateNull, dateMax, dateMthFwd, dateStartMth, dateEndMth',
+      'Math: abs, round(value, decimals), decRound, power, trunc, frac, exp, exp10, log10, logN, the trigonometric set, corrFlagSet. max and min are VARIADIC. Business/finance: cTerm, ddb, dg, fV, idg, intvMax/intvName/intvNo/intvNorm, pmt, pt, pv, rate, sln, syd, term',
+      'Reflection: classIdGet, dimOf, typeOf, tableId2Name, tableId2PName, tableName2Id, fieldId2Name(tableId, fieldId [, arrayIndex]), fieldId2PName, fieldName2Id, indexId2Name, indexName2Id, classId2Name, className2Id, enumName2Id. Session: curExt, curUserId, funcName, getPrefix, setPrefix, sessionId, getCurrentPartition, getCurrentPartitionRecId, prmIsDefault, runAs (4–7 args)',
+      'OPTIONAL TRAILING ARGUMENTS the reference presents as fixed: date2Str takes 7 or 8 (the 8th is DateFlags; the platform calls it with 7 in 161 places), datetime2Str 1 or 2, fieldId2Name 2 or 3, con2Str 1 or 2, str2Con 1 to 3, strLFix/strRFix 2 or 3, and info/warning/error/checkFailed 1 to 3 (message, helpUrl, SysInfoAction)',
+      'GONE on 10.0.4x, though AX 2012 had them: corrFlagGet, dateMin, int2Enum, refPrintAll, typeName2Id — "The name \'x\' does not denote a predefined function, a static method on the Global class nor a previously defined local function". OBSOLETE (compiles with a warning): dateStartWk, dateEndWk, dateStartYr, dateEndYr',
+      'Getting a count wrong is a compile error caught offline: validate_code reports FN001 with the exact xppc text ("\'subStr\' expects 3 argument(s), but 2 specified" / "is missing argument 3"), and FN002 for a function this version does not have. The table behind both is captured from the compiler itself, not written by hand',
+      'today() compiles but fails BPUpgradeCodeToday — use DateTimeUtil::getToday(DateTimeUtil::getUserPreferredTimeZone()); see datetime-timezones',
+    ],
+    examples: [
+      {
+        label: 'The argument counts that are easy to get wrong',
+        code: `// strFind/strScan/strNFind take FOUR arguments — text, characters, start, count
+int pos = strFind(line, ',', 1, strLen(line));
+
+// subStr is 1-based: position, then LENGTH (not an end index)
+str head = subStr(line, 1, pos - 1);
+
+// date2Str: 7 arguments (sequence, day, sep, month, sep, year), or 8 with DateFlags.
+// -1 in a format slot means "use the user's regional settings".
+str shown = date2Str(myDate, 321, 2, 1, 2, 1, 4);
+
+// strSplit returns a List — not a container
+List parts = strSplit('a,b,c', ',');
+
+// conIns is variadic; conPeek is 1-based
+container c = conIns(conNull(), 1, 2, 3);
+int first   = conPeek(c, 1);`,
+      },
+    ],
+    related: ['intrinsic-functions', 'xpp-data-types', 'enum-conversions', 'datetime-timezones', 'xpp-collections'],
+  },
+  {
+    id: 'date-effective',
+    title: 'Date-Effective Tables (ValidTimeStateFieldType, validTimeState)',
+    keywords: ['date effective', 'date effectivity', 'validtimestate', 'valid time state', 'validfrom', 'validto',
+               'as of date', 'historical', 'versioned rows', 'time period'],
+    summary:
+      'Date-effective tables version rows over ValidFrom/ValidTo. Forms and queries filter to the current date ' +
+      'automatically — a plain X++ select does NOT, which is how historical rows leak into business logic.',
+    rules: [
+      'Make a table date-effective by setting ValidTimeStateFieldType = Date or UtcDateTime — the platform adds ValidFrom/ValidTo columns and requires them in an alternate-key unique index',
+      'A plain X++ select returns ALL versions — no implicit date filter; add validTimeState(asOfDate) or validTimeState(from, to) between select and the buffer',
+      'Forms and Query objects DO filter by default (as-of-current-date auto query) — X++ code is the odd one out',
+      'validTimeState is a FindOption — placement rules in select-statement',
+      'Overlapping updates are resolved by the buffer\'s update mode (the ValidTimeStateUpdate modes: Correction, CreateNewTimePeriod, EffectiveBased) — the kernel splits/adjusts neighbouring rows accordingly',
+      'Set-based operations DOWNGRADE to row-by-row on date-effective tables — update_recordset/delete_from lose their speed advantage here',
+      '"No end date" is the max-value sentinel (maxDate() / utcdatetime max — see datetime-timezones), never an empty date',
+    ],
+    examples: [
+      {
+        label: 'as-of select vs the unfiltered default',
+        code: `MyRateTable rate;
+date asOf = mkDate(1, 7, 2026);
+
+// Only the version valid on asOf:
+select validTimeState(asOf) rate
+    where rate.MyWorkerId == 42;
+
+// ALL versions, historical included — plain select has no implicit filter:
+select rate
+    where rate.MyWorkerId == 42;`,
+      },
+    ],
+    related: ['select-statement', 'datetime-timezones'],
+  },
 ];
 
 // ─── Search Logic ───────────────────────────────────────────────────────────
@@ -3610,6 +4860,84 @@ function tokenize(topic: string): string[] {
  * so results are surfaced as low-confidence suggestions, not authoritative answers.
  */
 const CONFIDENT_SCORE = 3;
+
+/**
+ * Query words that read as an API name rather than prose: a digit wedged against
+ * letters (enum2str, any2Int, SYS10028), internal camelCase (validateWrite,
+ * DictEnum) or an underscore. These carry the intent of a lookup — everything
+ * else in "enum2str global function convert enum value to label text" is filler.
+ *
+ * Case matters here and is lost by tokenize(), so this reads the raw topic.
+ */
+function distinctiveTokens(topic: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+
+  for (const raw of topic.split(/[\s,;/()[\]]+/)) {
+    const tok = raw.replace(/[^A-Za-z0-9_]/g, '');
+    if (tok.length < 4) continue;
+    const identifierLike =
+      /[A-Za-z][0-9]|[0-9][A-Za-z]/.test(tok) || /[a-z][A-Z]/.test(tok) || tok.includes('_');
+    if (!identifierLike) continue;
+    const key = tok.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(tok);
+  }
+
+  return out;
+}
+
+/**
+ * Whether the base documents this token by NAME — as an id, a keyword, or a word
+ * in a title or summary. A keyword may be longer than the token ("enum value"
+ * covers "value"); the reverse is deliberately not accepted.
+ *
+ * That asymmetry is the whole point. scoreEntry's partial rule also credits
+ * `token.includes(k)`, so `enum2str` scores against the keyword `enum` and the
+ * extensible-enum topic comes back looking authoritative — which is how a query
+ * about a 1-argument function was answered with a topic whose only conversion
+ * example takes 2, and the caller shipped `enum2Str(enumNum(X), v)`. A token
+ * that is MORE specific than anything the base knows has not been matched; it
+ * has been approximated, and saying so is the difference between a related read
+ * and a wrong answer.
+ */
+function isDocumentedByName(token: string): boolean {
+  const t = token.toLowerCase();
+  return KNOWLEDGE_BASE.some(entry =>
+    entry.id === t ||
+    entry.keywords.some(k => k === t || k.includes(t)) ||
+    entry.title.toLowerCase().includes(t) ||
+    entry.summary.toLowerCase().includes(t));
+}
+
+/** Identifier-shaped words in the query that the base does not document by name. */
+export function unknownDistinctiveTokens(topic: string): string[] {
+  return distinctiveTokens(topic).filter(t => !isDocumentedByName(t));
+}
+
+/** Named in the warning before it stops listing and starts counting. */
+const MAX_NAMED_UNKNOWN = 3;
+
+/**
+ * The "I do not have this" line. Empty when every identifier-shaped word in the
+ * query is documented, which is the normal case.
+ */
+function unknownTokenNotice(topic: string): string {
+  const unknown = unknownDistinctiveTokens(topic);
+  if (unknown.length === 0) return '';
+
+  const named = unknown.slice(0, MAX_NAMED_UNKNOWN).map(t => `\`${t}\``).join(', ');
+  const rest = unknown.length > MAX_NAMED_UNKNOWN ? ` (and ${unknown.length - MAX_NAMED_UNKNOWN} more)` : '';
+  const isPlural = unknown.length > 1;
+
+  return (
+    `⚠️ ${named}${rest} ${isPlural ? 'are' : 'is'} not documented by name in this knowledge base. ` +
+    `The entries below are the closest match to the REST of your query — related reading, not an ` +
+    `answer about ${isPlural ? 'those names' : `\`${unknown[0]}\``}. In particular, do NOT infer a ` +
+    `signature, an argument count or a property shape from a neighbouring example.`
+  );
+}
 
 function searchKnowledge(topic: string): { entries: KnowledgeEntry[]; topScore: number } {
   const tokens = tokenize(topic);
@@ -3744,15 +5072,28 @@ export async function xppKnowledgeTool(request: CallToolRequest) {
         ? formatDetailed(entries)
         : formatConcise(entries);
 
+      // Two guards, and they answer different questions. The score one asks
+      // whether ANYTHING matched well; the token one asks whether the specific
+      // name the caller came for is in here at all — a query can score highly on
+      // its filler words while the one word that carried the intent matched
+      // nothing. They stack when both apply.
+      const notices: string[] = [];
+
+      const unknownNotice = unknownTokenNotice(args.topic);
+      if (entries.length > 0 && unknownNotice) notices.push(unknownNotice);
+
       // Low-confidence guard: when something matched but only weakly (incidental
       // substring overlap, no title/keyword/ID hit), warn so the caller doesn't
       // treat unrelated content as authoritative.
       if (entries.length > 0 && topScore < CONFIDENT_SCORE) {
-        formatted =
+        notices.push(
           `⚠️ No strong match for "${args.topic}" — showing the closest entries below, which may be ` +
           `unrelated. Browse the full list with \`get_knowledge(kind="knowledge")\` and an empty topic, ` +
-          `or refine your query.\n\n${formatted}`;
+          `or refine your query.`,
+        );
       }
+
+      if (notices.length > 0) formatted = `${notices.join('\n\n')}\n\n${formatted}`;
     }
 
     return {
