@@ -28,7 +28,855 @@ those are called out explicitly below.
 
 ## [Unreleased]
 
-_Nothing released yet._
+### Dependencies
+- Routine lockfile refresh within the existing semver ranges: `@clack/prompts`
+  1.8.0 → 1.8.1, `@biomejs/biome` 2.5.12 → 2.5.14, `@types/node` 26.5.1 →
+  26.6.1, `zod` 4.6.1 → 4.6.5, `hono` 4.13.7 → 4.13.8, plus transitive updates
+  (`package-lock.json` only). `@clack/prompts` 1.8.1 now types a cancelled
+  prompt as `typeof CANCEL_SYMBOL` instead of `symbol`, which broke the
+  type-check of every CLI prompt; the CLI's `ensure()` helper now strips any
+  symbol from the result type. No runtime change.
+
+### Fixed
+- **An incremental build still shipped runtime metadata for code that no longer
+  existed.** xppc's metadata write-back rewrites an element's
+  `XppMetadata` file when the element gains something, but never when it loses
+  something: a removed field or a deleted class stays declared there, and the
+  binary `.md` manifests are serialized from that tree — under a green build.
+  #1026 fixed this for `fullBuild: true` by clearing the whole tree; an
+  incremental build (the default) cannot do that, because xppc then writes back
+  only what it recompiles and every unchanged element would disappear. Before
+  every incremental compile, `build_d365fo_project` now deletes only the
+  metadata files whose source is newer (and touches that source, so xppc is
+  sure to recompile it even if an earlier build already did) or whose source is
+  gone. A model folder with no source at all is left alone. Verified against
+  xppc on a UDE box: removed fields and deleted classes disappear from the
+  metadata and the `.md`, unchanged elements are untouched, and the scan takes
+  ~0.3 s for a 4,400-element package.
+
+## [1.17.4] — 2026-09-10
+
+### Dependencies
+- Routine bump of direct dependencies within their existing semver ranges:
+  `@clack/prompts` 1.7.0 → 1.8.0, `@types/node` 26.4.1 → 26.5.1, `zod` 4.5.4 →
+  4.6.1, plus the transitive updates `npm install` pulled in alongside them
+  (`package-lock.json` only — no `package.json` range changed).
+
+### Fixed
+- **`doctor` kept its own copy of the query that hung the server, and the copy
+  was the unfixed one.** 1.17.3 put the unary `+` on the prefix sample's
+  `parent_name IS NULL` so the planner seeks `idx_symbols_model`; `doctor` read
+  the same evidence through a duplicate of the query that never got the fix, so
+  the command a user runs *because* the server looks stuck took the same eight
+  minutes — and, missing the two-band split as well, inferred the prefix from a
+  different sample than the server it was diagnosing. Measured on a production
+  database (1,188,748 rows, 2.5 GB) with a cold file cache: **483 s** on the
+  plain plan, 632 ms warm, 17 ms on the model plan. Both now call one
+  `readModelObjectNames`, and a test EXPLAINs the SQL that function actually
+  issues rather than a copy written in the test, which is what let the two drift
+  apart in the first place. A sweep of the other nine `parent_name IS NULL`
+  queries found no third instance: every one of them carries a selective
+  equality (`name`, `type`, `file_path`) that outranks the parent_name index.
+- **The drive scan no longer blocks the event loop.** C:, K:, J: and I: are
+  probed unconditionally — deliberately, since skipping one hides the packages
+  root on it — but `statSync` on a disconnected mapped network drive freezes the
+  thread it runs on for the SMB timeout, and on the main thread that is every
+  request, every log line and every heartbeat. The scan now runs on
+  `fs.promises` (`warmPackagesRoots`), started at server startup in both
+  transports and awaited by `ConfigManager.ensureLoaded()`, which every request
+  passes through before it reaches a synchronous getter. Same letters, same
+  budget, same ranking — the stall just lands on the libuv threadpool instead.
+  Probes stay sequential on purpose: the pool has four threads, and several dead
+  drives probed at once would occupy all of them. The synchronous scan remains
+  as the fallback for the CLI and for anything that beats the warm-up.
+
+### Changed
+- **`idx_symbols_parent_name` is dropped, and the prefix sample gets a covering
+  index.** Two schema changes that between them retire the defect above rather
+  than patch it again.
+
+  The bare index on `parent_name` earned no query and cost several. Verified on
+  the production database before removing it: every legitimate member lookup —
+  `parent_name = ?`, `parent_name = ? AND type = ?`, `type = ? AND parent_name = ?`
+  — already planned on `idx_parent_type_name` (covering) or `idx_type_parent`.
+  The one shape that chose the bare index was `parent_name IS NULL`, which is
+  the shape it must never serve. 1.17.3 defused the known instance with a unary
+  `+`; dropping the index means no future query can be captured by it, whether
+  or not whoever writes it knows to add the guard. The `+` guards stay: they
+  cost nothing, they document the hazard, and they still hold on a database
+  built before this.
+
+  `idx_model_type_name ON symbols(model, type, name, parent_name)` covers the
+  sample outright. Without it the plan seeks `idx_symbols_model` and then reads
+  the table row by row, and since the query is `ORDER BY type, name LIMIT n` it
+  had to pass over EVERY row of the model before the limit could apply — so a
+  large model cost 9.2 s cold and 2.4 s warm even on the *right* index. Ordered
+  (model, type, name) the seek walks in the order asked for and stops at the
+  limit, and with `parent_name` carried as a fourth column nothing touches the
+  table at all.
+
+  Measured end to end on a copy of the production database (2,386 MB,
+  1,188,748 rows): the prefix read for a large model goes **1,143 ms → 0.2 ms**,
+  and the plan loses its `USE TEMP B-TREE FOR ORDER BY`. `ANALYZE` is
+  deliberately not run afterwards — verified with zero `sqlite_stat1` rows for
+  the new index, the planner still chooses it, because a covering index that
+  also satisfies the ORDER BY wins structurally rather than statistically.
+
+  Migration costs, also measured on that copy: the `DROP` is **139 ms** and
+  frees its pages without reading the table, so it runs inline at open. The
+  `CREATE` is **53 s**, which is precisely why it does not: it joins the
+  existing deferred-index mechanism (`ensureFilePathIndexes` → renamed
+  `ensureDeferredIndexes`), inline on a small or empty database and on a worker
+  thread on a large existing one. Building it on the main thread would have
+  recreated the very startup freeze this release removes. Net file size
+  2,386 → 2,402 MB: the dropped index frees most of what the new one takes.
+- **"Still loading" says what it is loading.** A first start with an empty
+  database indexes the whole packages directory before `dbReady` resolves —
+  tens of minutes on a real install — and every symbol-backed tool in that
+  window got a sentence that was byte-identical on the first retry and the
+  twentieth, so nothing distinguished a build that was progressing from a server
+  that had died. `indexMetadataDirectory` now reports its phase, the startup
+  worker forwards it, and the wait answers with the model being read and its
+  position in the build order ("model 3 of 32, 6 min in"). Deliberately no
+  percentage: models are indexed largest-first and differ by two orders of
+  magnitude in size, so a percentage drawn from the count would be a confident
+  lie — the honest signal is that the count keeps moving.
+
+---
+
+## [1.17.3] — 2026-09-07
+
+### Fixed
+- **The first `get_workspace_info` of a session took 337 s and printed
+  nothing.** Measured live on 2026-09-07, and 356 s / 424 s on two earlier cold
+  starts; the same call warm is 0.2 s. Three independent causes, all fixed:
+  - The prefix inference behind the `Prefix :` line seeked on the wrong index.
+    `parent_name IS NULL` reads like an equality and `ANALYZE` prices it as one
+    (~13 rows per value), but NULL is every top-level object of every model —
+    180,664 of 1,188,748 rows on a production index, against 274 for the model
+    being asked about. The term now carries the unary `+` that strips its index
+    affinity, so the seek is on `idx_symbols_model`: 454 ms to 1 ms warm, and
+    cold the difference between minutes of random reads over a 2.5 GB file and
+    none. The sample of regular objects is also capped at 60 (extensions stay
+    first and uncapped): inference needs four of them and decides on 60 %
+    coverage, so reading 400 answered a question 60 settle.
+  - `get_workspace_info` skipped the `dbReady` wait, and with it the 55 s
+    ceiling every other tool has. The exemption rode on `LOCAL_TOOLS`, which
+    answers a question about *locality* — can this run away from the `K:` drive
+    — and was read as "needs no index"; this tool reads the index twice. It now
+    waits, and says "still loading, retry" instead of hanging. So does
+    `update_symbol_index`, which writes THROUGH the context's symbol index and
+    before the swap was reindexing the in-memory stub and reporting success.
+  - Nothing could be printed while it worked. In stdio mode `console.log` is
+    filtered down to error-bearing lines, and the `LOG_FILE` mirror sits on
+    stderr, so every startup progress line was dropped from both — a five-minute
+    hang left a log holding a start banner and nothing else. Those lines are now
+    kept in `LOG_FILE`, timestamped, while the client's pane stays clean, and an
+    in-flight tool call re-announces itself every 15 s so a slow call is
+    distinguishable from a stuck one (and, for clients that honour progress
+    notifications, its request timeout is reset).
+- **`get_object_info(include="xml")` could not read another model's object.**
+  It resolved the file through the configured model's folder layout and nothing
+  else, so a Microsoft class — or any other custom model's — came back as "no
+  file on disk, pass `options.modelName`", a whole round trip for a fact the
+  same tool prints in every other include mode (`**Model:** Foundation`). The
+  lookup now falls back to the symbol index, which knows every model, resolves
+  the rows that store a path relative to a packages root, and checks each
+  candidate on disk so a stale index row stays a clean "not found". The message
+  names the models that DO hold the object: told only to pass `modelName`, an
+  agent guessed `"Application Foundation"` before `"Foundation"` — three calls
+  for one file.
+- **"Call again for the verdict" could never be carried out.** Both background
+  scans behind `get_workspace_info` (index freshness, recently edited objects)
+  cached their result for 30 s and then fell back to "still running", so an
+  agent re-asking any later than that got the identical line — observed as three
+  calls 105 s apart with byte-identical output. `pending` is now said only until
+  the first scan completes; after that the last result is served and the refresh
+  runs behind the answer. A `fresh` verdict drawn from an aged scan says how old
+  it is; `stale` does not need the caveat, since files only ever get newer.
+
+---
+
+## [1.17.2] — 2026-09-04
+
+### Changed
+- **Workspace detection prints only conflicts.** The four-line
+  `Auto-detection successful` block (ProjectPath / ModelName / SolutionPath /
+  Source) went to stderr on every start, and VS Code shows every stderr line as
+  `[warning]` - four warnings per session on every machine, working or not,
+  which made a healthy resolution look like a fault. The routine outcome (and
+  the cache-hit, root-match, git-branch and BFS-fallback lines around it) now
+  goes to the debug log (`DEBUG_LOGGING=true`); `get_workspace_info` and
+  `d365fo-mcp doctor` still report the resolution with its source. What IS
+  printed, once per distinct case, is the one state that was never reported
+  before: the model named in `D365FO_MODEL_NAME` / `.mcp.json` disagreeing
+  with the `<Model>` of the project the workspace scan picked - the state in
+  which writes target one model while new files are registered into a project
+  of another. Silent when a `projectPath` is configured too, because the
+  detected project is unused then. The per-call `Using explicit packagePath`
+  line, printed on most tool requests, moves to the debug log as well.
+- **The AosService drive scan is bounded.** It probed C: to Z: with one
+  synchronous stat per letter, lazily on the first tool call that needed a
+  packages path - and a stat on a disconnected mapped network drive stalls for
+  the SMB timeout, which is how `get_workspace_info` could hang for tens of
+  seconds and then be instant for the rest of the session. C:, K:, J: and I:
+  are now probed first and always, the other letters only inside a 2 s budget;
+  `D365FO_SCAN_DRIVES` (e.g. `C,K`) pins the probed set. `doctor` and the
+  not-found messages name the letters that were skipped and any probe that
+  took over a second, so a missed volume is reported rather than silent.
+- **The .rnrproj walk skips profile and system folders.** The workspace it
+  starts from is whatever the client reported - `process.cwd()` when VS Code
+  gives nothing better - and that has been `C:\Users\<user>` itself, where
+  five levels of `AppData` is hundreds of thousands of entries walked to find
+  nothing. `AppData`, `$Recycle.Bin`, `Windows`, `Program Files`, `ProgramData`
+  and the package caches are skipped now, case-insensitively.
+- **First-start metadata indexing runs on a worker thread.** With an empty
+  symbol database and `METADATA_PATH` set, the server indexes before it
+  declares itself ready - synchronously, end to end, and inline on the main
+  thread, so every tool call (`get_workspace_info` included) hung for the whole
+  build on exactly the machine where the server was being tried for the first
+  time. The same build now runs in `startupIndexWorker` on its own WAL
+  connection; `dbReady` is still held until it completes, so symbol-backed
+  tools keep answering "still loading" instead of returning empty results, but
+  the event loop is free and the tools that need no symbols answer at once.
+  The worker's console output is routed to stderr (stdout is the protocol
+  channel in stdio mode), and a failed build is reported by name rather than
+  as "metadata path not accessible".
+
+
+---
+
+## [1.17.1] — 2026-09-04
+
+### Fixed
+- **`install.ps1` failed on every machine without a `K:` drive** (#1010). The
+  installer probes `K:\d365fo-mcp-server` for a pre-npm checkout, and Windows
+  PowerShell 5.1's `Join-Path` validates the drive and throws
+  `DriveNotFoundException` before the npm install ever starts - which is the
+  case on a stock D365FO VHD. The `.git` probe now composes the path without
+  drive validation; a candidate on a missing drive is simply skipped.
+
+---
+
+## [1.17.0] — 2026-09-03
+
+### Removed
+- `docs/XPP_LANGUAGE_COVERAGE_PLAN.md` (the **v4** plan) is **deleted**, under the
+  lifecycle rule it carried itself: all phases H0-H6 shipped, core coverage 74/74,
+  total 124/124, 0 `golden_pending`, and the full-install validator sweep clean at
+  105,686 files with zero error-severity findings.
+
+  The durable record is where it belongs and not in a plan file: the census
+  figures are inside the knowledge rules that use them, the rejected options are
+  in the source that implements the alternative (`reportDesignXml.ts` explains why
+  there is no `add-column` and no provenance fingerprint; the TST rule comments
+  explain why they are not what the plan specified), the evidence is in the
+  goldens and the two committed SysTest documents of `L2-tdd-red-green-cycle`, and
+  the reasoning per phase is in PRs #999-#1006.
+
+  Its non-goals, its measurement-rejected rules, the six eval cases deliberately
+  not authored and the one noted-but-unfixed defect moved to `docs/BACKLOG.md`
+  rather than disappearing with it. This is the second plan file to go the same
+  way; the v3 one was deleted 2026-09-01.
+
+
+### Added
+- **`report-design` — the first write path an AxReport has ever had.**
+  `d365fo_file(action="modify", objectType="report", operation="report-design")`
+  with `reportAction="refresh-dataset"` (copy the temp table's fields onto the
+  report's dataset — the information is on disk, nothing about it is a design
+  decision) or `reportAction="add-parameter"` (declare a parameter AND bind it
+  to the dataset in one write, because the two elements must agree). New
+  parameters: `reportAction`, `tableName`, `datasetName`, `parameterName`,
+  `parameterDataType`, `parameterHidden`, `promptString`. Layout stays with the
+  Report Designer: there is deliberately no `add-column`, because an RDL error
+  surfaces only in the SSRS renderer where no build and no test can see it. The
+  operation is metadata-only and additive-only, and that guarantee is a property
+  of the operation, not of the file's provenance — a fingerprint that refused
+  "foreign" designs was rejected for having the wrong shape.
+
+  It paid for its schema bytes with a measured trim: tool annotations that only
+  repeat the MCP spec default (`readOnlyHint: false` on 6 tools,
+  `idempotentHint: false` on 4) are no longer sent. `destructiveHint: true` is
+  also a default and is kept on purpose: a client that reads absence as
+  "unknown" becomes MORE cautious about a missing `readOnlyHint` and LESS
+  cautious about a missing `destructiveHint`, and only the first direction is
+  safe. ListTools headroom 49 → 251 chars. (PR #1001)
+
+- **`add-field` can write a container field.** `fieldBaseType="Container"` was
+  refused as a parameter that changes nothing and `fieldType="Container"` as a
+  missing EDT; the C# bridge had handled it since it was written and only the
+  TypeScript side never routed to it. A census settled the type question on the
+  way: 280 of 332 shipped container fields DO carry an EDT (`Bitmap` is what a
+  shipped report temp table uses for a company logo), and typing the field with
+  it silences `BPErrorTableFieldNotDefinedUsingType`. (PR #1002)
+
+- **Reports, the runtime half.** `get_knowledge` topics for the report runtime
+  API (contracts, print destinations, pre-processing) and for the RDL people
+  actually write, from a census over the 961 shipped designs: `IIf` 29,703 uses
+  across 775 reports; `Avg` and `Lookup` zero — an aggregation belongs in the
+  data provider, where it can be tested. `generate_object(pattern="systest")`
+  gains `testTargetType="report-dp"`, and four eval cases were captured from
+  clean builds, one of them (`L4-tdd-report-dp`) with a red-then-green run under
+  `SysTestConsole.exe`. That red run corrected the case's own premise:
+  `assertNotNull(dp.getTmp())` takes `Object`, an empty buffer boxes to null,
+  and the assertion tests whether the last select found a row. (PR #1002)
+
+- **SysTest attributes and ATL, both re-derived from usage.** The scaffold takes
+  `attributes: string[]` and `arrange: "buffer" | "atl"`; `prepare(mode="test")`
+  names the ATL packages a model is missing and what each costs. The catalogue is
+  a census of the 884 shipped test classes, and it inverted the plan: the two
+  most-used attributes (`[SysTestCheckInTest]` 1,875 uses, `[SysTestGranularity]`
+  165) were missing from it, most of what it listed has zero shipped uses, and
+  `SysTestSuiteCompanyIsolateClass` — named as THE isolation mechanism — has been
+  `[SysObsolete]` since 2014. The ATL tree is read from the AOT
+  (`src/knowledge/atlNodes.generated.ts`, 1,105 data classes, 351
+  record-producing nodes); 107 of them hand back an `AtlEntity` wrapper that
+  needs `.record()`, which the oracle's own header example had omitted. (PR #1003)
+
+- **Six knowledge catalogues written from censuses, and every one got SMALLER.**
+  `form-runtime-api` (of `FormRun`'s 209 methods, 49 are ever called through
+  `element.` across 9,442 shipped forms; `args()` alone is 92% of platform calls;
+  `UpdateDesignMode` appears in zero files), `data-entity-methods` (ranked over
+  5,805 entities; `mapEntityToDataSource` outnumbers its "pair" 11 to 1), CoC
+  target kinds (`queryStr` has zero shipped uses; `mapStr` and `viewStr`, which
+  the plan omitted, both ship), `IncludedColumns` (zero in 18,377 tables),
+  relation types and index properties. The censuses H2 and H3 had shipped were
+  re-measured first: a hand-rolled `<root>/<pkg>/<pkg>/<AxType>` walk silently
+  skipped the 12 model folders not named after their package, ApplicationSuite/
+  Foundation among them. `npm run oracle:usage` and `npm run oracle:atl` now walk
+  models the way the server does. (PR #1004)
+
+- **H5 breadth: twelve gaps, three validator rules, one refuted claim.** Topics
+  `email-sending`, `file-io-write`, `http-json-xml`, `xrecord-buffer-api` and
+  eight extended ones. `validate_code` gains **TST001** (`assertExpectedException`
+  does not exist; 0 of 66,754 shipped classes), **TST002** (`[SysTestMethod]` in
+  a class that extends NOTHING — not "does not extend SysTestCase", because 31 of
+  the 56 shipped classes reach it through a chain and the literal rule would fire
+  on more shipped classes than it caught) and **TST003** (a test method with no
+  `assert*(`, warning; triggered by the attribute, since only 2.4% of shipped
+  test methods are named `test*`). Whole-install sweep: 105,686 files, zero
+  error-severity findings. An R-only case measured that an `anytype` CAN be
+  re-typed at run time, contrary to the folklore. `get_knowledge` topic
+  `tdd-workflow` — asked for by the plan, logged as shipped, never written until
+  the taxonomy's dangling-id check caught it. (PRs #1005, #1006)
+
+- **`L2-tdd-red-green-cycle` commits the RED run beside the green one**, from one
+  uninterrupted cycle on the VM: the assertion failed for the stated reason, then
+  passed with only the implementation changed. Every other case commits a green
+  document, and a green document alone cannot tell a working test from an empty
+  one. (PR #1006)
+
+- **The red-first loop, made findable.** It was complete and unused: across 1,603
+  real MCP calls in 47 sessions, `prepare(mode="test")` was called 0 times and
+  `run_systest_class` 0 times, while `prepare(mode="change")` ran 54 and
+  `d365fo_file(modify)` 195 — and roughly thirty-five of about fifty genuine
+  knowledge questions were the table `validateWrite` Chain of Command contract,
+  the exact rule the loop was built to test. A feature nobody finds is
+  indistinguishable from one that does not exist.
+
+  `prepare(mode="change")` now carries a `### Test first?` section and a write
+  that lands X++ on an untested object gets one `> **Untested.**` line. Both cost
+  zero ListTools bytes — they are response text, not schema.
+
+  The trigger is BEHAVIOUR, never structure. A testable object family is
+  necessary and not sufficient: the deciding signal is the operation, so
+  `add-method` and `replace-code` fire and `add-field` on the same table
+  extension does not. Adding a field is metadata, its oracle is the golden diff,
+  and a SysTest asserting it would only check that the compiler did its job.
+
+- **Three more SysTest shapes** (`testTargetType`: `coc`, `event-handler`,
+  `service`, beside `class` and `table`), because they observe the behaviour in
+  three different places and the wrong one produces a test that compiles, runs,
+  passes and proves nothing:
+  - `coc` exercises the BASE class and never names the wrapper — Chain of Command
+    is transparent at the call site, so a test that references the `_Extension`
+    class passes with `next` never reached. Two inputs, because a wrapper that
+    ignores `next` and returns a constant passes a single assertion.
+  - `event-handler` performs the write and reads back what the handler changed; a
+    handler fires out of band and cannot return a value.
+  - `service` calls a SysOperation service directly with a hand-built contract —
+    no controller, no dialog, no batch queue.
+
+  All three are promoted from SysTests that actually EXECUTED on the VM
+  (2026-08-31, 2/2 each) and were then compiled by
+  `scripts/oracles/probes/coverage-v4.ts` — green without a TestEssentials
+  reference, which is what the scaffold's own warning promises.
+
+  `prepare(mode="test")` picks the shape and prints the call that selects it, so
+  the two halves of the loop cannot disagree. It reduces an extension name to its
+  base first, index-verified: the infix between base and `_Extension` is a
+  per-model convention, so stripping the suffix alone leaves a name that is not
+  an object.
+
+- **ATTR003 — two attributes stacked on a method.** X++ takes several attributes
+  on a method only inside one bracket, comma-separated. Two bracketed lines is a
+  parse error, and the compiler answers `Invalid token '['` with a column number
+  and abandons the whole file — it names a token, not a rule. That is the precise
+  opposite of the case that got DECL001 and CONV001 rejected, where the
+  compiler's own message was exact and local.
+
+  The exemption is the hard half and it was measured, not reasoned: a census
+  found 2,163 shipped AxClass files stacking attributes on a CLASS declaration
+  and **0 of 760,583 shipped methods** doing it. Our own knowledge base invites
+  the mistake by listing `[SysTestMethod]`, `[SysTestCategory]` and
+  `[SysTestPriority]` one under another; both entries now say it is a menu, not a
+  stack.
+
+- **The measurement harness the coverage work runs on is in the repo**, after two
+  rounds of losing it to a session scratchpad: `npm run oracle:terms` (1,165
+  language constructs matched against what the server teaches, checks, writes and
+  proves — no D365FO install needed), `npm run oracle:demand` (what callers
+  actually ask for, redacted to values the server itself defines because the logs
+  hold customer object names), `scripts/capture-golden.ts` (the eval step that had
+  no script, with four gates and tests), and `eval/api-members.snapshot.json` over
+  a committed list of the API surface.
+
+### Fixed
+- **`report-design(add-parameter)` wrote `DataType` where the deserializer drops
+  it.** The writer emitted `Nullable, PromptString, DataType`; a census of all
+  13,911 parameters in the 1,063 shipped reports puts `DataType` between
+  `AllowBlank` and `Nullable` with zero contradicting instances (before
+  `PromptString` 3,104:0, before `Nullable` 2,139:0). An element met out of
+  sequence is dropped without a word and the build stays green, so a
+  `System.DateTime` parameter reached the dialog as a `String` — in the committed
+  golden of `L4-ssrs-report-parameters`, too, which was corrected by hand and
+  says so in its README. The order is now the shipped one, the tests pin it
+  against what the scaffold itself emits, and the `axreport-anatomy` topic
+  carries the census and no longer claims the operation does not exist.
+
+- **`add-parameter` wrote half a parameter and called it success.** The
+  declaration was written BEFORE the dataset was resolved; when no dataset could
+  be found (several datasets and no `datasetName`, a wrong name, a self-closing
+  `<Parameters />`) the reply was ✅ "bound it to dataset '(none — no dataset
+  resolved)'", and the retry with the right name hit the "already declared"
+  guard, so the parameter could never be bound at all — the exact half-write the
+  operation exists to prevent. Both insertion sites are now resolved before the
+  first byte is written, an unresolved dataset is an error that writes nothing,
+  and a parameter left declared-but-unbound by the old version is bound on the
+  next call rather than refused. Also: `promptString` is XML-escaped,
+  `parameterDataType` must look like a .NET type name, inserted elements take
+  the closing tag's line instead of doubling its indentation, and
+  `refresh-dataset` drops the memoised table listing before looking the temp
+  table up, so one created a moment ago is no longer "not found on disk".
+
+- **ATTR003 fired on a legal class-level attribute stack** whenever a comment
+  sat between the attributes and `class`. `maskStringsAndComments` keeps the
+  comment opener and blanks the rest, so a `///` line comes back as `//` and
+  spaces: the `startsWith('///')` skip never matched, `//` and `/* */` lines were
+  not skipped at all, and the comment became the "declaration". Shipped code
+  puts its doc comment above the attributes, which is why the 105,686-file sweep
+  was clean. TST003 had the same skip and silently did NOT check a test method
+  behind a comment; both share one masked-line helper now.
+
+- **TST002 reported `extends nothing` when the `extends` clause sat on the next
+  line.** The header regex stopped at the newline; it now runs to the opening
+  brace.
+
+- **`testTargetType` was invisible.** It shipped in 1.16.0 as the selector for the
+  table test shape and was absent from the `pattern` mode's op-spec `optional`
+  list — and since these parameters are deliberately kept off the wire schema, the
+  op-spec is the only place they are documented. The mirror image of the failure
+  this repo has twice paid for, where an error demanded a parameter the caller had
+  no way to send.
+- **`docs/ARCHITECTURE.md` claimed 40 validator rules** and listed their ids, for
+  months after the count was 50 — it had missed two entire coverage waves
+  (COC006, BP005, DOC001, OP001, SET001, RPT101/102, XML008-010). A stale roster
+  is worse than none: it is what a reader consults to decide whether a check
+  already exists, so the answer it gives sends them to write a duplicate.
+  `tests/tools/validatorRuleInventory.test.ts` now derives both sides.
+- **Seven coverage-taxonomy notes claimed a case did not exist** when it had been
+  captured on 2026-08-31, so `eval/COVERAGE.md` rendered a green row beside a
+  sentence saying the proof was missing. The existing gate only knew the word
+  "pending"; these said "No case yet", "no captured case yet", "is the one to
+  author". The gate now matches future-tense phrasings, and was verified against
+  the pre-fix taxonomy.
+- **Two testing topics that both explained SysTestCase** and disagreed about the
+  naming convention. The base is read one topic at a time, so a contradiction
+  between two of them is invisible to the reader. `unit-testing` is now
+  authoritative and absorbed the two facts only `testing` had — that
+  `[SysTestTarget]`'s second argument is the element TYPE, and the ATL entry
+  point; `testing` keeps the one question it uniquely owns, which kind of test to
+  write at all.
+
+### Changed
+- Dependencies: `@biomejs/biome` 2.5.11 → 2.5.12, `@types/node` 26.4.0 → 26.4.1,
+  `tsx` 4.23.12 → 4.23.13 (30 lockfile entries, no major). `npm update` on
+  Windows had dropped the two Linux `@biomejs` optional-dependency entries from
+  the lockfile, which broke `npm ci` on the Linux CI runners; they are restored.
+  (PR #1007)
+
+
+---
+
+## [1.16.2] — 2026-09-01
+
+### Fixed
+- **The installed server would not start: `ERR_MODULE_NOT_FOUND` on
+  `dist/eval/oracle/systest.js`.** `run_systest_class` reads per-method results
+  out of the XML document SysTestConsole writes, and since the TDD-loop work it
+  imported that parser from the eval oracle — `src/eval/oracle/systest.ts`.
+  But `src/eval/**` is a dev-only tree that package.json keeps out of the
+  published tarball (`"!dist/eval/**"`), so every `npm i -g d365fo-mcp` got a
+  `sysTestRunner.js` importing a file that is not there, and the MCP server died
+  on load with the whole tool surface gone.
+
+  Nothing in the repo could see it: typecheck, lint and the test suite all
+  resolve against `src/`, where the excluded tree is present. It only exists in
+  the tarball.
+
+  The parser moved to `src/tools/sdlc/sysTestXml.ts` — beside the runner that
+  loads it, inside a published tree — and the eval oracle re-exports it, so the
+  dependency now runs eval → tools and never back. The published `files` list is
+  unchanged; the eval tree stays out.
+
+  `tests/packaging/publishedFiles.test.ts` now walks the import closure of every
+  packed `dist/**/*.js` and fails on any specifier that resolves to a file the
+  tarball excludes, so the next tree cut out of the package is covered too, not
+  just this pair.
+
+---
+
+## [1.16.1] — 2026-09-01
+
+### Fixed
+- **`d365fo-mcp setup` died on a database lock it took out on itself.** Opening an
+  existing large index hands the deferred `file_path` index builds to worker
+  threads, and each worker opens its own *write* connection to the same file.
+  `build-database` then sets `locking_mode = EXCLUSIVE` on the writer, which
+  cannot coexist with a second writer — whoever lost the race failed with
+  SQLITE_BUSY, on a machine where the build had already run for minutes. The
+  script did call `closeReadPool()` first, exactly as that method's doc comment
+  instructs, but the pool is not the only other connection the class opens: it
+  drains readers and knows nothing about the workers.
+
+  Three separate things were wrong and all three are fixed:
+  - `XppSymbolIndex` takes `{ backgroundIndexBuilds: false }`, and both
+    `build-database` and `build-fts` pass it. The worker exists to keep the
+    server's event loop answering; a one-shot CLI has no event loop to protect,
+    so it builds inline on the connection that already holds the lock.
+  - The worker dispatch no longer *assumes* WAL — it checks `journal_mode` and
+    refuses to spawn off it. Build scripts switch to `journal_mode = MEMORY` two
+    steps later, where a second connection cannot work by construction, so the
+    race is now closed even if a future caller forgets the flag.
+  - `closeReadPool()` documents what it does not cover and warns on stderr when
+    it is called with index builds still running; `close()` tears them down.
+
+  Deliberately not fixed by raising `busy_timeout` (masks the race) or by
+  retrying `createFTSTriggers` (one of many places that hit the same lock).
+
+### Changed
+- Build scripts defer the `file_path` indexes past their bulk load
+  (`{ deferFilePathIndexes: true }`) and build them once at the end. Every row of
+  the load previously maintained two extra B-trees, and a full rebuild threw the
+  result away in `clear()` anyway.
+- `XppSymbolIndex` accepts a `largeDbThresholdBytes` override. The existing tests
+  could not have caught this bug: they run on databases far below the 200 MB
+  threshold, where the worker never starts. With the threshold injectable, the
+  worker path is reachable in a unit test — and the new tests fail against the
+  old code.
+
+---
+
+## [1.16.0] — 2026-09-01
+
+### Added
+- **TDD for a TABLE method — the loop's most-asked task had no red-first path.**
+  Across 1,593 real MCP calls the single most-requested X++ topic was the table
+  Chain of Command contract (`validateWrite`, where `next` goes, `checkFailed` vs
+  `error`, `orig()`): roughly thirty `get_knowledge` calls were variations of that
+  one question. Both `prepare(mode="test")` and
+  `generate_object(pattern="systest")` resolved **classes only**, so the rule a
+  developer most wants to pin down could not be tested through the server at all.
+  `prepare(mode="test", objectName="CustTable.validateWrite")` now resolves
+  tables (dotted form included) and emits the scaffold call with
+  `testTargetType: "table"` already set. The scaffold arranges a buffer with
+  `initValue()`, asserts the boolean verdict **and** the infolog line the rule
+  writes, and adds the ACCEPTING case beside the rejecting one — without it a rule
+  that refuses every row passes its own test. Write methods get a transaction and
+  a re-read from the database. Compiler-verified before it was written
+  (`UtilElementType::Table`, `assertExpectedInfoLogMessage` after the act), and it
+  costs no ListTools bytes: the parameter lives in the op-spec.
+- **Six knowledge topics for constructs nothing could measure**: `lookups`,
+  `global-class-statics`, `system-objects`, `report-print-destinations`,
+  `document-attachments`, `rdl-design-expressions` — plus extensions to
+  `query-object-model` (range vs filter on an outer join, the range expression
+  language, `[QueryRangeFunction]`), `sysoperation` (the packed query parameter),
+  `bp-rules` (`SuppressBPWarning`), `deprecated` (the RunBase lifecycle and its
+  `#CurrentVersion` bump) and `ssrs-rdp-preprocess` (`AX_RdpPreProcessedId`).
+- **The oracle harness is in the repo** (`npm run oracle:sweep|census|probe|members`).
+  The census, the validator sweep and the xppc probe harness had lived only in
+  session scratchpads: the measurements behind the compiler-verified wave could
+  not be re-run. `--dry` runs the sweep against `tests/fixtures/oracles` so CI can
+  hold the zero-error bar with no D365FO install.
+- **The runtime oracle runs, and it discriminates.** X++ test code had never once
+  executed in this project: `SysTestConsole.exe` stopped at `Login failed for user
+  'AOSUser'`, diagnosed twice as a rotated credential and twice wrong — the shipped
+  `SysTestConsole.exe.config` had simply never been configured for the machine. With
+  the four `DataAccess.*` values copied from the AOS's own `web.config`, the runner
+  opens a real AOS session. A passing run only proves the instrument is on, so a
+  negative control was built and run in one pass: a deliberate assertion failure and
+  a deliberate throw come back **failed** beside a passing method, and
+  `parseSysTestXml` reports all three. That real failing document is committed as
+  `tests/fixtures/systest/negative-control.xml` — every earlier parser test used
+  synthetic XML, which only proves the parser handles what its author imagined.
+  All twelve remaining goldens and every runtime-tagged case have since run:
+  **0 of 120 cases are `golden_pending`, 0 are `systest_pending`**, both for the
+  first time.
+
+### Fixed
+- **Thirty-one defects the golden-capture runs found, and a green 5,700-test suite
+  could not.** Each eval case was implemented on the VM through the grounded tool
+  path, which is the only thing in this repo that compares INTENT against OUTPUT;
+  the test suite compares code against expectations someone already held. Twenty-one
+  runs across the wave, and the passes are the least interesting part — these are
+  the defects the runs produced on the way:
+  - `create(class)` **silently dropped every multi-line method attribute block**.
+    Attributes are syntactically optional, so xppc and xppbp stayed green — a data
+    contract with no data members, a SysOperation dialog with no fields, and no
+    message anywhere. It had already corrupted a committed golden
+    (`L3-sysoperation-dialog-attributes` contained none of the five attributes its
+    own README describes); that golden is removed and queued for re-capture, and a
+    blast-radius audit confirmed it was the only one.
+  - A member list **renamed methods out of existence**: the completion formatter
+    printed the signature instead of the name, so `SysQuery::range` appeared as
+    `#ISOCountryRegionCodes` and `RunBaseBatch.dialog()` as a doc-comment sentence.
+    Runs concluded the APIs did not exist and worked around them.
+  - `search(type="report")` **did not filter to reports** — the bridge's type map
+    has no entry for that kind, so the query ran unfiltered and answered with
+    tables and queries. Now enforced adapter-side, for every unmapped type.
+  - `validate_code(mode="references")` reported **code that compiles** as errors:
+    kernel enums (`AccessType`, `MenuItemType`, `JoinMode`) and a class calling its
+    own statics — the only spelling X++ accepts. With `GROUNDING_ENFORCE` on, both
+    would have refused the write.
+  - `get_object_info(form, searchControl)` **did nothing**: implemented on the XML
+    path while the bridge answers first, and every existing test used the
+    explicit-`filePath` branch, which returns before the bridge.
+  - `create(class)` doubled the prefix on any `_Extension` name already carrying
+    one, making `SysQueryRangeUtil_Extension`-shaped names unreachable.
+  - Two refusals **named a parameter the caller cannot send** (`query` on
+    bp-moniker search, `baseObjectName` on `prepare`).
+- **Five knowledge errors, all written in this same wave**, caught by the first
+  independent use of the topics: `attachFile` takes nine arguments, not eight, and
+  the short call compiles while storing the notes as the attachment name;
+  `registerOverrideMethod` lives on the concrete `FormStringControl`, not
+  `FormControl`/`FormReferenceControl`; `SysTableLookup` *does* have
+  `addLookupMethod` (inherited); `infolog.num()` and `setPrefix` are not where the
+  entry said to look for them; and RunBase needs `canRunInNewSession()` plus a
+  retained `#CurrentList<n>` — "bump the version" alone makes saved batch jobs stop
+  running rather than run wrong.
+- **The lesson behind most of them:** "it compiles" is not "it is correct". The
+  `attachFile` error came from a probe that passed eight arguments and built clean.
+  For a call with optional tail parameters the compiler cannot answer the question
+  being asked; read the signature and count. Now stated in the probe harness.
+- **Seven validator false positives on Microsoft's own X++**, found by the first
+  full-install sweep (105,686 files, 615 MB): `ATTR001` on an attribute argument
+  carrying an inline comment (72 hits), `SEL010` on `validTimeState` used as an
+  ordinary method name in the SysDa API (14), `FN001` on `new Info()` and on a
+  local function shadowing a predefined name (7), `CS001` on a C#-looking type the
+  file legally aliased with `using string = System.String;` (3, and 448 shipped
+  files use that form), `COC003` on the lower-case `_extension` suffix the
+  platform itself ships (1), `RPT001` on an abstract DP base class (1), and
+  `SEL008` reading a select across a `#localmacro` boundary (1).
+- The shared X++ lexer had **no tests**, which is how its documented "delimiters
+  survive" contract could be false for `*/` without anyone noticing — the reason
+  the `ATTR001` fix initially matched nothing. 16 tests now pin the behaviour.
+- **The scoring oracle could diff a form against the menu item that opens it.**
+  `resolveActualFile` matched on a lossy logical key with `find()` — first match
+  wins — and `artifactKey` strips the `.Ax<Type>` infix, so a golden folder holding
+  a form and its display menu item reduced both to one key. Swept over all 119
+  committed golden folders: 10 artifacts mispair under canonical capture naming and
+  18 under the other assignment of the undecorated filename, 8 of them outright
+  cross-pairings — two unrelated objects compared against each other, or one
+  artifact silently vanishing from the run. Pairing now resolves in three ranked
+  stages (the golden's own filename, type-CHECKED · the identity each document
+  DECLARES plus its root element · the legacy key with ties broken by type), and an
+  undecidable pairing is **reported and scored missing, never guessed**. In the same
+  pass: `canonicalizePrefix` could not see a prefix used as an INFIX, which is
+  Microsoft's own `{Base}{Prefix}_Extension` convention — a differential sweep over
+  326 golden files x 5 prefix specs shows that silently cost 7 golden folders, and a
+  collision sweep over 7,095 identifiers adds no new collision. The fix proposed for
+  this eight weeks ago in a corpus record was measured here and does **not** work.
+- **Capture runs recorded `generated_artifacts: []` for eight weeks.** The CLI's
+  golden-pending branch kept a private "what counts as an artifact" filter
+  (`*.metadata.xml`) while the resolver accepted both shapes, and a capture points
+  `--actual-dir` at an AOT folder, which holds bare `<Name>.xml`. One shared filter
+  now, and the list is printed.
+- **A golden captured before the writer documented classes can never match.** The
+  create path started injecting a class-level `///` block in August; goldens
+  captured in July could not be reproduced by any faithful re-run — 34 of the 159
+  goldens carrying a class or interface `<Declaration>` have no doc comment, 32 of
+  which the writer would inject into. The presence signal is **directional** now: a
+  doc comment on the ACTUAL side only compares equal
+  (`BPXmlDocNoDocumentationComments` fires on ABSENCE, and the content was already
+  canonicalised to a placeholder), while one present in the GOLDEN and missing from
+  the actual still fails — that is a real regression. Replayed over the whole
+  corpus, this and a symmetric blank-line rule resolve 14 real false-mismatches
+  across 69 stored `changed` entries and suppress nothing else. Deliberately not a
+  batch re-capture: each case refreshes its own golden the next time it runs.
+- **Report goldens were unreproducible by construction.** An AxReport carries its
+  RDL inside CDATA and the RDL carries `rd:DataSourceID` / `rd:DataSetID` /
+  `rd:ReportID`, minted afresh on every generation — text inside a payload, which a
+  case's `ignore` globs cannot reach. Six committed goldens carry them. Masked at
+  comparison time only; the stored artifact is never rewritten and a real design
+  change still fails.
+- **The report scaffold made a temp table's first column unique.**
+  `buildPrimaryKeyIndex` always emits a unique index and the report path handed it
+  `tableFields[0]` — which under `designStyle="GroupedWithTotals"` is by
+  construction the GROUP key, so the second row in a group failed on a duplicate key
+  at RUN time, from metadata that builds clean. A report temp table has no natural
+  key; it is `RecId` now, confirmed on live scaffold output.
+- **A corpus record had been silently dropped since July.** A writer put Windows
+  paths into JSON without escaping the backslashes, so a strict parser rejected the
+  whole document — and `loadJsonRecords` skips an unparseable file without a word.
+  A record classified `TOOL_DEFECT` was therefore invisible to every cluster, report
+  and held-out check for eight weeks: the improver had been ranking failures over a
+  corpus it did not know was short. Repaired by **escaping only** — the separators
+  the original writer dropped are not reconstructed, because guessing them would
+  turn damaged data into something that reads as evidence.
+  `tests/eval/corpusRecordsParse.test.ts` now fails on any unparseable record, and
+  asserts the corpus is of real size so a broken path cannot make it pass forever.
+- **A root element could be read out of an XML comment** (CodeQL,
+  `js/incomplete-multi-character-sanitization`, 2 high). `aotRootElement` found the
+  root by `replace()`-ing the prologue away, and a single-pass strip leaves an
+  unterminated `<!--` in place — so the type deciding which golden pairs with which
+  file could come out of a comment. Replaced with an ordered token scan; ordered
+  alternation alone was not enough, which the new test caught before it was pushed.
+  `tests/eval/oracleScoringIntegrity.test.ts` carried its own copy of both readers
+  (the second alert) and imports the shipped ones now, so it cannot drift from the
+  code under test.
+- **Two `js/regex-injection` findings in the oracle CLIs** (high, CodeQL):
+  `census.ts --grep` compiled its argument as a regex and is a literal substring
+  match now; `xppcProbe.ts` interpolated a probe's class name into a regex, and the
+  name is validated as an identifier before use. Testing that guard is what made it
+  worth doing — the first version captured `Bad` out of `class Bad.Name`, a valid
+  identifier producing an artifact whose `<Name>` disagrees with its own source,
+  which is exactly the silence the harness exists to prevent.
+
+- **An enum whose members were all 0 — and nothing said so.** `create(enum)`
+  suppressed every explicit `<Value>` whenever the resolved mode was
+  UseEnumValue=No, on the premise that "plain 0,1,2 numbering states nothing the
+  order does not". The premise is false: an `<AxEnumValue>` with no `<Value>` is
+  **0**, not the next ordinal. A four-tier ladder came out with None = Silver =
+  Gold = Platinum = 0, compiled with 0 errors, passed xppbp and matched its golden,
+  while `enum2int()` returned 0 for every tier — the runtime oracle is the only
+  thing that could see it (2026-08-31, `L3-enum-field-form-downgrade-guard`,
+  "expected False, actual True"). Every member now carries its number, the 0
+  excepted, which is the shape the serialiser and all 3,913 shipped AxEnum files
+  use. Two claims went with it, both checked rather than reasoned about: a census
+  of shipped metadata (of 3,818 multi-member enums, exactly six omit `<Value>`
+  everywhere, and all six are extensible) and an xppc probe on the VM —
+  `IsExtensible=true` + `UseEnumValue=No` + non-positional values **compiles
+  clean**, while the same enum with `UseEnumValue=Yes` fails with the documented
+  message. So the knowledge entry's "an explicit `<Value>` forces UseEnumValue=Yes
+  at compile time" was wrong, the refusal built on it is gone, and the one pairing
+  xppc really rejects is the only one still refused.
+- **A delete action that read as Cascade on disk and as nothing to the platform.**
+  The XML writer emitted `<AxTableDeleteAction>` as Name → Table → DeleteAction,
+  a shape copied from a C# object initialiser. All 126 entries Microsoft ships are
+  Name → **DeleteAction** → Relation → Table, and the metadata deserializer drops
+  a misordered element in silence — so the provider read the entry with
+  DeleteAction at its default and the next bridge-backed `Update()` serialised it
+  back without the element. The 2026-08-31 run recorded this as "the bridge
+  destroyed the delete action"; the bridge only wrote back what it had been able
+  to read. Canonical order now, `<Relation>` supported (`deleteActionRelation` —
+  without it xppbp reports BPUpgradeMetadataDeleteAction), and re-sending the same
+  action with a different type **rewrites it in place** instead of answering
+  "already present — skipped", which is what left the run with no forward-only
+  repair path at all.
+- **A create scheduled its provider refresh before its own last write.** The table
+  property reconcile patches the file on disk after the bridge create, but the
+  refresh was requested *first*, so the provider rebuilt from the pre-patch bytes
+  and the next modify's `flush()` saw a refresh newer than its own request and did
+  nothing. The first bridge-backed `Update()` then wrote the cached copy over the
+  patch — reproduction 1 of the same run (`CacheLookup=None`, gone). The refresh
+  now happens after the last byte the call writes.
+- **One object, three different names.** `create(class, xmlContent=…)` applied the
+  model prefix to the file name and to the X++ declaration but not to the metadata
+  `<Name>`, reported "Created" plus "Verified: on disk", and the next build died
+  with "must be named X instead of Y to be consistent with its file name". The
+  prefix rewrite now covers `<Name>` too, and a last gate before the write refuses
+  any document whose file name, `<Name>` and declaration disagree — a build cycle
+  earlier, and with all three spelled out. (The declaration is read through the
+  shared X++ lexer: the first version matched the word "class" inside a `///`
+  comment and refused correct creates, which the full suite caught the same hour.)
+- **`CacheLookup=None` was an element the platform never writes** — and the entry
+  that said otherwise cost two defects pointing opposite ways. The omitted-default
+  table named `NotInTTS` as the value the AxTable serialiser leaves out. It is
+  `None`: reflection over `Microsoft.Dynamics.AX.Metadata.Core.dll` gives
+  `RecordCacheLevel.None = 0`, the .NET type default, and the census agrees — of
+  the 1,444 `<CacheLookup>` elements in 6,995 shipped tables **not one says None**
+  (Found 758 · NotInTTS 301 · FoundAndEmpty 209 · EntireTable 176), while 95 of the
+  231 shipped Transaction tables carry no element at all, which IS None. So a
+  create asking for `None` had an element patched in that every later metadata
+  round trip normalised away again — the behaviour the 2026-08-31 run recorded as
+  "a bridge modify destroys properties this server wrote" — and a create asking for
+  `NotInTTS`, a real non-default value, was told it had been honoured and got None.
+  Found by the verification run below: the new preservation guard fired on it, and
+  a guard firing on a non-event is how the wrong default came to light. The guard
+  now ignores any value whose absence means the same thing, so it cannot cry wolf.
+  The other seven entries in that table were checked against the same census and
+  are correct.
+- **Two guards, because the class of defect matters more than the three
+  instances.** Every bridge-backed write now compares the file before and after:
+  a top-level property that vanished without being asked about is put back, in the
+  position it held, and said so in the response. And "✅ Verified: on disk" is no
+  longer the only claim a write makes — where the operation names an unambiguous
+  result (a modify-property value, a delete action's type, an enum member's
+  number), the value is looked for in the file that was actually written, and its
+  absence is reported as a failure instead of a byte count.
+
+### Changed
+- Five new validator rules: `XML008` (an `AxTableExtension` carrying `<Methods>`,
+  which the deserializer drops silently), `XML009` (a control bound to a field
+  group the table does not declare — a full build catches it, an incremental build
+  does not), `DOC001` (a bare `&` or `<` in a `///` comment → `BPXmlDocMalformed`;
+  a **warning**, because Microsoft ships it too), `SET001`
+  (`update_recordset`/`delete_from` with no `where`) and `OP001` (`&&` mixed with
+  `||` unparenthesised — they have equal precedence in X++, unlike C#).
+- Coverage fell to **core 90.8% / total 91.7%** mid-wave and finished at **core
+  100% (65/65) / total 109/109**. Nine leaves were added for constructs the
+  artifact-indexed taxonomy had no way to count, each starting `golden_pending`,
+  and the number climbed one captured golden at a time. It was never 100% for those
+  constructs before; there was nothing to count.
+- Two standing claims in the docs were false and were quietly steering work: that
+  the runtime oracle had never executed because `SysTestConsole.exe` gates on an
+  interactive console (it does not — that was configuration drift), and the eval
+  README's standing "capture the pending goldens" queue. Both closed. One survivor
+  is left alone as out of scope: `src/server/serverMode.ts` still repeats the
+  interactive-console claim in a tool-tiering rationale, where the tiering decision
+  is unaffected but the sentence is wrong.
+- `docs/XPP_LANGUAGE_COVERAGE_PLAN.md` is **deleted**, under the lifecycle rule it
+  carried itself: the capture it was waiting on is done. The durable record is
+  `eval/COVERAGE.md`, `eval/README.md`, the goldens' READMEs and this entry; its
+  non-goals and still-open decisions moved to `docs/BACKLOG.md` rather than
+  disappearing with it.
+
+### Known issues
+- `L3-warehouse-work-slice` has a captured golden and `build: 1`, but its corpus
+  record still carries `bp_clean: null` — BP never ran for it. A small, real gap,
+  named rather than papered over.
+- Four defects the verification runs found or re-confirmed are **open, with
+  issues**, all in the form/scaffold path and none of them touched by this
+  release: the scaffold writes explicit child controls under a `<DataGroup>`-bound
+  group, which its own `add-control` op-spec refuses (#977); `generateControls`
+  changes nothing and the reported control count is not the number written (#978);
+  `get_object_info(form)` hides the children of such a group, reporting 14 controls
+  where the XML holds 16 (#979); and every scaffolded form starts BP-dirty because
+  the tab captions are raw text (#980).
+
+### Verified on the VM
+All three write-path defects were re-run end to end through the grounded tool
+path on the sandbox model, against a server running this build:
+
+| Case | Score | What it proves |
+|---|---|---|
+| `L3-enum-field-form-downgrade-guard` | build 1 · golden 1 · **systest 3/3** | One `create(enum)` call — no `useEnumValue`, no `modify-enum-value` repair — wrote `<Value>1/2/3</Value>` and the runtime downgrade guard passes. The runtime oracle was the only thing that could ever see this defect. |
+| `L2-event-handler-basic` | build 1 · golden 1 · **systest 2/2** | `create(class, xmlContent=…)` canonicalised all three identities instead of writing three different ones; the build that used to die with the naming-consistency error is 0 errors. `golden_match` is 1 against the untouched 2026-07-01 golden, which retires the plan to re-capture the seven other pre-doc-comment class goldens. |
+| `L4-headerlines-document-slice` | build 1 · golden 1 | `<DeleteAction>Cascade</DeleteAction>` read back intact after the write, after **two** further bridge-backed `Update()` calls on the same table, and after a full rebuild — no guard needed, the ordering fix is a root fix. `BPUpgradeMetadataDeleteAction` is gone. The golden was re-captured from that build, so the two lines the fix PR had hand-repaired are now real captured bytes. |
+
+Each run rolled the sandbox back and left a corpus record
+(`eval/corpus/runs/2026-09-01T06__*__0fba518.json`).
 
 ---
 
@@ -844,6 +1692,42 @@ notes, so the entries below name what changed and why it mattered, not every com
 ---
 
 ## [1.11.0] — 2026-08-13
+
+### Security
+- **GHSA-8764-fh3m-wf7g — the documented Azure deploy path produced an
+  unauthenticated public MCP endpoint.** The one-click template declared `apiKey`
+  with `defaultValue: ""`, which flows into the App Service `API_KEY` setting.
+  Empty makes `apiKeyAuth` a pass-through and the server bound `0.0.0.0`, so
+  following the deploy steps as written served the whole read surface —
+  including the `source_snippet` fields carrying the customer's own X++ — to
+  anonymous callers. The hostname is not obscure either: it derives from the
+  resource group name (`d365fo-mcp-server-<customer>.azurewebsites.net`) and
+  appears in Certificate Transparency logs. Reported by Lucas Weber (CyberSec42)
+  under coordinated disclosure; fixed in #897. `apiKey` became a required
+  template parameter with `@minLength(32)`, `resolveBindHost()` now defaults the
+  bind to `127.0.0.1` until `API_KEY` or `ALLOW_UNAUTHENTICATED` is set, and
+  `authStartupError()` refuses to start when the resolved host is not loopback
+  and nothing authenticates it.
+
+  Affects **`<= 1.10.1`**. The advisory first named **1.10.2** as the patched
+  version, and that version was never published — `package.json` on `main`
+  carried it through the fix window, but the release shipped as **1.11.0**
+  (npm, 2026-08-13). Anyone acting on the advisory was pointed at a version they
+  could not install; corrected in the advisory on 2026-09-08. CVE requested, not
+  yet assigned.
+
+### Breaking
+- **An HTTP server with no `API_KEY` binds `127.0.0.1` instead of `0.0.0.0`.** A
+  keyless deployment that relied on being reachable from the network must set
+  `API_KEY`, or `ALLOW_UNAUTHENTICATED=true` where authentication is enforced
+  upstream (Easy Auth, Private Endpoint, authenticating proxy). Setting `HOST` to
+  a public interface with neither is refused at startup. `NODE_ENV` is no longer
+  read for this decision: the first guard fired only on `NODE_ENV=production`,
+  which the Bicep template sets but the `.azure-pipelines/` deploy onto a
+  hand-created App Service does not — leaving that path exactly as exposed as
+  the one reported, with the guard silent throughout. Local development got
+  quieter rather than louder: `npm start` with no key binds loopback and needs no
+  new variable to do it.
 
 ### Changed
 - `EXTENSION_PREFIX_SOURCE` is now the config key **`naming.prefixSource`**

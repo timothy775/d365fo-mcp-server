@@ -40,7 +40,11 @@ export const GENERATE_OBJECT_PARAM_SPECS: Record<string, { type: string; descrip
       'Extending a STANDARD report: report-dataset-extension (name=DP class, baseName=its temp table, ' +
       'optional datasetAccessor), report-custom-design (name=standard report, baseName=its controller, ' +
       'documentType, designName), report-menu-redirect (name=controller, baseName=your report, designName). ' +
-      'Recipes with the metadata half: object_patterns(domain="report").',
+      'Recipes with the metadata half: object_patterns(domain="report").\n' +
+      'Also accepted but NOT in the published enum, because the byte budget is spent where the demand ' +
+      'is: business-event, custom-service, custom-telemetry, feature-class, composite-entity, ' +
+      'er-custom-function. Pass one by name if you want it (tests/tools/patternEnumParity.test.ts ' +
+      'records why each stays unpublished).',
   },
   menuItemType: {
     type: 'string (display | action | output)',
@@ -59,9 +63,51 @@ export const GENERATE_OBJECT_PARAM_SPECS: Record<string, { type: string; descrip
   testMethods: {
     type: 'string[]',
     description:
-      'systest: target-class methods to write a test for — one [SysTestMethod] each. ' +
+      'systest: target methods to write a test for — one [SysTestMethod] each. ' +
       'Every generated test fails until its assertion is written, which is what makes the ' +
-      'first run meaningful. Read the method names from get_object_info(objectType="class").',
+      'first run meaningful. Read the method names from get_object_info, or let ' +
+      'prepare(mode="test", objectName="<target>") list them.',
+  },
+  attributes: {
+    type: 'string[]',
+    description:
+      'systest: extra attributes, written exactly as in source ("SysTestGranularity(SysTestGranularity::Unit)", '
+      + '"SysTestCheckInTest"). Placement is handled for you and is MEASURED, not chosen: across the 884 shipped '
+      + 'test classes SysTestGranularity, SysTestCaseConfigurationKeyConstraint, SysTestCaseUseSingleInstance and '
+      + 'SysTestCaseDataDependency sit on the CLASS, while SysTestCheckInTest sits on the METHODS beside '
+      + 'SysTestMethod (1,616 of 1,622). The class block is emitted stacked inside ONE bracket pair, which is the '
+      + 'shipped shape — separate stacked pairs on a member are a compile error. See '
+      + 'get_knowledge(topic="systest-attributes") for what shipped tests actually carry, and for the list the '
+      + 'catalogue advertises that no shipped test uses.',
+  },
+  arrange: {
+    type: '"buffer" | "atl"',
+    description:
+      'systest: where the fixtures come from. "buffer" (default) declares the buffer and calls initValue(). '
+      + '"atl" opens with AtlDataRootNode::construct() and, when ATL ships a node for the target table, the exact '
+      + 'accessor path read from the AOT — including the .record() that turns the AtlEntity wrapper into a buffer, '
+      + 'which is the step everyone forgets. Requires the ATL packages in the model Descriptor (ATLApplicationSuite, '
+      + 'AtlFoundation, and AtlPersonnel / AtlCostAccounting for hcm / costAccounting); without them the failure is '
+      + 'on data.invent(), not on the class. prepare(mode="test") reports whether the model has them.',
+  },
+  testTargetType: {
+    type: '"class" | "table" | "coc" | "event-handler" | "service" | "report-dp"',
+    description:
+      'systest: what `name` denotes (default "class"). It decides the SHAPE of the test, and the ' +
+      'shapes are not interchangeable — each observes the behaviour somewhere different. ' +
+      '"table": a buffer with initValue(), assertFalse(buffer.validateWrite()) for the verdict and ' +
+      'assertExpectedInfoLogMessage() for the reason (table rules report through the infolog, they ' +
+      'do not throw), plus an ACCEPTING case beside the rejecting one. Use it for validateWrite / ' +
+      'validateField / insert / update, INCLUDING the ones an [ExtensionOf] class wraps. ' +
+      '"coc": a class-method wrapper, tested through the BASE class — naming the _Extension class ' +
+      'proves nothing, because CoC is transparent and a wrapper is only observable through the ' +
+      'method it wraps. "event-handler": performs the write and reads back what the handler ' +
+      'changed, since a handler fires out of band and cannot return a value. "service": calls a ' +
+      'SysOperation service directly with a hand-built contract (name the contract in `baseName`) — ' +
+      'no controller, no dialog, no batch queue. "report-dp": a report data provider, driven through a ' +
+      'contract and processReport() with the staged rows read back via the dataset getter — name the ' +
+      'getter in `datasetAccessor`, it carries [SRSReportDataSetAttribute] and cannot be derived. ' +
+      'prepare(mode="test") reports which kind the target is and emits this parameter for you.',
   },
   serviceMethod: {
     type: 'string',
@@ -134,7 +180,12 @@ export const GENERATE_OBJECT_PARAM_SPECS: Record<string, { type: string; descrip
     type: 'boolean',
     description: 'Inject pattern-appropriate lifecycle method stubs with TODO markers.',
   },
-  generateControls: { type: 'boolean', description: 'Auto-generate grid controls for the datasource.' },
+  generateControls: {
+    type: 'boolean',
+    description:
+      'Default TRUE: the datasource fields are bound into the pattern\'s grid and detail groups. ' +
+      'Pass false to get the pattern\'s containers EMPTY and place every field yourself via add-control.',
+  },
   fields: {
     type: 'array of {name, edt?, enumType?, type?, dataType?, label?, mandatory?}',
     description:
@@ -219,8 +270,8 @@ export const GENERATE_OBJECT_MODE_SPECS: Record<string, GenerateObjectModeSpec> 
   pattern: {
     required: ['name', 'pattern'],
     optional: [
-      'menuItemType', 'baseName', 'targetObject', 'serviceMethod', 'testMethods', 'modelName',
-      'datasetAccessor', 'documentType', 'designName',
+      'menuItemType', 'baseName', 'targetObject', 'serviceMethod', 'testMethods', 'testTargetType',
+      'modelName', 'datasetAccessor', 'documentType', 'designName',
     ],
     note:
       'Text only, no write. Call analyze_code(mode="patterns") first, then generate_object(mode="pattern"), ' +

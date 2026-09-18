@@ -60,6 +60,17 @@ export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description
     type: 'string (None | Restricted | Cascade | CascadeRestricted)',
     description: 'Delete action to take on the related table. Defaults to Restricted.',
   },
+  deleteActionRelation: {
+    type: 'string',
+    description:
+      'The RELATION linking the two tables, by name. Do not assume which side declares it: in ' +
+      'shipped metadata it is usually the relation on the RELATED table pointing back at this one ' +
+      '(DMFDataSource\u2019s delete action on DMFPublishedEntity names the relation declared on ' +
+      'DMFPublishedEntity), but the reverse ships too (AxKPITable names a relation on itself). ' +
+      'Read the related table with get_object_info(options:{relations:true}) and use the name you ' +
+      'find. Optional \u2014 without it xppbp reports BPUpgradeMetadataDeleteAction ("has no ' +
+      'explicit relation set").',
+  },
   // table fields
   fieldName: { type: 'string', description: 'Field name.' },
   fieldNewName: {
@@ -72,7 +83,7 @@ export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description
       'EDT name for the field (e.g. "InventQty", "WHSZoneId", "TransDate"). For modify-field: new EDT to set.',
   },
   fieldBaseType: {
-    type: 'string (String | Integer | Real | Date | DateTime | Int64 | GUID | Enum)',
+    type: 'string (String | Integer | Real | Date | DateTime | Int64 | GUID | Enum | Container)',
     description:
       'Base type selecting the XML element for add-field (e.g. edt "InventQty" + "Real" → AxTableFieldReal). ' +
       'Auto-resolved from the symbol index when omitted — pass explicitly when the EDT is not indexed yet.',
@@ -280,6 +291,48 @@ export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description
       'Name for the range object (<Name>). Defaults to rangeField when omitted. ' +
       'Only ever matched against other ranges of the SAME data source.',
   },
+  reportAction: {
+    type: '"refresh-dataset" | "add-parameter"',
+    description:
+      'report-design: which half to do. "refresh-dataset" copies the temp table fields into the dataset; ' +
+      '"add-parameter" declares a report parameter and binds it to the dataset. There is deliberately no ' +
+      '"add-column" — placing a column edits the RDL, whose failures surface only in the SSRS renderer.',
+  },
+  tableName: {
+    type: 'string',
+    description:
+      'report-design(refresh-dataset): the temp table whose fields the dataset should carry. It is read ' +
+      'off disk, so it must exist; only MISSING fields are added, never rewritten or removed.',
+  },
+  datasetName: {
+    type: 'string',
+    description:
+      'report-design: which dataset to act on. Optional when the report has exactly one; REQUIRED when it ' +
+      'has several, because guessing puts the field on the wrong dataset.',
+  },
+  parameterName: {
+    type: 'string',
+    description: 'report-design(add-parameter): the parameter to declare and bind.',
+  },
+  parameterDataType: {
+    type: 'string',
+    description:
+      'report-design(add-parameter): .NET type name, default System.String. Shipped reports use ' +
+      'System.String / System.Boolean / System.DateTime / System.Int32 / System.Int64.',
+  },
+  parameterHidden: {
+    type: 'boolean',
+    description:
+      'report-design(add-parameter): true writes <UserVisibility>Hidden</UserVisibility>. Leave it off for ' +
+      'a VISIBLE parameter — across 1,057 shipped reports there is no "Visible" value, a visible parameter ' +
+      'omits the element, and an unknown one is dropped silently.',
+  },
+  promptString: {
+    type: 'string',
+    description:
+      'report-design(add-parameter): the dialog caption. Pass a LABEL id ("@MyModel:FromDate") — it is ' +
+      'user-visible text living in metadata, which no BP rule checks.',
+  },
   rangeValue: {
     type: 'string',
     description:
@@ -400,6 +453,15 @@ export const D365FO_FILE_PARAM_SPECS: Record<string, { type: string; description
       'add-diagnostic-suppression: emit the <ItemSpecific> block — rare, only for element-specific rules ' +
       '(BPErrorUnknownLabel, BPXmlDoc*, BPErrorPrivilegeNotCoveredByDuty, …). Requires diagnosticElementName.',
   },
+  // Model descriptor module references
+  moduleReference: {
+    type: 'string',
+    description:
+      'add-module-reference / remove-module-reference: REQUIRED — the module to add to or remove from the ' +
+      'descriptor\'s <ModuleReferences>, spelled exactly as the PACKAGE FOLDER is (e.g. "ApplicationSuite", ' +
+      '"Ledger", "ApplicationFoundation", or an ISV package name). Matched case-insensitively against what ' +
+      'is already there, so a re-run is a reported duplicate rather than a second entry.',
+  },
   // Alias spellings (see OP_PARAM_ALIASES). They never appear as their own line
   // in a rendered spec - renderOpSpec walks required/optional only - but every
   // alias must be describable, so the registry guard can prove none is a typo.
@@ -502,13 +564,13 @@ export const D365FO_FILE_OP_SPECS: Record<string, D365FileOpSpec> = {
   'add-field': {
     required: ['fieldName'],
     optional: ['fieldType', 'fieldBaseType', 'fieldEnumType', 'fieldMandatory', 'fieldLabel', 'dataField', 'dataSource', 'fieldGroupName', 'autoCorrect'],
-    mutationOneOf: ['fieldType', 'fieldEnumType', 'dataField'],
+    mutationOneOf: ['fieldType', 'fieldEnumType', 'dataField', 'fieldBaseType'],
     note:
       'Enum field: pass fieldEnumType="<enum name>" and NO fieldType — an enum-typed table field ' +
       'is an AxTableFieldEnum with an EnumType and needs no EDT. (fieldType is the EDT name here, ' +
       'never an XML element name like "AxTableFieldEnum" — that one is read as fieldEnumType when the ' +
       'enum is unambiguous, unless autoCorrect=false.) ' +
-      'Table/table-extension: otherwise fieldType (EDT) is REQUIRED. data-entity-extension: pass dataField AND ' +
+      'Container field: prefer a container EDT — fieldType="Bitmap" for an image, "Blobdata" for a binary payload; the base type resolves itself. Pass fieldBaseType="Container" and NO fieldType only for a bare container (52 of 332 shipped container fields), which draws BPErrorTableFieldNotDefinedUsingType. "Container" is never an EDT name. Table/table-extension: otherwise fieldType (EDT) is REQUIRED. data-entity-extension: pass dataField AND ' +
       'dataSource instead — BOTH, or nothing is written; a mapped field has no EDT of its own, it points ' +
       'at dataField on the entity data source dataSource. fieldGroupName is optional and only applies to ' +
       'a data-entity-extension: it appends the field to that BASE-entity field group (shipped extensions ' +
@@ -568,8 +630,11 @@ export const D365FO_FILE_OP_SPECS: Record<string, D365FileOpSpec> = {
   'remove-relation': { required: ['relationName'], optional: [] },
   'add-delete-action': {
     required: ['deleteActionName'],
-    optional: ['deleteActionTable', 'deleteActionType'],
-    note: 'objectType="table" only. deleteActionTable defaults to deleteActionName; deleteActionType defaults to Restricted.',
+    optional: ['deleteActionTable', 'deleteActionType', 'deleteActionRelation'],
+    note:
+      'objectType="table" only. deleteActionTable defaults to deleteActionName; deleteActionType ' +
+      'defaults to Restricted. Re-sending the same deleteActionName with a DIFFERENT deleteActionType ' +
+      'rewrites the entry in place — it is a repair path, not a no-op.',
   },
   'remove-delete-action': { required: ['deleteActionName'], optional: [] },
   'add-field-group': {
@@ -597,6 +662,26 @@ export const D365FO_FILE_OP_SPECS: Record<string, D365FileOpSpec> = {
     required: ['dataSourceName', 'dataSourceTable'],
     optional: ['joinSource', 'linkType'],
     note: 'form-extension only.',
+  },
+  'report-design': {
+    required: ['reportAction'],
+    optional: ['tableName', 'datasetName', 'parameterName', 'parameterDataType', 'parameterHidden', 'promptString'],
+    note:
+      'objectType="report" only — the FIRST write path an AxReport has. Two actions, both metadata-only: ' +
+      'reportAction="refresh-dataset" (+ tableName, optional datasetName) copies the temp table\'s fields ' +
+      'into the dataset, adding only what is missing; reportAction="add-parameter" (+ parameterName, ' +
+      'optional parameterDataType [default System.String], parameterHidden, promptString, datasetName) ' +
+      'declares a parameter AND binds it to the dataset, which are two elements in two collections that ' +
+      'must agree. ' +
+      'It NEVER touches the RDL in the <![CDATA[…]]> block and never removes anything: a dataset field the ' +
+      'design does not bind is inert, while removing one it does bind breaks the render — and a malformed ' +
+      'RDL fails in the SSRS renderer at run time, where no build and no test can see it. ' +
+      'For the same reason there is no "add-column": placing a column IS layout, and layout stays with the ' +
+      'Report Designer. Both actions are idempotent. ' +
+      'parameterHidden=true writes <UserVisibility>Hidden</UserVisibility>; leave it off for a VISIBLE ' +
+      'parameter — across 1,057 shipped reports and 13,833 parameters there is no "Visible" value, a ' +
+      'visible parameter simply omits the element, and an unknown one is dropped silently ' +
+      '(get_knowledge(topic="axreport-anatomy")).',
   },
   'add-query-range': {
     required: ['dataSourceName', 'rangeField', 'rangeValue'],
@@ -717,6 +802,37 @@ export const D365FO_FILE_OP_SPECS: Record<string, D365FileOpSpec> = {
       'AxIgnoreDiagnosticList folder, in the shape real shipped suppression lists have, and says so in the ' +
       'reply so you can add it to the model\'s .rnrproj if Visual Studio does not pick it up.',
   },
+  'add-module-reference': {
+    required: ['moduleReference'],
+    optional: [],
+    note:
+      'objectType="model-descriptor". Adds one <d2p1:string> to the model descriptor\'s ' +
+      '<ModuleReferences> — the ONLY statement of what your model may see, since xppc resolves types ' +
+      'against the referenced packages and not against everything installed. Do this BEFORE writing code ' +
+      'that names a type from another model: a missing entry is a classStr/delegateStr/"type not found" ' +
+      'error at COMPILE time, not a code bug, and the code itself will look correct. ' +
+      'objectName is not needed — a descriptor is named for its model, so modelName alone identifies it ' +
+      '(or pass filePath). NOTHING is created implicitly: a model with no descriptor, or a descriptor with ' +
+      'no <ModuleReferences> element, is REPORTED rather than invented, because a <d2p1:string> entry needs ' +
+      'the arrays-namespace prefix bound by an xmlns:d2p1 attribute and guessing where that declaration ' +
+      'belongs writes a file Visual Studio rewrites on the next save. Refuses a duplicate (case-insensitive) ' +
+      'rather than writing a second entry. The module is probed as a package folder under every configured ' +
+      'root and a miss is WARNED about, not refused — a package can be absent on a dev box and present on ' +
+      'the build agent — but a typo produces exactly that warning. ' +
+      'A descriptor change needs a FULL build of the model to take effect. ' +
+      'Read the current list with get_workspace_info.',
+  },
+  'remove-module-reference': {
+    required: ['moduleReference'],
+    optional: [],
+    note:
+      'objectType="model-descriptor". Removes one <d2p1:string> from the descriptor\'s <ModuleReferences>. ' +
+      'This is the one direction that BREAKS a build that currently passes — every type the model resolved ' +
+      'through that module goes invisible to xppc at once — so run a full build of the model afterwards. ' +
+      'A module that is not referenced comes back as not-found WITH the list that is there, rather than as ' +
+      'a silent success. Removing the last entry collapses the element to the self-closing ' +
+      '<ModuleReferences /> a model that references nothing ships with.',
+  },
   'add-enum-value': {
     required: ['enumValueName'],
     optional: ['enumValueLabel', 'enumValueHelpText', 'enumValueInt', 'enumValueCountryRegionCodes'],
@@ -766,10 +882,12 @@ export const D365FO_FILE_CREATE_PROPERTY_SPECS: Record<string, string> = {
     'indexes?[{name,fields[],allowDuplicates?,alternateKey?,validTimeStateKey?,validTimeStateMode?("Gap"|"NoGap")}]',
   enum:
     'label, useEnumValue, configurationKey, isExtensible, enumValues[{name,value?,label?,helpText?}] — ' +
-    'an explicit value: sets UseEnumValue=Yes for you; an OFF-POSITIONAL one (a number differing from the ' +
-    "entry's index) is refused when combined with isExtensible rather than dropped, since xppc requires " +
-    'UseEnumValue=No and no <Value> on an extensible enum. Plain 0,1,2 numbering states nothing the order ' +
-    'does not, so it is accepted and the numbers are dropped. ' +
+    'every member keeps its number: the value you pass (or its position when you pass none) is written as ' +
+    'an explicit <Value>, except 0, which the serialiser omits. A member WITHOUT <Value> is 0, not the ' +
+    'next ordinal, so an enum written without them has every member equal to 0 — it builds clean and ' +
+    'enum2int() returns 0 for all of them. isExtensible forces UseEnumValue=No and is refused only in ' +
+    'combination with useEnumValue:true (xppc: "UseEnumValue property must be set to \'No\' when the ' +
+    'IsExtensible property is \'True\'"); the numbers are kept either way. ' +
     'CHOOSE isExtensible DELIBERATELY: it also bars `<`/`>`/`<=`/`>=` on the enum ("Cannot use extensible ' +
     'enumerated type in non-equality comparison"), so any enum whose values get RANKED in X++ — a tier, a ' +
     'severity, a no-downgrade check — must be isExtensible:false',

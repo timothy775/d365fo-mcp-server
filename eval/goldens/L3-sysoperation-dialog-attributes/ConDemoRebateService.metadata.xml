@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Golden metadata for eval case: L3-sysoperation-dialog-attributes (artifact 2 of 3: Service - the work, with NO SysEntryPointAttribute)
+  Captured: 2026-08-31, server SHA: 278eee3
+  Platform: xppc 7.0.7996.33
+-->
 <AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
 	<Name>ConDemoRebateService</Name>
 	<SourceCode>
@@ -15,7 +20,7 @@ public class ConDemoRebateService extends SysOperationServiceBase
 				<Name>process</Name>
 				<Source><![CDATA[
     /// <summary>
-    /// Counts the customers the run applies to.
+    /// Counts the customers the rebate run applies to.
     /// </summary>
     /// <param name = "_contract">The parameters of the run.</param>
     /// <remarks>
@@ -24,21 +29,24 @@ public class ConDemoRebateService extends SysOperationServiceBase
     /// </remarks>
     public void process(ConDemoRebateContract _contract)
     {
-        CustTable custTable;
+        CustTable   custTable;
+        CustGroupId custGroup;
+
+        custGroup = _contract.parmCustGroup();
 
         if (_contract.parmIncludeBlocked() == NoYes::Yes)
         {
             select count(RecId) from custTable
-                where custTable.CustGroup == _contract.parmCustGroup();
+                where custTable.CustGroup == custGroup;
         }
         else
         {
             select count(RecId) from custTable
-                where custTable.CustGroup == _contract.parmCustGroup()
+                where custTable.CustGroup == custGroup
                 && custTable.Blocked == CustVendorBlocked::No;
         }
 
-        info(strFmt("@SYS100074", _contract.parmCustGroup(), int642Str(custTable.RecId)));
+        info(strFmt("@SYS97212", int642Str(custTable.RecId)));
     }
 
 ]]></Source>

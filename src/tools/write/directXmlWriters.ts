@@ -27,6 +27,9 @@ import { upsertAxTableProperty, AX_TABLE_NON_EXISTENT_PROPERTIES } from '../../u
 import { upsertAxFormDesignProperty } from '../../utils/axFormDesignProperties.js';
 import { buildAxDataEntityViewFieldXml } from '../xml/dataEntityViewExtensionXml.js';
 import { escapeXml } from '../../utils/xmlEscape.js';
+import {
+  addModuleReference, removeModuleReference, parseModuleReferences, invalidateModelVisibility,
+} from '../../metadata/modelDescriptor.js';
 
 /**
  * Serializes a direct-XML editor on the file it edits.
@@ -1170,10 +1173,33 @@ export const DELETE_ACTION_TYPES = ['None', 'Restricted', 'Cascade', 'CascadeRes
  *
  * There is no bridge operation for DeleteActions at all (finding #36), so a
  * cascading delete action was inexpressible through the modify surface — the only
- * route was the forbidden whole-file overwrite. <DeleteActions> is a collection
- * sibling, not part of the order-sensitive top-level property block, so patching
- * it in place is safe. Shape matches MetadataWriteService.cs: Name, Table,
- * DeleteAction.
+ * route was the forbidden whole-file overwrite.
+ *
+ * ORDER INSIDE THE ENTRY IS LOAD-BEARING, and this writer had it wrong. The
+ * comment here used to say "shape matches MetadataWriteService.cs: Name, Table,
+ * DeleteAction" — that is the order of a C# object initialiser, which says
+ * nothing about the order the DataContract serialiser reads. Microsoft's own
+ * metadata is the oracle: all 126 <AxTableDeleteAction> entries shipped in
+ * ApplicationSuite/Foundation/Common/Platform are
+ *
+ *     Name → DeleteAction → Relation → Table   (26 of them then add Tags)
+ *
+ * with no exceptions. Writing <DeleteAction> AFTER <Table> put it out of
+ * declaration order, and the deserializer drops a misordered element in
+ * silence — the same failure mode the top-level property block already had
+ * (axTablePropertyOrder.ts, finding #13). The file on disk said Cascade, the
+ * provider read the entry with DeleteAction at its default, and the next
+ * bridge-backed Update() serialised the object back WITHOUT the element. The
+ * 2026-08-31 capture run of L4-headerlines-document-slice recorded that as
+ * "the bridge destroyed the delete action"; the bridge only wrote back what
+ * the deserializer had been able to read.
+ *
+ * <Relation> is emitted when the caller names one: a delete action without an
+ * explicit relation is legal but draws BPUpgradeMetadataDeleteAction. Which side
+ * DECLARES that relation is not fixed — of the resolvable delete actions in the
+ * four big packages, 5 name a relation declared on the related table and 4 name
+ * one declared on the table that owns the delete action — so the op-spec tells
+ * the caller to read it rather than derive it.
  */
 export const directXmlDeleteAction = serializedOnFile(async (
   filePath: string,
@@ -1181,6 +1207,7 @@ export const directXmlDeleteAction = serializedOnFile(async (
   name: string,
   table: string | undefined,
   deleteAction: string | undefined,
+  relation?: string | undefined,
 ): Promise<{ success: boolean; message: string } | null> => {
   try {
     const rawContent = await fs.readFile(filePath, 'utf-8');
@@ -1204,16 +1231,40 @@ export const directXmlDeleteAction = serializedOnFile(async (
       return { success: true, message: `✅ Delete action '${name}' removed. File: ${filePath}` };
     }
 
-    if (existing) {
-      return { success: true, message: `✅ Delete action '${name}' already present in ${filePath} — skipped (idempotent).` };
-    }
-
-    const newElement =
+    // Canonical serialised order — see the header. Name first, then DeleteAction,
+    // then the optional Relation, then Table.
+    const renderEntry = (): string =>
       `\t\t<AxTableDeleteAction>\n` +
       `\t\t\t<Name>${name}</Name>\n` +
-      `\t\t\t<Table>${table ?? name}</Table>\n` +
       `\t\t\t<DeleteAction>${deleteAction ?? 'Restricted'}</DeleteAction>\n` +
+      (relation ? `\t\t\t<Relation>${relation}</Relation>\n` : '') +
+      `\t\t\t<Table>${table ?? name}</Table>\n` +
       `\t\t</AxTableDeleteAction>`;
+
+    if (existing) {
+      // Idempotency used to key on the NAME alone, so an entry whose DeleteAction
+      // differed from the one asked for was reported "already present — skipped"
+      // and left as it was. That removed the only forward-only repair path there
+      // is: the capture run that found the ordering bug above could not correct
+      // the value it had just written wrong without the delete+re-add the eval
+      // loop forbids. Same name, different type ⇒ rewrite the entry in place.
+      const current = /<DeleteAction>\s*(\w+)\s*<\/DeleteAction>/.exec(existing[0])?.[1];
+      const wanted = deleteAction ?? 'Restricted';
+      if (current === wanted) {
+        return { success: true, message: `✅ Delete action '${name}' already present in ${filePath} — skipped (idempotent).` };
+      }
+      const rewritten = content.replace(blockRe, `${renderEntry()}\n`);
+      if (rewritten === content) return null;
+      await writeFileAtomic(filePath, normalizeD365Xml(rewritten));
+      return {
+        success: true,
+        message:
+          `✅ Delete action '${name}' updated: ${current ?? '(none)'} → ${wanted} on ${table ?? name}. ` +
+          `File: ${filePath}`,
+      };
+    }
+
+    const newElement = renderEntry();
 
     let updated: string;
     if (content.includes('<DeleteActions />')) {
@@ -1828,5 +1879,154 @@ export const directXmlClearEmptyProperty = serializedOnFile(async (
   } catch (err) {
     console.error(`[modify_d365fo_file] directXmlClearEmptyProperty failed: ${err}`);
     return null;
+  }
+});
+
+/**
+ * A descriptor's leading BOM, so it can be put back.
+ *
+ * normalizeD365Xml strips one and writeFileAtomic does not add it back, which is
+ * tolerable on an AOT file the metadata provider rewrites anyway. A descriptor is
+ * rewritten by nothing — it is a hand-curated file that goes through code review
+ * on the way to `main`, and a whole-file "encoding changed" diff on it is exactly
+ * the review hazard this operation exists to avoid.
+ */
+function withBomOf(original: string, updated: string): string {
+  return original.charCodeAt(0) === 0xfeff ? '﻿' + updated : updated;
+}
+
+/**
+ * add-module-reference on a model descriptor, written straight to the XML.
+ *
+ * A descriptor is not an AOT object — MetadataWriteService has no concept of one
+ * — so this is XML-only for the same structural reason as
+ * add-diagnostic-suppression, and the transform itself lives next to the readers
+ * that already parse this element (src/metadata/modelDescriptor.ts) rather than
+ * being a second, drifting copy of the same parse.
+ *
+ * Nothing is created implicitly. Unlike add-diagnostic-suppression, which writes
+ * a first {Model}_BPSuppressions.xml for a model that has never suppressed
+ * anything, a model with NO descriptor is not a model — it is a wrong path or a
+ * wrong model name, and inventing `<AxModelInfo>` would hide that behind a ✅.
+ * `unknownModuleNote` carries the same principle to the reference itself.
+ */
+export const directXmlAddModuleReference = serializedOnFile(async (
+  filePath: string,
+  moduleName: string,
+  unknownModuleNote: string,
+): Promise<{ success: boolean; message: string } | null> => {
+  try {
+    const rawContent = await fs.readFile(filePath, 'utf-8');
+    const content = rawContent.replace(/^﻿/, '').replace(/\r\n/g, '\n');
+
+    const outcome = addModuleReference(content, moduleName);
+    switch (outcome.kind) {
+      case 'no-element':
+        return {
+          success: false,
+          message:
+            `${filePath} has no <ModuleReferences> element, so there is nowhere to add ` +
+            `'${moduleName}' — nothing was written. One was NOT invented: its <d2p1:string> entries ` +
+            `need the arrays-namespace prefix bound by an xmlns:d2p1 attribute, and guessing where ` +
+            `that declaration belongs produces a descriptor Visual Studio rewrites on the next save. ` +
+            `Add the element once in VS (or by hand) and re-run — every later reference goes through ` +
+            `this operation.`,
+        };
+      case 'duplicate':
+        return {
+          success: false,
+          message:
+            `'${outcome.existing}' is already in <ModuleReferences> — nothing was added. ` +
+            `A second entry for one module changes nothing for xppc and is one more line for a ` +
+            `reviewer.` +
+            (outcome.existing === moduleName ? '' : ` (Spelled '${outcome.existing}' in the file.)`),
+        };
+      case 'invalid-name':
+        return {
+          success: false,
+          message:
+            `'${moduleName}' is not a package folder name — nothing was written. A module reference ` +
+            `is spelled exactly as the package folder is: letters, digits, '_', '-' or '.', no spaces.`,
+        };
+    }
+
+    await writeFileAtomic(filePath, withBomOf(rawContent, normalizeD365Xml(outcome.xml)));
+    invalidateModelVisibility(path.basename(filePath, '.xml'));
+    console.error(`[modify_d365fo_file] ✅ directXmlAddModuleReference: added '${moduleName}' to ${filePath}`);
+    return {
+      success: true,
+      message:
+        `${unknownModuleNote}✅ Module reference '${moduleName}' added. File: ${filePath}\n` +
+        `ℹ️ A descriptor change only takes effect on a FULL build of this model — an incremental ` +
+        `build reuses the old reference set, so a classStr/delegateStr/type error against the newly ` +
+        `referenced module can survive it.`,
+    };
+  } catch (err) {
+    // Real error, not null — a null here would be rendered as "the C# bridge
+    // could not resolve the object", about an operation that never touched it.
+    console.error(`[modify_d365fo_file] directXmlAddModuleReference failed: ${err}`);
+    return {
+      success: false,
+      message:
+        `❌ Could not add the module reference to ${filePath}: ${err instanceof Error ? err.message : err}`,
+    };
+  }
+});
+
+/**
+ * remove-module-reference on a model descriptor, written straight to the XML.
+ *
+ * Removing a reference is the one direction that can break a build that
+ * currently passes — every type the model resolves through that module goes
+ * invisible to xppc — so the success message says so rather than leaving it to
+ * be discovered at compile time.
+ */
+export const directXmlRemoveModuleReference = serializedOnFile(async (
+  filePath: string,
+  moduleName: string,
+): Promise<{ success: boolean; message: string } | null> => {
+  try {
+    const rawContent = await fs.readFile(filePath, 'utf-8');
+    const content = rawContent.replace(/^﻿/, '').replace(/\r\n/g, '\n');
+
+    const outcome = removeModuleReference(content, moduleName);
+    switch (outcome.kind) {
+      case 'no-element':
+        return {
+          success: false,
+          message:
+            `${filePath} has no <ModuleReferences> element, so it references no modules at all — ` +
+            `there is nothing to remove.`,
+        };
+      case 'not-found':
+        return {
+          success: false,
+          message:
+            `'${moduleName}' is not in <ModuleReferences> — nothing was removed.\n` +
+            (outcome.present.length > 0
+              ? `This model references: ${outcome.present.join(', ')}.`
+              : `This model references nothing.`),
+        };
+    }
+
+    await writeFileAtomic(filePath, withBomOf(rawContent, normalizeD365Xml(outcome.xml)));
+    invalidateModelVisibility(path.basename(filePath, '.xml'));
+    console.error(`[modify_d365fo_file] ✅ directXmlRemoveModuleReference: removed '${outcome.removed}' from ${filePath}`);
+    const left = parseModuleReferences(outcome.xml);
+    return {
+      success: true,
+      message:
+        `✅ Module reference '${outcome.removed}' removed. File: ${filePath}\n` +
+        `⚠️ Every type this model resolved through '${outcome.removed}' is now invisible to xppc — ` +
+        `run a FULL build of the model before trusting this change.\n` +
+        `Still referenced: ${left.length > 0 ? left.join(', ') : '(nothing)'}.`,
+    };
+  } catch (err) {
+    console.error(`[modify_d365fo_file] directXmlRemoveModuleReference failed: ${err}`);
+    return {
+      success: false,
+      message:
+        `❌ Could not remove the module reference from ${filePath}: ${err instanceof Error ? err.message : err}`,
+    };
   }
 });

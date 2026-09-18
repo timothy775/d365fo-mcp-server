@@ -23,7 +23,38 @@ the design.
 
 ---
 
-## Live SysTest runs — blocked on an unconfigured platform config
+## Live SysTest runs — UNBLOCKED and CLOSED 2026-08-31
+
+**Status:** **resolved and closed 2026-08-31.** The owner applied the config copy on
+the VM, the runner reached the database, and all four cases have since RUN their
+tests. Kept here (rather than deleted) because the diagnosis was wrong twice before
+it was right.
+
+**What changed.** `compareSysTestDataAccess` reports all four `DataAccess.*`
+settings in agreement with `WebRoot\web.config`, and `SysTestConsole.exe
+/test:<a class that does not exist> /unattended` now prints
+
+    [SysTestSuite.Rainier Test Suite] [initial partition: [UT01], initial company: [DAT] …] Suite started
+    Rainier Test Suite : 0 Run, 0 Failed
+
+— real AOS session data, so the connection is open. That also answers the one
+UNKNOWN this entry carried: the 828-character encrypted password blob **is**
+decryptable by the account the runner executes as, so no second blocker was hiding
+behind the first.
+
+**What was owed, and is now done.** The four cases have each been re-run.
+`L2-coc-extension`, `L2-event-handler-basic` and `L3-batch-basic` passed **2/2**
+apiece under `SysTestConsole.exe` ("Rainier Test Suite : 2 Run, 0 Failed"), and
+`L3-enum-field-form-downgrade-guard` ran green too; the corpus records
+(`eval/corpus/runs/2026-08-31T2*__*__278eee3.json`) carry
+`systest: {"ran": true, "passed": true}` and `score.systest: 1`. **No case carries
+`systest_pending` any more**, and 0 of the 120 cases are `golden_pending`.
+`L2-tdd-red-green-cycle` — the case that proves the loop rather than the authoring
+— can now be authored honestly, which it could not be while no test had ever
+executed. That is the only item this entry still points at.
+
+<details>
+<summary>The original entry, kept for the diagnosis history</summary>
 
 **Status:** open, parked as its own topic 2026-08-30. Not a code change; nothing in
 this repo can close it.
@@ -33,6 +64,7 @@ this repo can close it.
 Their goldens are captured and they build clean; what has never run is the live
 SysTest, which is the runtime-correctness half of the oracle (§6.3). Until it does,
 those cases prove that the code COMPILES and nothing more.
+*[2026-08-31] All four have now run and passed; none carries `systest_pending`.*
 
 **Why it is stuck — and why the recorded reason was wrong.** `SysTestConsole.exe`
 now starts (two earlier assembly faults were fixed by config edits, each with a
@@ -59,6 +91,8 @@ tool's — and an assistant's sandbox classifier blocks it outright, correctly.
 retype), re-run `run_systest_class`. If it then connects, flip the four cases'
 `systest_pending` to false as each one actually runs, and record the runs in the
 corpus.
+*[2026-08-31] Applied, and the trigger fired: all four ran, all four flags are
+false, and the corpus records are committed.*
 
 **What was done instead.** `run_systest_class` performs the comparison itself and
 names the settings that differ, never printing the password — only "the shipped
@@ -71,6 +105,152 @@ not sent hunting a password that was never wrong.
 for the AOS service account, and the runner may execute as a different user. If it
 starts and still fails after the copy, that — not the config — is the real blocker,
 and running from Visual Studio Test Explorer stays the fallback.
+*[2026-08-31] It can. The unknown is closed.*
+
+</details>
+
+---
+
+## v3 breadth pack — deferred, each with a probe result already in hand
+
+**Status:** deferred 2026-08-31 · **Area:** `src/tools/knowledge/xppKnowledge.ts`
+
+**What.** Four knowledge topics the v3 map identified as real gaps (zero hits in
+the knowledge base) and that this round did NOT ship, because the P1 half of the
+plan filled the day:
+
+- `email-sending` — `SysMailerMessageBuilder` (setFrom/addTo/addCc/setSubject/
+  setBody/addAttachment) + `SysMailerFactory::sendNonInteractive`. **The shape
+  already compiled** in probe `MailerBuilder`.
+- `file-io` — widen the read-only `file-readers` topic: write CSV, XLSX through
+  `OfficeOpenXml.ExcelPackage`, and `File::SendFileToUser(stream, name)` for the
+  download. Both compiled (probes `ClrExcel`, `FileSendToUser`).
+- `http-json-xml` — `System.Net.Http.HttpClient`, `FormJsonSerializer`,
+  `Newtonsoft.Json.Linq`, `System.Text.RegularExpressions.Regex`. All four
+  resolve in the sandbox model (probe `ClrHttp2`, `ClrNewtonsoft`). Note the trap
+  that probe found: `client` is a RESERVED WORD, so it cannot name the variable.
+- `tax-framework` — TaxTrans/TaxTable/TaxGroup/TaxDirection and the legacy `Tax*`
+  posting classes. This one is the only one that needs **domain review by the
+  owner** before it ships; it is also the domain of the only live user in the
+  usage data.
+
+**Why deferred.** Each is P3 on the demand evidence mined for the v3 coverage
+round (1,593 real MCP calls, since-deleted plan file): the
+daily loop is table/form/enum/label extension work, and the knowledge payload is
+a token budget where every rule competes with every other rule for attention.
+
+**Trigger.** A corpus record or a real session that needed one of them, or the
+owner asking for the tax pack.
+
+**Sketch.** The API names are verified; write the entries straight from the probe
+JSON (`npm run oracle:probe -- --file scripts/oracles/probes/coverage-v3.ts`) and
+capture the audit snapshot afterwards.
+
+---
+
+## AxReport write operations — deferred on the byte budget
+
+**Status:** deferred 2026-08-31 · **Area:** `src/tools/write/modifyD365File.ts`
+
+**What.** There is no `d365fo_file` operation for an AxReport. A dataset field, a
+parameter or a column cannot be added to a report this server itself scaffolded —
+every report recipe ends with "open the Report Designer". Proposed:
+`refresh-report-dataset` (fields ← the DP's temp table), `add-report-parameter`,
+`add-report-column`, all refusing any design the scaffold does not own.
+
+**Why deferred.** Three operation enum values cost ~60–80 ListTools chars against
+~64 of headroom, so it can only ship by trimming another tool's schema in the
+same change. Folding the three into one `report-design` operation with an
+`action` op-spec parameter (~25 chars) is the cheaper shape and is the one to
+build.
+
+**Why it is not simply "use the designer".** The designer is unavoidable for
+LAYOUT. Refreshing a dataset after adding a field to the temp table is not
+layout — it is bookkeeping the tool already has every input for, and getting it
+wrong is silent (`Field group 'X' does not exist` is the same class of failure,
+and XML009 now catches that one).
+
+**Trigger.** Demand — a session that adds a field to a scaffolded report's temp
+table and then cannot surface it — or headroom freed by a measured trim.
+
+**Risk.** A malformed RDL is not caught by a build; it fails in the SSRS renderer
+at run time. Refusing foreign designs is what keeps that bounded.
+
+---
+
+## RPT003 (report temp-table connection binding) — REJECTED on measurement
+
+**Status:** **rejected 2026-09-02** · **Area:** `src/tools/analysis/validateXpp.ts`
+
+**What was proposed.** The v4 plan (§6.1, G-20) suspected the report scaffold of a
+silent run-time defect: it always emits a `TableType=TempDB` temp table and never
+emits `setConnection`, so if shipped data providers bind their staging buffer to
+the report's own connection, every scaffolded report would build clean, run, and
+render EMPTY. RPT003 would have flagged a DP that writes a temp table without
+binding.
+
+**The premise was wrong, and the census says so plainly.** Over this install:
+
+| base | shipped classes | call `setConnection` |
+|---|---:|---:|
+| `SrsReportDataProviderBase` (what the scaffold emits by default) | 13 | **0** |
+| the pre-processed staging bases | 331 | 65 |
+
+So binding is not a plain-DP concern at all, and the scaffold's default path
+already matches every shipped example. **There is no scaffold bug to fix.**
+
+**And the rule cannot be written for the case that IS real.** Among pre-processed
+DPs the association with set-based writes is strong — `insert_recordset` appears
+in 38% of binders against 9% of non-binders (4.4x), `update_recordset` 22% vs 5%,
+`delete_from` 23% vs 5% — but association is not a rule. Counting the exact
+population an RPT003 would fire on:
+
+```
+pre-processed DPs                                    : 369
+  …with a set-based write INTO a Tmp buffer          :  62
+  …and NO setConnection anywhere (RPT003 would fire) :  31
+```
+
+**Thirty-one shipped Microsoft classes**, i.e. half of the very category the rule
+claims to judge. That fails this repo's standing bar — Microsoft's code compiles
+and ships, so an error we raise on it is ours — and even as a warning a check that
+is right about 31 files and wrong about 31 others has no discriminating power. It
+is a coin flip with a confident voice.
+
+**What shipped instead.** The finding is real and belongs in knowledge, where a
+conditional truth is allowed to be conditional: `ssrs-rdp-preprocess` now carries
+the numbers, names `setConnection(this.parmUserConnection())` as the FIRST thing
+to check when a pre-processed report renders empty with no error, states that a
+plain `SrsReportDataProviderBase` does not need it, and says out loud that no
+textual rule separates the cases. A diagnosis is useful without being predictive;
+a validator rule is not.
+
+**What would reopen it.** A discriminator that actually separates the two
+populations — most plausibly something in the metadata (the staging table's own
+properties) rather than in the X++ — measured to fire on few or none of those 31.
+Not a re-reading of the association above: that number is the argument.
+
+## DECL001 / CONV001 — not built, and the evidence is against them
+
+**Status:** **rejected 2026-08-31** · **Area:** `src/tools/analysis/validateXpp.ts`
+
+**What was proposed.** Two error-severity rules carried over from the v2.1
+coverage plan (deleted 2026-09-01): DECL001 for
+local-variable shadowing, CONV001 for the implicit conversions the compiler
+refuses (`int i = 1.5`, `str s = 1`, `"a" + 1`).
+
+**Why rejected rather than deferred.** Both are one-pass regex approximations of
+a question that needs scope, and the first full-install sweep of this repo's
+rules is a direct measurement of what that costs: 99 error-severity findings on
+code that compiles, 75 of them from exactly this shape of rule (ATTR001 and
+SEL010 — pattern matching where the language wanted context). Meanwhile the
+compiler's own messages for both cases are exact and arrive at the same moment a
+build would: "A local variable named 'i' cannot be declared in this scope…" and
+"…loses range and precision". The rule would add risk without adding an answer.
+
+**What would reopen it.** A corpus record showing an agent shipping one of these
+and being unable to read the compiler's answer — not the observation that the
+rules would be easy to write.
 
 ---
 
@@ -223,3 +403,96 @@ reopen it on the grounds that it would now be easy to build.
 - Maintenance cost of a second codebase/release pipeline; VS Copilot LM/MCP APIs
   are still moving. Keep the server fully usable without the VSIX (graceful
   degradation), never make it a hard dependency.
+
+---
+
+## X++ coverage v4 non-goals and decisions — recorded here when the plan file was deleted
+
+**Status:** deferred / non-goal 2026-09-03 · **Area:** knowledge, validator, eval
+taxonomy
+
+**What.** `docs/XPP_LANGUAGE_COVERAGE_PLAN.md` (the v4 plan) was deleted on
+2026-09-03 under its own lifecycle rule: all phases H0-H6 shipped
+(PRs #999-#1006), core coverage 74/74 and total 124/124, 0 `golden_pending`, the
+full-install validator sweep clean. Most of what it carried now lives in the
+knowledge entries, the taxonomy notes, the rule doc comments and the PR bodies.
+These items had no home anywhere else and would otherwise have gone with it:
+
+**Non-goals, carried forward and still rejected:**
+
+- ALM / LCS / pipelines / deployable packages / TFVC-git workflow / version-update
+  guidance — outside the copilot's tool reach; a knowledge entry would be prose
+  the model already has.
+- Extensible controls, embedded Power Apps / Power BI, SSRS sub-reports, Financial
+  Reporting, Document Routing Agent internals, Key Vault / Blob SDKs — carried
+  from v3, still no demand.
+- Domain packs (tax, fixed assets, projects, HRM, retail, production, MRP, TMS) —
+  tax only on the owner's ask (its own entry above); the rest have zero demand and
+  multi-day cost each.
+- RSAT, Task recorder, performance / load tests — tooling outside the MCP surface.
+- Code-quality heuristics (complexity, method length) and any rule needing scope —
+  the standing "no AST" decision. `DECL001`, `CONV001`, `EVT001`, the generics
+  rule, the `*=` rule and the buffer-select rule stay rejected.
+- New MCP tools, or new published enum values not paid for by a measured trim.
+
+**Rules rejected on measurement** (do not re-propose without new evidence):
+
+- **RPT003** — 31 shipped classes would have fired, roughly half the category it
+  judged.
+- **`add-column` on `report-design`** — placing a column edits the RDL, whose
+  failures surface only in the SSRS renderer. The reasoning is in
+  `src/tools/write/reportDesignXml.ts`; the op-spec tells the caller.
+- **A "scaffold owns this design" fingerprint** — a property of the FILE's
+  provenance, so it would refuse every report scaffolded before the marker
+  existed (the committed goldens included) and accept a hand-written one that
+  acquired it. The safety guarantee is a property of the OPERATION instead.
+
+**Eval cases deliberately NOT authored.** §5.5 named ten; six of them describe
+shapes the catalog already covers with recorded SysTest runs — `L2-coc-extension`,
+`L2-coc-inherited-method`, `L2-event-handler-basic`, `L3-form-event-handler-class`,
+`L3-sysoperation-dialog-attributes`, `L3-sysoperation-query-parameter-batch`,
+`L3-data-entity-extension-field`. Duplicates would add catalog weight and no
+evidence. **Trigger to revisit:** a corpus record showing one of those shapes
+failing in a way the existing case does not exercise.
+
+**One defect noted and not fixed.** `remove-field` leaves the field's
+`AxTableFieldGroupField` entry behind, so a table can be left referencing a field
+that no longer exists. Small, real, and wants its own change.
+
+## X++ coverage v3 non-goals — recorded here when the plan file was deleted
+
+**Status:** deferred / non-goal 2026-09-01 · **Area:** knowledge, generator, eval
+taxonomy
+
+**What.** `docs/XPP_LANGUAGE_COVERAGE_PLAN.md` was deleted on 2026-09-01 under its
+own lifecycle rule (the capture wave finished: 0 of 120 cases `golden_pending`,
+0 `systest_pending`, core coverage back to 100%). Its D2/D3/D4 decisions already
+live above as their own entries. These four items had no entry anywhere, so they
+would otherwise have been lost with the file:
+
+- **Domain breadth left out on purpose:** extensible controls, SSRS sub-reports,
+  Power BI embedded, Key Vault / Blob SDK, Financial Reporting. Each is a
+  multi-day domain with no demand behind it in the 1,593 real MCP calls that
+  round was mined from, where the daily loop is table/form/enum/label extension
+  work. **Trigger:** a corpus record or a real session that needed one.
+- **The `anytype` run-time re-typing probe (P2)** — the one language question the
+  compiler cannot answer, because the behaviour is a run-time one. It was blocked
+  while no SysTest had ever executed; since the runner reached the database
+  (2026-08-31) it is merely **unwritten**. **Sketch:** a SysTest that assigns two
+  different types into one `anytype` and asserts what `typeOf()` reports at each
+  point; capture it as a golden the way the runtime-tagged cases are.
+- **Rejected on compiler evidence, and staying rejected:** a generics rule, a
+  rule for `*=` / `/=`, `EVT001`, and the buffer-select-expression rule. The
+  compiler accepts (or diagnoses exactly) what each of them would have flagged.
+  **What would reopen one:** a probe result contradicting the one that dropped it,
+  not a re-reading of the docs.
+- **The six unpublished `generate_object` patterns stay unpublished** — declined
+  on schema budget: `generate_object` was 5 calls in 1,593.
+  `tests/tools/patternEnumParity.test.ts` keeps every difference an explicit,
+  justified entry, so the gap cannot drift back into an accident.
+
+**Why it is worth a backlog entry at all.** The plan's durable outputs are
+`eval/COVERAGE.md`, `eval/README.md`, the goldens' READMEs and CHANGELOG 1.16.0.
+Those record what SHIPPED. A non-goal that is only recorded in a deleted file is
+indistinguishable from an idea nobody had, which is the failure this file was
+restored to prevent.

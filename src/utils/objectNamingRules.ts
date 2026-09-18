@@ -46,17 +46,27 @@ const EXTENSION_COUNTERPART: Record<string, string> = {
 };
 
 /**
- * A name that can only be an extension: `Base.PrefixExtension` (element extensions) or
+ * A name that can only be an extension: `Base.Suffix` (element extensions) or
  * `BasePrefix_Extension` (class CoC).
+ *
+ * The suffix does NOT have to spell "Extension". This pattern used to require it
+ * (`\w*Extension$`), which made `NumberSeqModule.ConDemoRent` — a perfectly
+ * ordinary enum-extension name — unreadable as an extension, so it was validated
+ * as a plain enum, refused for containing a dot, and "corrected" to
+ * `ConNumberSeqModule.ConDemoRent`: a prefix on the BASE, naming an object that
+ * does not exist (#983). Shipped metadata settles it — `AppCopilotAgentType.Foundation`
+ * and `ModuleAxapta.ApplicationCommon` are Microsoft's own AxEnumExtensions.
+ *
+ * A dot is unambiguous: no non-extension AOT element name may contain one.
  */
-const DOTTED_EXTENSION = /^[A-Za-z]\w*\.\w*Extension$/;
+const DOTTED_EXTENSION = /^[A-Za-z]\w*\.[A-Za-z]\w*$/;
 const UNDERSCORE_EXTENSION = /^[A-Za-z]\w*_Extension$/;
 
 /**
  * Reinterpret `objectType` when the proposed name is unmistakably an extension.
  *
  * Callers reach for the base type — "is this a valid *form* name?" — while proposing
- * `AslFinCore_TaxTransReportChangeLog.AslFinSKExtension`. Validated as a plain form
+ * `ConCore_TaxTransReportChangeLog.ConSKExtension`. Validated as a plain form
  * that trips the "non-extension objects must not contain underscores" rule and comes
  * back as a hard ERROR, which is both wrong and a wasted round trip: run f2e7b71a
  * asked with `form`, was refused, and asked again with `form-extension` (T56 → T59).
@@ -88,6 +98,18 @@ export interface ObjectNamingInput {
   baseObjectName?: string;
   modelPrefix?: string;
   modelName?: string;
+  /**
+   * Whether the object an extension EXTENDS exists, already answered by a caller
+   * that has a better source than this one.
+   *
+   * These rules can only probe the SYMBOL INDEX, while `search`, `get_object_info`
+   * and the write path all prefer the C# bridge. On an instance indexed with
+   * `extractMode: "custom"` the index deliberately holds only custom models, so
+   * the index answer for a Microsoft base enum is "not found in symbol index —
+   * ensure it's indexed": false, and advice that re-indexing can never satisfy.
+   * `undefined` keeps the index probe, which is the only option without a bridge.
+   */
+  baseObjectExists?: boolean;
 }
 
 /** Every verdict the rules reach, before anything decides how to print it. */
@@ -134,12 +156,25 @@ export async function checkObjectNaming(
     const reinterpreted = reinterpretExtensionType(args.objectType, name);
     if (reinterpreted) {
       args.objectType = reinterpreted.objectType as typeof args.objectType;
-      // The base is the part before the dot; supplying it here keeps the
-      // "baseObjectName is required for extension types" check from firing on a
-      // name that spells its base out.
-      if (!args.baseObjectName && name.includes('.')) {
-        args.baseObjectName = name.slice(0, name.indexOf('.'));
-      }
+    }
+
+    // The base is the part before the dot. Deriving it only after a
+    // reinterpretation punished the caller who named the type CORRECTLY:
+    // `objectType="enum-extension", proposedName="NumberSeqModule.ConDemoRent"`
+    // answered "baseObjectName is required … and it could not be derived", while
+    // the same name under `objectType="enum"` was understood. A dotted name
+    // states its base whichever way the type arrived (#983).
+    if (!args.baseObjectName && DOTTED_EXTENSION.test(name)) {
+      args.baseObjectName = name.slice(0, name.indexOf('.'));
+    }
+
+    // The same courtesy for the UNDERSCORE form. `MyThing_Extension` states its
+    // base just as plainly as `MyThing.ConExtension` does, and without this the
+    // check demanded a parameter the caller had no way to send: `prepare` does
+    // not publish baseObjectName at all, so its answer was
+    // "baseObjectName is required" with no route to supplying one.
+    if (!args.baseObjectName && /_Extension$/i.test(name)) {
+      args.baseObjectName = name.slice(0, name.length - '_Extension'.length);
     }
 
     const isExtension = EXTENSION_TYPES.has(args.objectType);
@@ -219,7 +254,14 @@ export async function checkObjectNaming(
       const baseObjectName = args.baseObjectName;
 
       if (!baseObjectName) {
-        errors.push(`baseObjectName is required for extension types (${args.objectType}).`);
+        // Say what the caller can DO. Not every caller publishes this parameter —
+        // prepare does not — so a bare "it is required" is unactionable there.
+        errors.push(
+          `baseObjectName is required for extension types (${args.objectType}), and it could not be ` +
+          `derived from "${name}". Name the extension after its base — "MyBase_Extension" or ` +
+          `"MyBase.${'${'}ModelToken}Extension" — or ask the check directly, which does accept it: ` +
+          `validate_object_naming(objectType="${args.objectType}", proposedName="${name}", baseObjectName="<base>").`,
+        );
       } else {
         if (args.objectType === 'class-extension') {
           // prefix style → {Base}{Prefix}_Extension; model-name style → {Base}_{ModelToken}_Extension
@@ -299,11 +341,33 @@ export async function checkObjectNaming(
                 `Extension base (before '.') must exactly match baseObjectName.\n  Expected: ${baseObjectName}.xxx\n  Got: ${basePart}.xxx`,
               );
             }
-            if (!extPart.endsWith('Extension')) {
-              errors.push(
-                `Extension suffix (after '.') must end with 'Extension'.\n  Expected: ${extensionInfix}Extension\n  Got: ${extPart}`,
+            // Both suffix forms are legal AOT, and the platform's own metadata is
+            // the evidence: a census of all 214 packages in PackagesLocalDirectory
+            // finds 1,453 of 2,563 dotted extension names — 57 % — NOT ending in
+            // "Extension" (CustTable.AdvancedQualityManagement,
+            // AppCopilotAgentType.Foundation, ModuleAxapta.ApplicationCommon).
+            // They use the bare model token, which is what
+            // EXTENSION_NAMING_STYLE=model-name produces and what the branch above
+            // treats as correct. The same fact was a warning under one style and a
+            // hard ERROR under the other (#986), and `prepare` printed that ❌ for a
+            // name d365fo_file writes and xppc builds — applyObjectPrefix has always
+            // returned a bare model-token suffix unchanged ("Bare model-name suffix
+            // — return as-is"), so the checker was refusing what the writer supports.
+            //
+            // The house convention still shows: a suffix that is NEITHER form gets a
+            // warning naming both. What is gone is calling a shipped, buildable name
+            // an error and offering to rename it.
+            const isInfixForm = extPart.endsWith('Extension');
+            const isModelTokenForm =
+              !!modelToken && extPart.toLowerCase() === modelToken.toLowerCase();
+            if (!isInfixForm && !isModelTokenForm) {
+              warnings.push(
+                `Extension suffix (after '.') is neither of the two forms the platform uses.\n` +
+                `  Expected: ${extensionInfix}Extension` +
+                (modelToken ? ` (this model's style) or ${modelToken} (bare model name)` : '') +
+                `\n  Got: ${extPart}`,
               );
-            } else if (extensionInfix && !extPart.toLowerCase().startsWith(extensionInfix.toLowerCase())) {
+            } else if (isInfixForm && extensionInfix && !extPart.toLowerCase().startsWith(extensionInfix.toLowerCase())) {
               warnings.push(
                 `Extension suffix should start with model "${modelName || '(unknown)'}"'s infix "${extensionInfix}".\n  Current: ${extPart}\n  Recommended: ${extensionInfix}Extension`,
               );
@@ -321,14 +385,24 @@ export async function checkObjectNaming(
                 ? ['enum']
                 : ['edt'];
 
-        // Case-insensitive: the base object may be spelled with different casing
-        // than the canonical AOT name (#686).
-        const baseExists = lookupSymbolNocase(db, baseObjectName, dbTypes);
-
-        if (!baseExists) {
+        // A caller with a metadata provider has already answered this better than
+        // the index can — see ObjectNamingInput.baseObjectExists.
+        if (args.baseObjectExists === false) {
           warnings.push(
-            `Base object "${baseObjectName}" not found in symbol index for types: ${dbTypes.join(', ')}. Ensure it's indexed.`,
+            `Base object "${baseObjectName}" does not exist as a ${dbTypes.join('/')} ` +
+            `(checked against the metadata provider). An extension of a missing object cannot build.`,
           );
+        } else if (args.baseObjectExists === undefined) {
+          // Case-insensitive: the base object may be spelled with different casing
+          // than the canonical AOT name (#686).
+          const baseExists = lookupSymbolNocase(db, baseObjectName, dbTypes);
+          if (!baseExists) {
+            warnings.push(
+              `Base object "${baseObjectName}" not found in the symbol index for types: ${dbTypes.join(', ')}. ` +
+              `If the base is a standard Microsoft object this may just mean the index is scoped to custom ` +
+              `models (extractMode "custom") — confirm with get_object_info before treating it as missing.`,
+            );
+          }
         }
       }
     }
