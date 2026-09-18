@@ -1,14 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Golden metadata for eval case: L3-sysoperation-dialog-attributes (artifact 1 of 3: DataContract - the whole dialog, from attributes)
+  Captured: 2026-08-31, server SHA: 278eee3
+  Platform: xppc 7.0.7996.33
+-->
 <AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
 	<Name>ConDemoRebateContract</Name>
 	<SourceCode>
 		<Declaration><![CDATA[
 /// <summary>
-/// Parameters for the customer rebate run. Everything the dialog shows comes
-/// from the attributes below; there is no dialog code and no UI builder.
+/// Parameters of the customer rebate run.
 /// </summary>
+/// <remarks>
+/// Everything the dialog shows comes from the attributes on this contract:
+/// there is no dialog code and no UI builder.
+/// </remarks>
 [DataContractAttribute,
- SysOperationGroupAttribute('Selection', "@SYS101239", '1')]
+ SysOperationGroupAttribute('Selection', "@SYS152429", '1')]
 public class ConDemoRebateContract implements SysOperationInitializable
 {
     private CustGroupId custGroup;
@@ -22,8 +30,12 @@ public class ConDemoRebateContract implements SysOperationInitializable
 				<Name>initialize</Name>
 				<Source><![CDATA[
     /// <summary>
-    /// Fills the defaults before the dialog is shown.
+    /// Fills the defaults before the generated dialog is shown.
     /// </summary>
+    /// <remarks>
+    /// SysOperationInitializable: the framework calls this before it builds the
+    /// dialog, so the defaults are already in the controls when the user sees them.
+    /// </remarks>
     public void initialize()
     {
         includeBlocked = NoYes::No;
@@ -31,16 +43,19 @@ public class ConDemoRebateContract implements SysOperationInitializable
 
 ]]></Source>
 			</Method>
-
 			<Method>
 				<Name>parmCustGroup</Name>
 				<Source><![CDATA[
     /// <summary>
-    /// Gets or sets the cust group value.
+    /// Gets or sets the customer group the rebate run is limited to.
     /// </summary>
-    /// <param name="_custGroup">The cust group (CustGroupId).</param>
-    /// <returns>The CustGroupId result.</returns>
-    public CustGroupId parmCustGroup(CustGroupId _custGroup = custGroup)
+    /// <param name = "_custGroup">The customer group.</param>
+    /// <returns>The customer group.</returns>
+    [DataMemberAttribute('CustGroup'),
+        SysOperationLabelAttribute(literalStr("@SYS11904")),
+        SysOperationGroupMemberAttribute('Selection'),
+        SysOperationDisplayOrderAttribute('1')]
+        public CustGroupId parmCustGroup(CustGroupId _custGroup = custGroup)
     {
         custGroup = _custGroup;
 
@@ -49,16 +64,22 @@ public class ConDemoRebateContract implements SysOperationInitializable
 
 ]]></Source>
 			</Method>
-
 			<Method>
 				<Name>parmIncludeBlocked</Name>
 				<Source><![CDATA[
     /// <summary>
-    /// Gets or sets the include blocked value.
+    /// Gets or sets whether blocked customers take part in the run.
     /// </summary>
-    /// <param name="_includeBlocked">The include blocked (NoYes).</param>
-    /// <returns>The NoYes result.</returns>
-    public NoYes parmIncludeBlocked(NoYes _includeBlocked = includeBlocked)
+    /// <param name = "_includeBlocked">Whether blocked customers are included.</param>
+    /// <returns>Whether blocked customers are included.</returns>
+    /// <remarks>
+    /// The display order is a STRING, not an int.
+    /// </remarks>
+    [DataMemberAttribute('IncludeBlocked'),
+        SysOperationLabelAttribute(literalStr("@SYS103795")),
+        SysOperationGroupMemberAttribute('Selection'),
+        SysOperationDisplayOrderAttribute('2')]
+        public NoYes parmIncludeBlocked(NoYes _includeBlocked = includeBlocked)
     {
         includeBlocked = _includeBlocked;
 
@@ -67,16 +88,20 @@ public class ConDemoRebateContract implements SysOperationInitializable
 
 ]]></Source>
 			</Method>
-
 			<Method>
 				<Name>parmCallerRecId</Name>
 				<Source><![CDATA[
     /// <summary>
-    /// Gets or sets the caller rec id value.
+    /// Gets or sets the record the run was started from.
     /// </summary>
-    /// <param name="_callerRecId">The caller rec id (RecId).</param>
-    /// <returns>The RecId result.</returns>
-    public RecId parmCallerRecId(RecId _callerRecId = callerRecId)
+    /// <param name = "_callerRecId">The record the run was started from.</param>
+    /// <returns>The record the run was started from.</returns>
+    /// <remarks>
+    /// On the contract, but not in the dialog: the caller sets it in code.
+    /// </remarks>
+    [DataMemberAttribute('CallerRecId'),
+        SysOperationControlVisibilityAttribute(false)]
+        public RecId parmCallerRecId(RecId _callerRecId = callerRecId)
     {
         callerRecId = _callerRecId;
 
@@ -85,17 +110,16 @@ public class ConDemoRebateContract implements SysOperationInitializable
 
 ]]></Source>
 			</Method>
-
 			<Method>
 				<Name>validate</Name>
 				<Source><![CDATA[
     /// <summary>
-    /// Refuses a run without a customer group.
+    /// Checks that the dialog holds usable parameters.
     /// </summary>
     /// <returns>true when the parameters are usable; otherwise false.</returns>
     /// <remarks>
-    /// Returning false here keeps the dialog open. checkFailed writes the
-    /// reason to the infolog and returns false itself.
+    /// Returning false keeps the dialog open. checkFailed writes the reason to
+    /// the infolog and returns false itself.
     /// </remarks>
     public boolean validate()
     {

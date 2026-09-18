@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Golden metadata for eval case: L3-sysoperation-dialog-attributes (artifact 3 of 3: Controller - binds the service method)
+  Captured: 2026-08-31, server SHA: 278eee3
+  Platform: xppc 7.0.7996.33
+-->
 <AxClass xmlns:i="http://www.w3.org/2001/XMLSchema-instance">
 	<Name>ConDemoRebateController</Name>
 	<SourceCode>
@@ -28,7 +33,6 @@ public class ConDemoRebateController extends SysOperationServiceController
 
 ]]></Source>
 			</Method>
-
 			<Method>
 				<Name>main</Name>
 				<Source><![CDATA[
@@ -46,7 +50,6 @@ public class ConDemoRebateController extends SysOperationServiceController
 
 ]]></Source>
 			</Method>
-
 			<Method>
 				<Name>defaultCaption</Name>
 				<Source><![CDATA[
@@ -54,9 +57,9 @@ public class ConDemoRebateController extends SysOperationServiceController
     /// The caption of the generated dialog.
     /// </summary>
     /// <returns>The caption.</returns>
-    public ClassDescription defaultCaption()
+    protected ClassDescription defaultCaption()
     {
-        return "@SYS101239";
+        return "@SYS345067";
     }
 
 ]]></Source>

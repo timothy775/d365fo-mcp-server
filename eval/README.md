@@ -104,6 +104,20 @@ Two consequences for triage:
   captured from defective output can never fail on the thing its case exists to
   catch — score the live behaviour (a chain walk, a SysTest), not just the shape.
 
+## Corpus integrity
+
+`loadJsonRecords` **silently skips** a record it cannot parse — its own doc
+comment says so and asks the caller to compare the returned count against the
+directory listing. Nobody did, so a `TOOL_DEFECT` record written on 2026-07-07
+(`L4-headerlines-document-slice`) sat unreadable for eight weeks: invisible to
+every cluster, report and held-out check, which were all computed over a corpus
+that was quietly one run short. The cause was a writer emitting Windows paths
+into JSON without escaping the backslashes.
+
+`tests/eval/corpusRecordsParse.test.ts` is the check that doc comment asked for.
+A BOM is a different, already-handled hazard — `stripBom` covers it, and 52
+records rely on that.
+
 ## Improver toolchain
 
 `npm run eval:clusters` (prioritized failure clusters) · `eval:report` (corpus
@@ -313,8 +327,9 @@ core 44/44. The three newest families are the ones that matter — `remove-contr
 audit PR to close real defects, and the catalog had nothing to say about any of
 them. Four cases now cover the first three families end-to-end
 (`L2-form-control-removal-lifecycle`, `L2-object-delete-and-entry-point-cleanup`,
-`L2-bp-suppression-lifecycle`, `L2-entity-query-range-roundtrip`, all
-`golden_pending` and tagged `write-op-coverage`). They land in COVERAGE.md's
+`L2-bp-suppression-lifecycle`, `L2-entity-query-range-roundtrip`, tagged
+`write-op-coverage`; all four goldens are captured as of the 2026-08-31 wave).
+They land in COVERAGE.md's
 **Orphans** list, because no leaf claims them — which is the honest reading:
 until the taxonomy grows a write-operation axis, a missing op cannot make the
 percentage fall. Still uncovered by any case: `replace-all-fields`,
@@ -333,11 +348,23 @@ only as a recovery hint) or at `get_form_info` / `get_label_info` /
 `find_object`, which were never tool names at all, and 7 specs under-declared
 their own golden.
 
-**Warehouse-app screen cases — what has and has not been run (2026-08-30).**
-Four cases now cover the mobile device (scanner) surface:
-`L3-processguide-flow-slice`, `L2-processguide-page-control`,
-`L3-legacy-workexecutedisplay-extend` and `L3-warehouse-scan-resolve-slice`.
-All four are `golden_pending`. What ran here, VM-free, and what it proved:
+**Warehouse-app screen cases — CAPTURED 2026-08-30 (`09dfcc2`, PR #970).** All
+four ran on the VM: `L3-processguide-flow-slice`,
+`L2-processguide-page-control`, `L3-legacy-workexecutedisplay-extend` and
+`L3-warehouse-scan-resolve-slice` are `golden_pending: false`, their goldens are
+committed under `eval/goldens/`, and each has a corpus record scoring `build: 1`
+and `bp_clean: 1`. Nothing is owed on them.
+
+*(One neighbour is not quite finished: `L3-warehouse-work-slice` has a captured
+golden and `build: 1`, but its corpus record carries `bp_clean: null` — BP never
+ran for it. That is a real, small gap, not a claim to fix in prose.)*
+
+The dry-run table below is kept because it is what could honestly be claimed
+BEFORE the capture, and because the asymmetry it describes is the point: a
+grounding test proves the ground truth is reachable, and nothing more.
+
+<details>
+<summary>What ran VM-free first, and what it proved (2026-08-30, before the capture)</summary>
 
 | Ran | Result |
 |---|---|
@@ -347,31 +374,34 @@ All four are `golden_pending`. What ran here, VM-free, and what it proved:
 | `npm run eval:knowledge-audit` | 0 refs outside the audited snapshot — the new topics name AOT elements in prose only, so no re-capture is owed |
 | `npm run eval:coverage -- --check` | core 100%, total 98/100 — the two new leaves are the visible gap |
 
-**Not run, and why:** the implement → build → score → record cycle needs the
-D365FO VM (full-mode server, C# bridge, Contoso model, `xppc`). This work was
-done in a cloud session with no VM attached, so there is no build result, no BP
-result, no golden and no corpus record for these four cases — and none was
-written, because a corpus record asserts that a run happened. `eval-run` on the
-VM is what closes them; the grounding dry-run above is what can be honestly
-claimed until then.
+**Why nothing more could be claimed then:** the implement → build → score →
+record cycle needs the D365FO VM (full-mode server, C# bridge, sandbox model,
+`xppc`). That authoring session had no VM attached, so there was no build result,
+no BP result, no golden and no corpus record — and none was written, because a
+corpus record asserts that a run happened. `eval-run` on the VM is what closed
+them, the next day.
+
+</details>
 
 Standing queues:
 
-- **Capture the pending goldens (VM).** Cases with `golden_pending: true` have
-  been authored but never run; coverage counts them as uncovered because they
-  prove nothing until captured. `eval-run` captures each on the VM — flip the
-  flag as each lands.
+- ~~**Capture the pending goldens (VM).**~~ **CLOSED 2026-08-31.** Cases with
+  `golden_pending: true` had been authored but never run, and coverage counted
+  them as uncovered because they prove nothing until captured. **0 of the 120
+  cases are `golden_pending` today** — the queue is empty.
 
-  Nine of them arrived together on 2026-08-30 with the compiler-verified language
-  work, and they are why core coverage reads 86.4% rather than 100%:
+  The last nine arrived together on 2026-08-30 with the compiler-verified
+  language work, and they were why core coverage read 86.4% rather than 100%:
   `L2-runtime-functions-arity`, `L2-implicit-conversions`,
   `L2-select-find-options-joins`, `L2-args-record-caller`,
   `L2-display-edit-methods`, `L3-form-event-handler-class`,
   `L3-sysoperation-dialog-attributes`, `L2-systest-authoring-basic`,
-  `L3-report-dataset-extension`. Each has a knowledge entry written from a
-  compiler probe and a tool path that can produce it; what none of them has yet is
-  a build that proves the two agree. The number is supposed to fall when the
-  taxonomy grows honestly — it climbs back one captured golden at a time.
+  `L3-report-dataset-extension`. Each had a knowledge entry written from a
+  compiler probe and a tool path that could produce it; what none of them had was
+  a build proving the two agree. They now do. The number is supposed to fall when
+  the taxonomy grows honestly — it climbed back one captured golden at a time.
+  Re-open this queue the moment `eval-author` drafts the next case, which starts
+  life `golden_pending: true` by design.
 - **Coverage closure loop** (~2–4 leaves/week): `eval-author` drafts a case for
   each leaf missing **E** → `eval-run` captures the golden → MODEL_ERROR
   clusters flow through `knowledgeFeedback` into proposed knowledge entries
@@ -413,10 +443,61 @@ Blocked / declined (not planned):
   tool's. `run_systest_class` now performs that comparison itself and reports which
   settings differ (never the password — only "placeholder" or "set, N chars"), so the
   next reader is not sent hunting a password again.
-  The four cases stay `systest_pending: true` until that is applied
-  (`L2-coc-extension`, `L3-batch-basic`, `L2-event-handler-basic`,
-  `L3-enum-field-form-downgrade-guard`). `vstest.console.exe` +
-  `RunnableDropSysTest.TestAdapter.dll` discovers zero tests: still a dead end.
+  **Applied and verified 2026-08-31 — the runner CONNECTS.** The owner copied the
+  four values; `compareSysTestDataAccess` reports no drift, and
+  `SysTestConsole.exe /test:<a class that does not exist> /unattended` now answers
+
+      [SysTestSuite.Rainier Test Suite] [initial partition: [UT01], initial company: [DAT] …] Suite started
+      Rainier Test Suite : 0 Run, 0 Failed
+
+  instead of `Login failed`. That is real AOS session data, so the connection is
+  open — and it closes the one unknown this entry carried: the encrypted password
+  blob **is** decryptable by the account the runner executes as, so no second
+  blocker was hiding behind the first. **The runtime oracle is live for the first
+  time.**
+
+  **And a SysTest has now actually EXECUTED** (2026-08-31 12:05, during the
+  `L2-coc-extension` runtime run). `SysTestListenerXML` wrote real per-method
+  results with real timings:
+
+      EvalL2CocCarFactsTest.testCarFactsSummaryAppendsVerifiedSuffix   success  1704 ms
+      EvalL2CocCarFactsTest.testWrapperPreservesBaseValueForDifferentInput  success  390 ms
+
+  That is the first time in this project's history that X++ test code ran and
+  reported.
+
+  **The negative control then proved the oracle DISCRIMINATES** (2026-08-31 16:33).
+  A run of "success" only tells you the instrument is on, so `ConDemoOracleControlTest`
+  was built with three methods — one that must pass, one that fails an assertion,
+  one that fails by throwing — and run in a single pass:
+
+  | method | reported |
+  |---|---|
+  | `testControlPasses` | **true** |
+  | `testControlFailsByAssertion` | **false** — "DELIBERATE: … (Expected: 99; Actual: 2)" |
+  | `testControlFailsByThrow` | **false** — "An unknown exception caught! (Actual: DELIBERATE: …)" |
+
+  Suite `success="false"`, and `run_systest_class` returned `❌ Tests failed`. Both
+  failure modes are distinguished from the pass IN THE SAME RUN, so the result is
+  not a coincidence of ordering. `parseSysTestXml` was then run over that document
+  and returned the same 3 outcomes with both messages — so the repo's own reader
+  agrees with the runner, which is the half a passing run cannot show.
+
+  **The runtime oracle is therefore trustworthy, not merely alive** — and the
+  four cases that owed a run have now all made it. `L2-coc-extension`,
+  `L2-event-handler-basic` and `L3-batch-basic` each ran under
+  `SysTestConsole.exe` on 2026-08-31 and passed **2/2** ("Rainier Test Suite :
+  2 Run, 0 Failed"), and `L3-enum-field-form-downgrade-guard` ran green as well;
+  all four corpus records carry `systest: {"ran": true, "passed": true}` and
+  `score.systest: 1`. **No case carries `systest_pending` any more**, and 0 of the
+  120 cases are `golden_pending`. The sandbox was restored and a full build is
+  green. `L2-tdd-red-green-cycle` — the case that proves the loop rather than the
+  authoring — can now be authored honestly, which it could not be while no test
+  had ever executed. The one runtime-tagged case still scoring `systest: null` is
+  `L2-systest-authoring-basic`, whose most recent run (2026-08-30) predates the
+  config fix.
+  `vstest.console.exe` + `RunnableDropSysTest.TestAdapter.dll` discovers zero
+  tests: still a dead end, and no longer needed as a fallback.
 - CI-workflow half of the autonomous improver. The VM-free fix-brief generator
   (`npm run eval:brief`) is done; running Claude Code unattended on top of it in
   GitHub Actions was **explicitly declined** as a new autonomous-agent surface

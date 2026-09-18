@@ -16,6 +16,7 @@ import { createXppMcpServer } from './server/mcpServer.js';
 import { createStreamableHttpTransport } from './server/transport.js';
 import { XppSymbolIndex } from './metadata/symbolIndex.js';
 import { shouldWarmIndexes, warmIndexes, renderWarmupReport } from './metadata/indexWarmup.js';
+import { canIndexOffThread, indexMetadataOffThread } from './metadata/startupIndexing.js';
 import { XppMetadataParser } from './metadata/xmlParser.js';
 import { WorkspaceScanner } from './workspace/workspaceScanner.js';
 import { HybridSearch } from './workspace/hybridSearch.js';
@@ -29,6 +30,10 @@ import { setInitializeParams } from './utils/stdioSessionInfo.js';
 import { setModelObjectNameSource } from './utils/modelPrefixInference.js';
 import { trackBridgeStartup } from './bridge/bridgeReadiness.js';
 import { startLoopLagMonitor } from './utils/loopLag.js';
+import { warmPackagesRoots } from './utils/packagesRoot.js';
+import {
+  startupIndexBegan, setStartupIndexProgress, clearStartupIndexProgress,
+} from './utils/startupProgress.js';
 import { createShutdownCoordinator } from './utils/gracefulShutdown.js';
 import { box, kv, sectionTitle, statusLine, spread, c, glyph, sanitize, supportsUnicode, log, shortPath, startupWarnings } from './utils/terminalUi.js';
 import * as fs from 'fs/promises';
@@ -104,8 +109,36 @@ console.error = (...args: any[]) => {
   const isModuleDebugMessage = /^\[[\w\- ]+\]/.test(firstArg) && !hasErrorIndicator;
   if (!isModuleDebugMessage) {
     originalConsoleError(...args);
+    return;
   }
+  logFileOnly(args);
 };
+
+/**
+ * Write a line the client never sees to LOG_FILE anyway.
+ *
+ * Both filters below the tee — this one and the stdio console.log redirect — exist
+ * so the MCP client's stderr pane is not a scroll of operational chatter. They were
+ * dropping the line entirely, and since the tee sits on process.stderr, a dropped
+ * line never reached the log file either. So a session that hung for five and a
+ * half minutes on its first call left a log holding a start banner and nothing
+ * else: "Loading symbols…", "Database opened in Xs" and "Database loaded in N ms"
+ * are all log.step/log.ok, all suppressed, all the answer to what it was doing.
+ * Setting DEBUG_LOGGING=true was the only way to see them, and it turns the client
+ * pane into that same scroll. The file is the right place for both.
+ */
+function logFileOnly(args: any[]): void {
+  if (!_logStream) return;
+  try {
+    // Timestamped, unlike the tee'd lines: these are the progress lines, and the
+    // question they answer ("which phase took the five minutes?") is unanswerable
+    // without the clock. Time only — the banner above carries the date.
+    const at = new Date().toISOString().slice(11, 23);
+    _logStream.write(`[${at}] ` + args.map(a => (typeof a === 'string' ? a : String(a))).join(' ') + '\n');
+  } catch {
+    // Mirroring is best-effort; it must never take down the caller.
+  }
+}
 
 // ─── Global safety net ────────────────────────────────────────────────────────
 // An unhandled promise rejection terminates the Node process by default
@@ -327,8 +360,14 @@ async function initializeServices() {
       log.detail('or set METADATA_PATH and the server will index on startup');
 
       // If metadata path exists, index it
+      let metadataAccessible = false;
       try {
         await fs.access(METADATA_PATH);
+        metadataAccessible = true;
+      } catch {
+        log.warn('Metadata path not accessible — starting with empty index');
+      }
+      if (metadataAccessible) {
         log.step(`Indexing metadata from ${METADATA_PATH}` + glyph.ellipsis);
         serverState.statusMessage = 'Indexing metadata...';
         const modelNamesStr = process.env.CUSTOM_MODELS || 'CustomModel';
@@ -338,11 +377,39 @@ async function initializeServices() {
         // Single pass over all requested models — the FTS index is rebuilt once at the
         // end of the call, so looping per model would repeat a full-table rebuild.
         log.detail(`indexing ${modelNames.join(', ')}` + glyph.ellipsis);
-        await symbolIndex.indexMetadataDirectory(METADATA_PATH, modelNames);
-
-        log.ok(`Indexed ${symbolIndex.getSymbolCount().toLocaleString('en-US')} symbols from ${modelNames.length} model(s)`);
-      } catch {
-        log.warn('Metadata path not accessible — starting with empty index');
+        // Published so the "still loading" answer every symbol-backed tool gets
+        // meanwhile can say which model the build is on — see startupProgress.
+        startupIndexBegan();
+        try {
+          if (canIndexOffThread(DB_PATH, LABELS_DB_PATH)) {
+            // On a worker thread: the build is synchronous end to end, and inline
+            // it blocked the event loop for its whole duration — every tool call,
+            // get_workspace_info included, hung until it finished. dbReady is still
+            // held until it completes, so symbol-backed tools keep answering "still
+            // loading" rather than returning empty results; the loop stays free.
+            const { elapsedMs } = await indexMetadataOffThread({
+              dbPath: DB_PATH,
+              labelsDbPath: LABELS_DB_PATH,
+              metadataPath: METADATA_PATH,
+              modelNames,
+              output: process.stderr,
+              onProgress: setStartupIndexProgress,
+            });
+            log.detail(`indexed in ${(elapsedMs / 1000).toFixed(1)}s on a worker thread`);
+          } else {
+            await symbolIndex.indexMetadataDirectory(METADATA_PATH, modelNames, {
+              onProgress: setStartupIndexProgress,
+            });
+          }
+          log.ok(`Indexed ${symbolIndex.getSymbolCount().toLocaleString('en-US')} symbols from ${modelNames.length} model(s)`);
+        } catch (error) {
+          log.warn(`Metadata indexing failed — starting with empty index: ${error}`);
+          log.detail('run `npm run index-metadata` to build the database');
+        } finally {
+          // On the failure path too: a phase left behind would have the next
+          // "still loading" answer citing a model whose build died minutes ago.
+          clearStartupIndexProgress();
+        }
       }
     } else {
       log.ok(`Database opened in ${((Date.now() - dbLoadStart) / 1000).toFixed(1)}s ${glyph.dot} counting symbols in background`);
@@ -513,6 +580,14 @@ async function main() {
   onShutdown('symbol index', () => serverState.symbolIndex?.close?.());
   shutdownCoordinator.registerSignalHandlers({ stdio: isStdioMode });
 
+  // Start the AosService drive scan now, off the event loop, in both transports.
+  // Every path that needs a packages path reads a cache, and whoever fills it
+  // pays for the probes — on a machine with a disconnected mapped network drive
+  // that bill is an SMB timeout. Paid here it lands on the libuv threadpool
+  // before the first request; left to the first synchronous caller it is paid on
+  // the event loop, and the server answers nothing at all until it clears.
+  void warmPackagesRoots();
+
   // ─────────────────────────────────────────────────────────────────────────────
   // Stdin sniffer: capture the `initialize` request params for get_workspace_info.
   // ─────────────────────────────────────────────────────────────────────────────
@@ -560,7 +635,12 @@ async function main() {
           msg.includes('Error') || msg.includes('error') ||
           msg.includes('Failed') || msg.includes('failed')) {
         process.stderr.write(msg + '\n');
+        return;
       }
+      // Suppressed from the client's pane, kept in LOG_FILE — see logFileOnly.
+      // This is where every startup progress line goes: log.step/ok/detail are
+      // console.log, and console.log is this function in stdio mode.
+      logFileOnly([msg]);
     };
     console.log = stderrWrite;
     console.info = stderrWrite;

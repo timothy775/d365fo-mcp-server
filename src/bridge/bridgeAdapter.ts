@@ -949,7 +949,23 @@ export async function tryBridgeSearch(
     if (!sr) return null;
 
     // Splice in exact matches the bridge's truncated window missed (#15).
-    const bridgeHits = sr.results ?? [];
+    //
+    // …but first, honour the type filter the caller asked for, because the bridge
+    // does not always honour it. Its C#-side type map has no entry for every AOT
+    // kind — `report` is one — and an unmapped type runs the query UNFILTERED, so
+    // `search(type="report")` answered with tables and queries and looked
+    // authoritative doing it ("Cust" returned six tables). A report reached the
+    // caller only when the SQLite exact-name splice happened to carry one, which
+    // is why the failure looked intermittent rather than total.
+    //
+    // Only the BRIDGE's hits are filtered. The spliced exact and custom matches
+    // are deliberately allowed to differ in type — a `table-extension` is a
+    // wanted answer to a `type="table"` search for the table it extends — and
+    // filtering those too would delete that behaviour.
+    const rawBridgeHits = sr.results ?? [];
+    const bridgeHits = objectType && objectType !== 'all'
+      ? rawBridgeHits.filter(r => r.type === objectType)
+      : rawBridgeHits;
     const known = new Set(bridgeHits.map(r => `${r.name.toLowerCase()}\0${r.type}`));
     const spliced: Array<{ name: string; type: string; model?: string; fromIndex?: boolean }> = [];
     for (const cand of opts?.exactMatches ?? []) {
@@ -1460,11 +1476,18 @@ const BRIDGE_MODIFY_OPS = new Set([
   // no concept of it — so this is XML-only for the same structural reason as the
   // two above.
   'remove-diagnostic-suppression', 'add-diagnostic-suppression',
+  // A model descriptor is not an AOT object either — it is the package's own
+  // manifest, outside the AOT entirely — so the same XML-only reasoning applies.
+  'add-module-reference', 'remove-module-reference',
   'add-display-method', 'add-table-method',
   'add-field-modification', 'add-menu-item-to-menu',
   // No C# op exists for query ranges on entities — served entirely by a
   // direct-XML writer (data-entity is already in BRIDGE_MODIFY_TYPES).
   'add-query-range', 'remove-query-range',
+  // Routed straight to the XML writer by XML_ONLY_MODIFY_PAIRS below, but the
+  // dispatch gate is checked FIRST — an op absent here is refused as unknown
+  // before the pair table is ever consulted.
+  'report-design',
 ]);
 
 /**
@@ -1500,6 +1523,14 @@ const XML_ONLY_MODIFY_PAIRS: Record<string, ReadonlySet<string>> = {
   'remove-entry-point': new Set(['security-privilege']),
   'remove-diagnostic-suppression': new Set(['ignore-diagnostic-list']),
   'add-diagnostic-suppression': new Set(['ignore-diagnostic-list']),
+  'add-module-reference': new Set(['model-descriptor']),
+  'remove-module-reference': new Set(['model-descriptor']),
+  // An AxReport has no bridge write path at all — IMetadataProvider cannot express
+  // a dataset field or a report parameter through a Dictionary<string,string> — and
+  // `report` is deliberately absent from BRIDGE_MODIFY_TYPES for that reason. Without
+  // this pair the caller would get "the bridge could not resolve the object" instead
+  // of the operation actually running.
+  'report-design': new Set(['report']),
 };
 
 /**
@@ -2859,6 +2890,30 @@ export async function tryBridgeCompletion(
   }
 }
 
+/**
+ * One line of a member list — NAME first, always.
+ *
+ * This used to print the signature INSTEAD of the name whenever a signature
+ * existed, which made a member unidentifiable the moment the signature was
+ * wrong. It is sometimes wrong: the bridge's extractor hands back the line
+ * preceding the body when a macro sits between the doc block and the signature,
+ * so `SysQuery.range` was listed as `#ISOCountryRegionCodes`. Filtering runs on
+ * the NAME, so asking for prefix "range" returned "1 member" that appeared to be
+ * something else entirely — and a member list that renders a public API as
+ * another string argues the API does not exist. An eval run concluded exactly
+ * that and worked around a method that was there all along.
+ *
+ * The signature is still shown, as detail, and only when it plausibly belongs to
+ * this member. Fixing the extractor is a separate, C#-side change; this makes the
+ * output honest either way.
+ */
+function memberLine(m: { name: string; signature?: string }): string {
+  const sig = m.signature?.trim();
+  const belongs = sig && new RegExp(`\\b${m.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\(`, 'i').test(sig);
+  if (belongs) return `\`${sig}\``;
+  return sig ? `**${m.name}** _(signature unavailable)_` : `**${m.name}**`;
+}
+
 function formatCompletion(r: BridgeCompletionResult, prefix?: string): string {
   let members = r.members;
   if (prefix) {
@@ -2884,8 +2939,9 @@ function formatCompletion(r: BridgeCompletionResult, prefix?: string): string {
     const inheritedCount = methodMembers.filter(m => m.inheritedFrom).length;
     out += `## Methods (${methodMembers.length})\n`;
     for (const m of methodMembers) {
-      const body = m.signature ? `\`${m.signature}\`` : m.name;
-      out += m.inheritedFrom ? `- ${body} _(inherited from ${m.inheritedFrom})_\n` : `- ${body}\n`;
+      out += m.inheritedFrom
+        ? `- ${memberLine(m)} _(inherited from ${m.inheritedFrom})_\n`
+        : `- ${memberLine(m)}\n`;
     }
     if (inheritedCount > 0) {
       out += `\n> ${inheritedCount} of these are inherited — callable on ${r.symbolName}, but ` +
@@ -2939,20 +2995,81 @@ function formatCocExtensions(r: BridgeExtensionClassResult, methodNameFilter?: s
     );
   }
 
-  out += `Found ${filtered.length} extension class(es)${methodNameFilter ? ` wrapping "${methodNameFilter}"` : ''}:\n\n`;
-  const seen = new Set<string>();
+  // Dedupe by class name ONCE, before anything is counted. A class carries a single
+  // [ExtensionOf] and the bridge keys its results by class name, so a duplicate cannot
+  // reach here today — but the count and the list it introduces have to agree whatever
+  // arrives, and skipping an entry inside the render loop after the heading above it had
+  // already counted that entry is exactly how the two come apart.
+  const byClassName = new Map<string, (typeof filtered)[number]>();
   for (const ext of filtered) {
-    if (seen.has(ext.className)) continue;
-    seen.add(ext.className);
-    out += `- **${ext.className}**`;
-    if (ext.module) out += ` (${ext.module})`;
-    if (ext.wrappedMethods && ext.wrappedMethods.length > 0) {
-      out += `\n    Wraps methods: ${ext.wrappedMethods.join(', ')}`;
-      out += `\n    Uses 'next' keyword: ✓`;
+    if (!byClassName.has(ext.className)) byClassName.set(ext.className, ext);
+  }
+  const unique = [...byClassName.values()];
+
+  out += `Found ${unique.length} extension class(es)${methodNameFilter ? ` wrapping "${methodNameFilter}"` : ''}:\n\n`;
+
+  // Grouped by the element each class actually extends, never pooled into one list. A name can
+  // denote several objects at once — "SalesTable" is a table (14 extensions) AND a form (17),
+  // and the form's data sources, controls and data fields are each extended separately again
+  // (31 more across 12 elements). Reporting "49 extensions of SalesTable" told an agent about
+  // to write a table CoC that 34 form extensions were its concern, and hid which of the form's
+  // NINE data sources with an `active` method was already wrapped.
+  const groups = new Map<string, typeof unique>();
+  for (const ext of unique) {
+    const key = ext.extendedElement ?? '';
+    const bucket = groups.get(key) ?? [];
+    bucket.push(ext);
+    groups.set(key, bucket);
+  }
+
+  for (const [element, exts] of groups) {
+    // Elements sort with the requested object first and its nested members after (the bridge
+    // orders by path); the heading names the element so the reader never has to infer it.
+    if (element) out += `### ${describeXrefElement(element)} — ${exts.length}\n\n`;
+    for (const ext of exts) {
+      out += `- **${ext.className}**`;
+      if (ext.module) out += ` (${ext.module})`;
+      if (ext.wrappedMethods && ext.wrappedMethods.length > 0) {
+        // Deliberately no `Uses 'next' keyword: ✓` line on THIS path, unlike the index /
+        // filesystem path in findCocExtensions.ts. That one earns it — fsExtensionScanner
+        // builds cocMethods by testing each method body against /\bnext\s+\w/i — whereas
+        // here the claim was printed unconditionally for anything with a non-empty
+        // wrappedMethods, and nothing had read a line of source. It therefore asserted a
+        // `next` in classes that contained none, back when wrappedMethods was every base
+        // method the class called. The list is now the same-named base-method call that IS
+        // the `next`, but that is inferred from xref shape rather than seen, so the list
+        // stands on its own instead of carrying a tick it cannot back.
+        out += `\n    Wraps methods: ${ext.wrappedMethods.join(', ')}`;
+      }
+      out += `\n`;
     }
     out += `\n`;
   }
   return out;
+}
+
+/**
+ * Human-readable name for an xref element path, for the CoC grouping headings.
+ *   /Tables/SalesTable                                  -> Table SalesTable
+ *   /Forms/SalesTable                                   -> Form SalesTable
+ *   /Forms/SalesTable/DataSources/SalesLine             -> Form SalesTable › DataSource SalesLine
+ *   /Forms/X/DataSources/Y/DataFields/Z                 -> Form X › DataSource Y › DataField Z
+ * Falls back to the raw path for any shape not seen in the corpus, so a new [ExtensionOf]
+ * intrinsic degrades to something still readable rather than being mislabelled.
+ */
+function describeXrefElement(path: string): string {
+  const parts = path.split('/').filter(Boolean);
+  if (parts.length < 2) return path;
+  const singular: Record<string, string> = {
+    Classes: 'Class', Tables: 'Table', Forms: 'Form', Views: 'View', Maps: 'Map',
+    Queries: 'Query', DataEntityViews: 'Data entity',
+    DataSources: 'DataSource', Controls: 'Control', DataFields: 'DataField',
+  };
+  const segs: string[] = [];
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    segs.push(`${singular[parts[i]] ?? parts[i]} ${parts[i + 1]}`);
+  }
+  return segs.join(' › ');
 }
 
 // FIND EVENT HANDLERS via XREF (Phase 6)
@@ -3047,3 +3164,10 @@ function formatApiUsageCallers(r: BridgeApiUsageCallersResult): string {
 
   return out;
 }
+
+/**
+ * Internals exposed for tests only. `formatCompletion` renders a member list,
+ * and a member list that cannot be trusted to name its members is worse than no
+ * list at all — see tests/bridge/completionMemberLine.test.ts.
+ */
+export const __testing = { formatCompletion, memberLine };

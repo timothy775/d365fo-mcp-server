@@ -703,9 +703,9 @@ describe('label placeholders vs strFmt arguments', () => {
     db: { prepare: () => ({ get: () => undefined, all: () => [] }) },
     getLabelById: (labelId: string) =>
       TEXTS[labelId]
-        ? [{ labelId, labelFileId: 'AslFinSK', language: 'en-US', text: TEXTS[labelId] }]
+        ? [{ labelId, labelFileId: 'ConSK', language: 'en-US', text: TEXTS[labelId] }]
         : [],
-    getLabelFileIds: () => [{ labelFileId: 'AslFinSK' }],
+    getLabelFileIds: () => [{ labelFileId: 'ConSK' }],
   };
 
   const check = (code: string) =>
@@ -714,41 +714,41 @@ describe('label placeholders vs strFmt arguments', () => {
     );
 
   it('flags a placeholder label used without strFmt', () => {
-    const found = check('ret = checkFailed(literalStr("@AslFinSK:Downgrade"));');
+    const found = check('ret = checkFailed(literalStr("@ConSK:Downgrade"));');
     expect(found).toHaveLength(1);
     expect(found[0].severity).toBe('error');
     expect(found[0].detail).toContain('must be wrapped');
   });
 
   it('flags arguments passed to a label that has no placeholders', () => {
-    const found = check('ret = checkFailed(strFmt("@AslFinSK:Plain", enum2str(a), enum2str(b)));');
+    const found = check('ret = checkFailed(strFmt("@ConSK:Plain", enum2str(a), enum2str(b)));');
     expect(found).toHaveLength(1);
     expect(found[0].detail).toContain('discarded');
   });
 
   it('flags an argument-count mismatch', () => {
-    const found = check('ret = checkFailed(strFmt("@AslFinSK:Downgrade", enum2str(a)));');
+    const found = check('ret = checkFailed(strFmt("@ConSK:Downgrade", enum2str(a)));');
     expect(found[0].detail).toContain('takes 2 argument(s), strFmt supplies 1');
   });
 
   it('accepts the matching call, wrapped and across lines', () => {
-    expect(check(`ret = checkFailed(strFmt("@AslFinSK:Downgrade",
+    expect(check(`ret = checkFailed(strFmt("@ConSK:Downgrade",
         enum2str(this.orig().Tier),
         enum2str(this.Tier)));`)).toHaveLength(0);
   });
 
   it('accepts a plain label used bare, and sees through literalStr', () => {
-    expect(check('ret = checkFailed("@AslFinSK:Plain");')).toHaveLength(0);
-    expect(check('ret = checkFailed(strFmt(literalStr("@AslFinSK:Downgrade"), a, b));')).toHaveLength(0);
+    expect(check('ret = checkFailed("@ConSK:Plain");')).toHaveLength(0);
+    expect(check('ret = checkFailed(strFmt(literalStr("@ConSK:Downgrade"), a, b));')).toHaveLength(0);
   });
 
   it('says nothing when the index has no text for the label', () => {
     const noText: ResolverDeps = {
       ...textDeps,
-      getLabelById: (labelId: string) => [{ labelId, labelFileId: 'AslFinSK' }],
+      getLabelById: (labelId: string) => [{ labelId, labelFileId: 'ConSK' }],
     };
     expect(
-      resolveXppReferences('ret = checkFailed("@AslFinSK:Downgrade");', noText)
+      resolveXppReferences('ret = checkFailed("@ConSK:Downgrade");', noText)
         .violations.filter(v => v.kind === 'label-placeholder-mismatch'),
     ).toHaveLength(0);
   });
@@ -881,5 +881,137 @@ describe('validateCodeTool references mode — AxDataEntityView', () => {
     // SalesId is a column of SalesTable, not of CustTable — pairing it with the
     // root table would flag it.
     expect(text).not.toContain('SalesId');
+  });
+});
+
+/**
+ * A class calling its own static is spelled `MyClass::helper()` — X++ accepts
+ * nothing else, because a bare name resolves only against predefined functions,
+ * Global statics and local functions. So the reference is to a type the index
+ * cannot contain yet: the class is being written. Reporting it as unknown-type
+ * blocked writes of correct code under GROUNDING_ENFORCE, and every non-trivial
+ * new class hits it. Found by an eval implementer, not by a test.
+ *
+ * The exemption is derived from the source itself, so it works for
+ * validate_code(mode="references") too, with no extra parameter to thread.
+ */
+describe('resolveXppReferences — a class may call its own statics', () => {
+  const NEW_CLASS = `
+public class ConDemoNotIndexedYet
+{
+    public static boolean isElevated()
+    {
+        return isSystemAdministrator();
+    }
+
+    public static void assertElevated()
+    {
+        if (!ConDemoNotIndexedYet::isElevated())
+        {
+            throw error("@SYS1");
+        }
+    }
+}`;
+
+  it('does not report the class being written as an unknown type', () => {
+    const errors = errorsOf(NEW_CLASS);
+    expect(
+      errors.filter(e => e.identifier?.startsWith('ConDemoNotIndexedYet')),
+      JSON.stringify(errors, null, 2),
+    ).toEqual([]);
+  });
+
+  it('exempts an interface it declares as well', () => {
+    const code = `
+public interface ConDemoStrategy
+{
+    public static str kind()
+    {
+        return ConDemoStrategy::kind();
+    }
+}`;
+    expect(errorsOf(code).filter(e => e.identifier?.startsWith('ConDemoStrategy'))).toEqual([]);
+  });
+
+  it('still reports a DIFFERENT unknown type in the same source', () => {
+    // The guard must be the declared name, not "anything that looks new" — a
+    // typo has to keep failing, or the exemption would swallow the rule.
+    const code = `${NEW_CLASS}
+public class ConDemoOther
+{
+    public static void go()
+    {
+        ConDemoTypoedNameThatDoesNotExist::run();
+    }
+}`;
+    const identifiers = errorsOf(code).map(e => e.identifier);
+    expect(identifiers).toContain('ConDemoTypoedNameThatDoesNotExist::run');
+  });
+
+  it('is actually wired up — the declaration regex matches real X++', () => {
+    // The first version of this exemption shipped with a literal backspace
+    // instead of \b (a shell heredoc ate the escape), so the pattern matched
+    // nothing and the guard silently did not exist. A test that only asserts
+    // "no error" passes in that state too, which is why this one asserts the
+    // extraction directly.
+    const errorsWithout = errorsOf(`
+public class ConDemoStandalone
+{
+    public static void go()
+    {
+        ConDemoStandalone::go();
+    }
+}`);
+    const errorsForUndeclared = errorsOf(`
+public class ConDemoStandalone
+{
+    public static void go()
+    {
+        ConDemoUndeclaredElsewhere::go();
+    }
+}`);
+    expect(errorsWithout.map(e => e.identifier)).not.toContain('ConDemoStandalone::go');
+    expect(errorsForUndeclared.map(e => e.identifier)).toContain('ConDemoUndeclaredElsewhere::go');
+  });
+});
+
+/**
+ * The intrinsic-target rule and the declared-type rule disagreed about the same
+ * fact: a kernel class has no metadata, so the declared-type path warns and says
+ * "if it is a kernel class this is a false positive" — while `methodStr(<same
+ * class>, m)` was a hard error. An eval run hit it on the ONE spelling X++
+ * accepts for a control override, where the class must be FormStringControl.
+ */
+describe('resolveXppReferences — intrinsics targeting kernel types', () => {
+  it('does not error on methodStr() against a kernel control class', () => {
+    const code = `
+public class ConDemoLookupBinder
+{
+    public void bind(FormStringControl _control)
+    {
+        _control.registerOverrideMethod(
+            methodStr(FormStringControl, lookup),
+            methodStr(ConDemoLookupBinder, onLookup),
+            this);
+    }
+}`;
+    const errors = errorsOf(code);
+    expect(
+      errors.filter(e => e.kind === 'unknown-intrinsic-target'),
+      JSON.stringify(errors, null, 2),
+    ).toEqual([]);
+  });
+
+  it('still errors on an intrinsic target that is neither kernel nor declared here', () => {
+    const code = `
+public class ConDemoLookupBinder
+{
+    public void bind()
+    {
+        info(methodStr(ConDemoNoSuchClassAnywhere, onLookup));
+    }
+}`;
+    expect(errorsOf(code).map(e => e.identifier))
+      .toContain('methodStr(ConDemoNoSuchClassAnywhere, onLookup)');
   });
 });

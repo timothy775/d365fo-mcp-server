@@ -61,6 +61,7 @@
  */
 
 import { z } from 'zod';
+import { findControlElementOrderViolations } from '../../validation/formControlElementOrder.js';
 import {
   AX_TABLE_ELEMENT_ORDER,
   AX_TABLE_NON_EXISTENT_PROPERTIES,
@@ -83,8 +84,9 @@ export const validateXppArgsSchema = z.object({
   code: z.string().describe(
     'X++ source code or XML metadata to validate. Paste the full generated text.'
   ),
-  codeType: z.enum(['xpp', 'xml-table', 'xml-any', 'xml-report']).optional().default('xpp').describe(
-    '"xpp" for X++ source (default), "xml-table" for AxTable XML, "xml-report" for AxReport XML, "xml-any" for other XML.'
+  codeType: z.enum(['xpp', 'xml-table', 'xml-form', 'xml-any', 'xml-report']).optional().default('xpp').describe(
+    '"xpp" for X++ source (default), "xml-table" for AxTable XML, "xml-form" for AxForm/AxFormExtension XML, ' +
+    '"xml-report" for AxReport XML, "xml-any" for other XML.'
   ),
   context: z.string().optional().describe(
     'Optional: owning class/table name, used in diagnostic messages.'
@@ -444,7 +446,11 @@ function checkExtensionOfNaming(code: string): ValidationViolation[] {
     const decl = classDeclarationAfter(maskedLines, i);
     if (!decl) continue;
     const m = /\bclass\s+(\w+)/i.exec(decl.text);
-    if (m && !m[1].endsWith('_Extension')) {
+    // Case-insensitively: the platform itself ships
+    // `[ExtensionOf(classStr(JournalCheckPost))] internal final class
+    // JournalCheckPostIV_extension`, and X++ identifiers are case-insensitive, so
+    // a lower-case suffix is the convention kept, not broken.
+    if (m && !/_extension$/i.test(m[1])) {
       violations.push({
         rule: 'COC003',
         severity: 'error',
@@ -742,6 +748,27 @@ const CALL_PRECEDING_KEYWORDS = new Set([
   'not', 'select', 'where', 'join', 'setting', 'by', 'in', 'next', 'new', 'super', 'print',
 ]);
 
+/**
+ * Does this source declare a local function (or a method) with that name?
+ *
+ * X++ resolves a bare call in three places, in the order the compiler's own error
+ * text lists them: a predefined function, a static on Global, "nor a previously
+ * defined local function". A local function therefore SHADOWS a predefined name,
+ * and its signature is the one that counts — so any arity claim about the
+ * predefined version is wrong for the rest of that source.
+ *
+ * Deliberately file-wide rather than scope-accurate: this decides whether to STAY
+ * SILENT, and for an error-severity rule the safe direction is silence.
+ */
+function declaresLocalFunction(masked: string, name: string): boolean {
+  const re = new RegExp(
+    String.raw`\b(?:void|int|int64|str|boolean|real|container|date|utcdatetime|anytype|guid|` +
+    String.raw`[A-Z]\w*)\s+${name}\s*\([^)]*\)\s*[\r\n]*\s*\{`,
+    'i',
+  );
+  return re.test(masked);
+}
+
 function checkBuiltinArity(code: string): ValidationViolation[] {
   const violations: ValidationViolation[] = [];
   const masked = maskStringsAndComments(code);
@@ -769,6 +796,15 @@ function checkBuiltinArity(code: string): ValidationViolation[] {
     // separator or a statement keyword — never a bare identifier.
     const prevToken = /([A-Za-z_]\w*)\s*$/.exec(before)?.[1];
     if (prevToken && !CALL_PRECEDING_KEYWORDS.has(prevToken.toLowerCase())) continue;
+    // `new Info()` is a constructor, not a call to the predefined info(). `new` has
+    // to stay in the keyword set above (it precedes real calls too), so the
+    // constructor form is excluded here.
+    if (prevToken?.toLowerCase() === 'new') continue;
+    // A LOCAL FUNCTION shadows a predefined name, and the compiler says so in its
+    // own error text: "…nor a previously defined local function". BatchRun declares
+    // `void info() { … }` and then calls `info();` with no arguments, which FN001
+    // read as the predefined info() being called with too few.
+    if (declaresLocalFunction(masked, called)) continue;
 
     const lineNo = lineNumber(masked, m.index);
     const excerpt = lines[lineNo - 1].trim();
@@ -1047,6 +1083,50 @@ function checkGenericDocComment(code: string): ValidationViolation[] {
 }
 
 /**
+ * RPT103 — a report parameter's UserVisibility carries a value the platform does
+ * not know.
+ *
+ * A census of all 1,057 AxReport documents on a complete install found exactly
+ * TWO values across 8,977 parameters: `Hidden` (8,972) and `Internal` (5). There
+ * is no `Visible`; a parameter the user should see simply omits the element.
+ *
+ * The reason this is worth a rule rather than a footnote is the failure mode.
+ * An unknown value in a metadata element is DROPPED by the deserializer without
+ * a word — the shape this repo has been bitten by before (see the element-order
+ * rules XML006/XML010). So a parameter written `<UserVisibility>Visible</…>` to
+ * make it visible does become visible; one written `True` or `Yes` to hide it
+ * does NOT get hidden, the build is green, and the dialog shows an internal
+ * parameter to the user. Nothing else in the toolchain looks at this file.
+ *
+ * WARNING, not error, and deliberately: the census proves the two values are the
+ * only ones SHIPPED, which is not the same as proving the platform rejects a
+ * third. A warning is what that evidence supports.
+ */
+function checkReportParameterVisibility(code: string): ValidationViolation[] {
+  const violations: ValidationViolation[] = [];
+  const lines = code.split('\n');
+  const KNOWN = new Set(['hidden', 'internal']);
+
+  for (const m of code.matchAll(/<UserVisibility>\s*([^<]*?)\s*<\/UserVisibility>/g)) {
+    const value = m[1];
+    if (KNOWN.has(value.toLowerCase())) continue;
+    const lineNo = lineNumber(code, m.index ?? 0);
+    violations.push({
+      rule: 'RPT103',
+      severity: 'warning',
+      line: lineNo,
+      excerpt: lines[lineNo - 1]?.trim() ?? m[0],
+      fix:
+        `UserVisibility="${value}" is not a value shipped metadata uses. Across 1,057 AxReport documents ` +
+        'and 8,977 parameters the only values are Hidden (8,972) and Internal (5) — a VISIBLE parameter ' +
+        'omits the element entirely. An unrecognised value is dropped silently by the deserializer, so a ' +
+        'parameter you meant to hide is shown to the user with a perfectly green build.',
+    });
+  }
+  return violations;
+}
+
+/**
  * XML001 — AxTable XML missing an index with <AlternateKey>Yes</AlternateKey>.
  * Warning, not error: xppbp raises BPCheckAlternateKeyAbsent as a warning and the
  * table still builds. As an error it made a legitimately single-index table
@@ -1282,8 +1362,23 @@ function checkCSharpIsms(code: string): ValidationViolation[] {
         '("System.ArgumentException ex;") and write catch (ex).',
     },
   ];
+  // A `using` ALIAS makes a C#-looking name legal X++. GlobalUnifiedPricing ships
+  // 448 files that open with
+  //     using string  = System.String;
+  //     using decimal = System.Decimal;
+  // and then declare `public string ConstructGroupKey(...)` — which compiles,
+  // because `string` now denotes a CLR type. Flagging those was 3 error-severity
+  // findings on shipped code, and the same alias form is what dotnet-interop teaches.
+  const aliased = new Set(
+    [...masked.matchAll(/\busing\s+([A-Za-z_]\w*)\s*=/g)].map(m => m[1].toLowerCase()),
+  );
+
   for (const p of patterns) {
-    violations.push(...matchAll(masked, p.re, 'CS001', 'error', p.fix));
+    for (const v of matchAll(masked, p.re, 'CS001', 'error', p.fix)) {
+      const name = /^([A-Za-z_]\w*)/.exec(v.excerpt)?.[1]?.toLowerCase();
+      if (name && aliased.has(name)) continue;
+      violations.push(v);
+    }
   }
   return violations;
 }
@@ -1415,8 +1510,14 @@ function checkReportDpShape(code: string): ValidationViolation[] {
   if (!extendsMatch) return [];
   const violations: ValidationViolation[] = [];
   const isPreProcess = /PreProcess/i.test(extendsMatch[1]);
+  // An ABSTRACT DP base declares the shared processReport()/parmDataContract() work
+  // and leaves the contract to its concrete subclasses, which carry the attribute.
+  // Shipped example: `abstract class CustVendAdvanceInvoiceDP extends
+  // SRSReportDataProviderBase`, the base of CustAdvanceInvoice and VendAdvanceInvoice.
+  const isAbstract = /\babstract\s+(?:final\s+)?class\b/i.test(masked);
 
   if (!isPreProcess
+      && !isAbstract
       && /\bparmDataContract\s*\(/i.test(masked)
       && !/SRSReportParameterAttribute/i.test(code)) {
     violations.push({
@@ -1621,7 +1722,16 @@ function selectStatements(masked: string): Array<{ text: string; index: number }
   const out: Array<{ text: string; index: number }> = [];
   const re = /\bselect\b[^;{]*[;{]/gi;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(masked)) !== null) out.push({ text: m[0], index: m.index });
+  while ((m = re.exec(masked)) !== null) {
+    // A macro directive ends the statement even without a semicolon. Inside a
+    // #localmacro the select is a FRAGMENT with no terminator, so the match ran on
+    // past #endmacro and swallowed the next macro's clauses: that is how SEL008
+    // reported "order by after where" on DocuRefSearch, where each macro on its own
+    // is in the right order. Cutting at the directive keeps the two apart.
+    const macroAt = /^[ \t]*#/m.exec(m[0]);
+    const text = macroAt ? m[0].slice(0, macroAt.index) : m[0];
+    out.push({ text, index: m.index });
+  }
   return out;
 }
 
@@ -1803,8 +1913,18 @@ function validTimeStateViolations(masked: string): ValidationViolation[] {
   // validTimeState takes plain identifiers only: a call ("Invalid token '::'"), a
   // field access ("Invalid token '.'") and even a date literal ("'identifier'
   // expected") are all parse errors.
+  //
+  // …but only as a SELECT CLAUSE. `validTimeState` is also an ordinary method name
+  // in the SysDa API (SysDaFindObject.validTimeState(SysDaValidTimeState _v = null))
+  // and on date-effective tables, where every argument the clause would reject is
+  // perfectly legal. Restricting the scan to select statements removed 14
+  // error-severity findings on shipped ApplicationPlatform code.
+  const statements = selectStatements(masked);
   const vtsRe = /\bvalidTimeState\s*\(([^)]*)\)/gi;
   while ((m = vtsRe.exec(masked)) !== null) {
+    const at = m.index;
+    const inSelect = statements.some(s => at >= s.index && at < s.index + s.text.length);
+    if (!inSelect) continue;
     const operands = m[1].split(',').map(s => s.trim()).filter(Boolean);
     if (operands.length > 0 && operands.every(o => /^[A-Za-z_]\w*$/.test(o))) continue;
     violations.push({
@@ -1934,7 +2054,18 @@ function checkAttributeArguments(code: string): ValidationViolation[] {
     }
     if (buf.trim()) args.push(buf.trim());
 
-    for (const arg of args) {
+    for (const raw of args) {
+      // Shipped code documents attribute arguments constantly —
+      // `SysSetupConfig(true /*ContinueOnError*/, 600 /*10 minutes*/)` — and the
+      // masked form of that is not what it looks like: the lexer keeps the OPENING
+      // `/*` and blanks the closing `*/` along with the content, so the argument
+      // arrives as `true /*                  ` with no terminator at all. Matching
+      // only the closed form left 11 error-severity false positives in the first
+      // 3,000 files swept, so both forms are stripped here.
+      const arg = raw
+        .replace(/\/\*[\s\S]*?(?:\*\/|$)/g, ' ')
+        .replace(/\/\/.*$/gm, ' ')
+        .trim();
       if (!arg) continue;
       if (ATTRIBUTE_LITERAL_RE.test(arg)) continue;
       const call = /^([A-Za-z_]\w*)\s*\(/.exec(arg);
@@ -1965,6 +2096,246 @@ function checkAttributeArguments(code: string): ValidationViolation[] {
       });
     }
   }
+  return violations;
+}
+
+/**
+ * True for a MASKED line that carries no code: blank, or a comment.
+ *
+ * `maskStringsAndComments` keeps the comment opener and blanks the rest, so a
+ * `///` doc line comes back as `//` followed by spaces, `// text` as `//` and
+ * spaces, and a `/* … *\/` block as `/*` and spaces (its later lines are
+ * spaces alone). A rule that walks past comments therefore cannot test for
+ * `///` — that spelling never survives masking — and one that tests for
+ * nothing at all treats the comment as the declaration it was looking for.
+ * ATTR003 did the second and fired on a legal class-level stack whenever a
+ * comment sat between the attributes and `class`; TST003 did the first.
+ */
+function isBlankOrCommentMasked(maskedLine: string): boolean {
+  return /^[ \t]*(?:\/\/|\/\*)?[ \t]*$/.test(maskedLine);
+}
+
+/**
+ * ATTR003 — two attributes stacked on a METHOD.
+ *
+ * X++ allows several attributes on a method only inside ONE bracket, separated by
+ * commas. Two bracketed lines in a row is a parse error, and the compiler's answer
+ * is `Compile Fatal Error: … Invalid token '['` with a line and column — it names
+ * a token, not a rule, and it kills the whole file rather than the method. Nothing
+ * in that message tells a developer that the fix is a comma.
+ *
+ * That is what separates this rule from DECL001/CONV001, which were rejected
+ * because "the compiler's own messages are exact and arrive at the same moment a
+ * build would". Here the message is neither exact nor local.
+ *
+ * The rule is worth having because the shape is inviting: the `unit-testing` topic
+ * lists [SysTestMethod], [SysTestCheckInTest], [SysTestCategory], [SysTestPriority]
+ * one under another, and stacking them is the obvious reading.
+ *
+ * ON A CLASS IT IS LEGAL, and that exemption is not a guess: a census of the
+ * install found 2,163 AxClass files stacking attributes on a declaration and
+ * **0 of 760,583 methods** doing it. The compiler agrees — probes
+ * `StackedFullFormsOnMethod` / `StackedShortFormsOnMethod`
+ * (scripts/oracles/probes/coverage-v4c.ts) fail identically on both the short and
+ * the suffixed attribute names, while the same names compile alone.
+ */
+function checkStackedMethodAttributes(code: string): ValidationViolation[] {
+  const masked = maskStringsAndComments(code);
+  const lines = code.split('\n');
+  const maskedLines = masked.split('\n');
+  const violations: ValidationViolation[] = [];
+
+  /** A line that is nothing but one bracketed attribute list. */
+  const attributeLine = /^[ \t]*\[[A-Za-z_][^\]]*\][ \t]*$/;
+  /** The declaration an attribute stack is ALLOWED to precede. */
+  const classDecl = /^[ \t]*(?:(?:public|private|protected|internal|final|abstract|static)\s+)*(?:class|interface)\b/;
+
+  for (let i = 0; i + 1 < maskedLines.length; i++) {
+    if (!attributeLine.test(maskedLines[i]) || !attributeLine.test(maskedLines[i + 1])) continue;
+
+    // Walk past any further attribute lines, blank lines and comments to find
+    // what is being decorated. Only that decides legality.
+    let j = i + 2;
+    while (j < maskedLines.length) {
+      const line = maskedLines[j];
+      if (attributeLine.test(line) || isBlankOrCommentMasked(line)) { j++; continue; }
+      break;
+    }
+    const target = maskedLines[j] ?? '';
+    if (classDecl.test(target)) continue;
+
+    const names = [maskedLines[i], maskedLines[i + 1]]
+      .map(l => /\[\s*([A-Za-z_]\w*)/.exec(l)?.[1])
+      .filter(Boolean);
+    violations.push({
+      rule: 'ATTR003',
+      severity: 'error',
+      line: i + 1,
+      excerpt: lines[i]?.trim() ?? '',
+      fix:
+        `Merge them into ONE bracket: [${names.join(', ')}]. Two bracketed lines in a row on a method ` +
+        "is a parse error — xppc answers \"Invalid token '['\" and abandons the whole file. " +
+        '(Stacking IS legal above a class declaration; 2,163 shipped files do it, and 0 of 760,583 ' +
+        'shipped methods do.)',
+    });
+    i = j; // one finding per stack, not one per pair
+  }
+
+  return violations;
+}
+
+/**
+ * TST001 — `assertExpectedException`, a method that does not exist.
+ *
+ * X++ has no such assert. Expected exceptions are DECLARED, with
+ * `this.parmExceptionExpected(true)` before the act, and the framework fails the
+ * test if the exception does not arrive. The name is the one a JUnit or NUnit
+ * habit produces, and it reads so plausibly that the knowledge base has said so
+ * in prose for a year — prose an agent does not read at the moment it writes.
+ *
+ * Measured: `assertExpectedException` appears in 0 of the 66,754 shipped AxClass
+ * files, and `SysTestAssert` resolves to exactly 14 asserts, none of them this
+ * one (H0 members oracle).
+ */
+function checkAssertExpectedException(code: string): ValidationViolation[] {
+  const masked = maskStringsAndComments(code);
+  const lines = code.split('\n');
+  const violations: ValidationViolation[] = [];
+
+  masked.split('\n').forEach((line, i) => {
+    if (!/\bassertExpectedException\s*\(/.test(line)) return;
+    violations.push({
+      rule: 'TST001',
+      severity: 'error',
+      line: i + 1,
+      excerpt: lines[i]?.trim() ?? '',
+      fix:
+        'There is no assertExpectedException in X++. Declare the expectation before the act instead: ' +
+        'this.parmExceptionExpected(true); then call the method that must throw. The framework fails ' +
+        'the test when the exception does NOT arrive.',
+    });
+  });
+
+  return violations;
+}
+
+/**
+ * TST002 — `[SysTestMethod]` in a class that extends nothing.
+ *
+ * A test method only runs if its class is a testable, and the framework finds
+ * that through the base class. A class with test methods and no base at all
+ * cannot be one, and the failure is silent in the worst way: the build is clean
+ * and the runner simply reports no tests.
+ *
+ * The rule deliberately checks for NO `extends` rather than for
+ * `extends SysTestCase`, and that is a measurement, not caution. Of the 56
+ * shipped classes carrying [SysTestMethod], only 24 extend SysTestCase directly;
+ * 31 reach it through a chain — 256 shipped test classes extend
+ * `AtlWHSTestCase`, for one. A rule demanding the literal base would fire on
+ * more shipped classes than it caught. Following the chain needs the symbol
+ * index, which a source-text validator does not have.
+ *
+ * With the narrowed shape the sweep is clean: the single candidate in the whole
+ * install was `SysTest` itself, and that match came from the string literal
+ * `'SysTestMethod'` inside an event-tracing call — which is why the check runs
+ * on masked source.
+ */
+function checkTestMethodWithoutBase(code: string): ValidationViolation[] {
+  const masked = maskStringsAndComments(code);
+  if (!/\[[^\]]*\bSysTestMethod\b[^\]]*\]/.test(masked)) return [];
+
+  // The class declaration, wherever it sits after any attribute block. Its
+  // `extends` clause may sit on the next line — the header runs to the opening
+  // brace, not to the end of the line.
+  const decl = /^[ \t]*(?:(?:public|private|protected|internal|final|abstract|static)\s+)*class\s+(\w+)([^{]*)/m
+    .exec(masked);
+  if (!decl) return [];
+  if (/\bextends\b/.test(decl[2])) return [];
+
+  const line = masked.slice(0, decl.index).split('\n').length;
+  return [{
+    rule: 'TST002',
+    severity: 'error',
+    line,
+    excerpt: code.split('\n')[line - 1]?.trim() ?? '',
+    fix:
+      `Class ${decl[1]} carries [SysTestMethod] but extends nothing, so the framework cannot see it as ` +
+      'a testable: the build stays clean and the runner reports no tests at all. Add ' +
+      '`extends SysTestCase` (or a base that itself derives from it).',
+  }];
+}
+
+/**
+ * TST003 — a test method with no assertion, advisory.
+ *
+ * A test that asserts nothing passes forever and proves nothing, and this repo
+ * has paid for exactly that more than once. It is a WARNING because a legitimate
+ * shape exists: a scenario test whose assertion is that the act did not throw.
+ *
+ * Two details are measured rather than assumed, and the plan had both wrong:
+ *
+ *  - The trigger is the ATTRIBUTE, not the method name. Of the 336 shipped
+ *    methods carrying [SysTestMethod], only 8 — 2.4% — are named `test*`, so a
+ *    name-triggered rule would miss 98% of real tests.
+ *  - Any `assert*(` counts, not a known list. Shipped tests lean on domain
+ *    helpers (`assertExpectedLines` 229 uses, `assertWorkCompleted` 139,
+ *    `assertExpectedOnHand` 103) far more than on `assertEquals` (223). A rule
+ *    that only knew SysTestAssert's own 14 methods would fire on hundreds of
+ *    perfectly good tests.
+ *
+ * With both corrections the rate on shipped code is 10 of 336 — 3.0%.
+ */
+function checkTestMethodWithoutAssert(code: string): ValidationViolation[] {
+  const masked = maskStringsAndComments(code);
+  if (!/\[[^\]]*\bSysTestMethod\b[^\]]*\]/.test(masked)) return [];
+
+  const lines = code.split('\n');
+  const maskedLines = masked.split('\n');
+  const violations: ValidationViolation[] = [];
+
+  for (let i = 0; i < maskedLines.length; i++) {
+    if (!/\[[^\]]*\bSysTestMethod\b[^\]]*\]/.test(maskedLines[i])) continue;
+
+    // The signature is the next non-attribute, non-comment, non-blank line.
+    let j = i + 1;
+    while (j < maskedLines.length) {
+      const t = maskedLines[j].trim();
+      if (isBlankOrCommentMasked(maskedLines[j]) || /^\[/.test(t)) { j++; continue; }
+      break;
+    }
+    const signature = maskedLines[j] ?? '';
+    const name = /\b(\w+)\s*\(/.exec(signature)?.[1];
+    if (!name) continue;
+
+    // Body: from the signature to the matching close brace, by depth.
+    let depth = 0;
+    let started = false;
+    let end = j;
+    for (let k = j; k < maskedLines.length; k++) {
+      for (const ch of maskedLines[k]) {
+        if (ch === '{') { depth++; started = true; }
+        else if (ch === '}') depth--;
+      }
+      if (started && depth <= 0) { end = k; break; }
+      end = k;
+    }
+    const body = maskedLines.slice(j, end + 1).join('\n');
+
+    if (/\bassert\w*\s*\(|\bfail\s*\(|parmExceptionExpected|parmFaultExpected/.test(body)) continue;
+
+    violations.push({
+      rule: 'TST003',
+      severity: 'warning',
+      line: j + 1,
+      excerpt: lines[j]?.trim() ?? '',
+      fix:
+        `${name} is marked [SysTestMethod] but asserts nothing, so it passes whatever the code does. ` +
+        'Add the assertion the test exists for — any assert*() counts, including a domain helper — or ' +
+        'this.parmExceptionExpected(true) when the point IS that the call throws.',
+    });
+    i = end;
+  }
+
   return violations;
 }
 
@@ -2051,8 +2422,148 @@ function checkReservedIdentifiers(code: string): ValidationViolation[] {
   return violations;
 }
 
+/**
+ * DOC001 — a bare `&` or `<` inside a `///` doc comment.
+ *
+ * X++ doc comments are parsed as XML, so an ampersand in prose is not prose:
+ * xppbp answers BPXmlDocMalformed and the build carries the finding. Worse for
+ * this server, pre-escaping it as `&amp;` does NOT survive the write path (found
+ * during the G-VM capture, 2026-08-30) — so the fix is to rewrite the sentence,
+ * which only helps if the problem is visible BEFORE the write.
+ *
+ * WARNING, not error, and the sweep is why. Across 6,000 shipped AxClass files
+ * Microsoft writes a bare `&` in a doc comment in 4 of them ("F&O") and a bare
+ * `<` in 9 ("version < CTP8", "2 <= maxVal"). BPXmlDocMalformed is a
+ * best-practice finding, not a compile failure, and a rule that stops a build on
+ * code the product ships is our defect rather than theirs.
+ */
+function checkDocCommentXml(code: string): ValidationViolation[] {
+  const violations: ValidationViolation[] = [];
+  const lines = code.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const at = line.indexOf('///');
+    if (at < 0) continue;
+    const text = line.slice(at + 3);
+
+    // `&` that does not open a character entity (&amp; &#39; &lt;).
+    const amp = /&(?!#?\w+;)/.exec(text);
+    // `<` that cannot start a tag: followed by a space, a digit or an operator.
+    const lt = /<(?![/!?a-zA-Z])/.exec(text);
+    const found = amp ?? lt;
+    if (!found) continue;
+
+    violations.push({
+      rule: 'DOC001',
+      severity: 'warning',
+      line: i + 1,
+      excerpt: line.trim().slice(0, 120),
+      fix:
+        `A /// comment is parsed as XML, so a bare "${found[0]}" makes xppbp report ` +
+        'BPXmlDocMalformed. Name the operator in words ("and", "less than") rather than escaping it: ' +
+        'an entity written here does not survive the write path, so the escape silently comes back.',
+    });
+  }
+  return violations;
+}
+
+/**
+ * SET001 — a set-based statement with no `where`.
+ *
+ * `update_recordset t setting f = 1;` and `delete_from t;` both compile and both
+ * touch EVERY row of the table, in every company the statement can see. It is
+ * occasionally what the author meant; it is never what they meant by accident,
+ * and the mistake is invisible until production data is gone.
+ *
+ * Warning, not error: the compiler accepts it and shipped code does it on purpose
+ * (staging tables, temp tables), so an error would fire on correct code.
+ */
+function checkSetBasedWithoutWhere(code: string): ValidationViolation[] {
+  const masked = maskStringsAndComments(code);
+  const violations: ValidationViolation[] = [];
+  const re = /\b(update_recordset|delete_from)\b/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(masked)) !== null) {
+    // The statement runs to its terminating semicolon; `where` may follow
+    // `setting …` or a `join …`, so the whole statement has to be read.
+    const end = masked.indexOf(';', m.index);
+    const statement = masked.slice(m.index, end < 0 ? masked.length : end);
+    if (/\bwhere\b/i.test(statement)) continue;
+    violations.push({
+      rule: 'SET001',
+      severity: 'warning',
+      line: lineNumber(code, m.index),
+      excerpt: code.slice(m.index, Math.min(code.length, m.index + 90)).split('\n')[0].trim(),
+      fix:
+        `${m[1]} with no where clause touches EVERY row of the table (and, unless the query is ` +
+        'restricted, every company it can see). If that is deliberate — a temp or staging table — say ' +
+        'so in a comment; otherwise add the where before this reaches data anyone cares about.',
+    });
+  }
+  return violations;
+}
+
+/**
+ * OP001 — `||` followed by `&&` in one expression, unparenthesised.
+ *
+ * In X++ the two have EQUAL precedence and evaluate left to right, unlike C#,
+ * Java, SQL and every language a developer arrives from — where `&&` binds
+ * tighter. Only ONE order actually diverges, and it is worth being exact about
+ * which:
+ *
+ *   a || b && c   X++ reads (a || b) && c   ·   C# reads a || (b && c)   ← differs
+ *   a && b || c   X++ reads (a && b) || c   ·   C# reads (a && b) || c   ← same
+ *
+ * So the rule fires on the first order only. Flagging both was measurably wrong
+ * as advice: over the 105,686 shipped files it produced 971 findings, roughly
+ * half of them on the `&&`-first order that means the same thing in every
+ * language — noise that trains a reader to skip the rule that matters.
+ */
+function checkMixedBooleanOperators(code: string): ValidationViolation[] {
+  const masked = maskStringsAndComments(code);
+  const violations: ValidationViolation[] = [];
+  const lines = masked.split('\n');
+  const original = code.split('\n');
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.includes('&&') || !line.includes('||')) continue;
+
+    // Only unparenthesised mixing matters. Blank out every parenthesised group,
+    // innermost first, and see whether both operators survive at the top level.
+    let flat = line;
+    for (let pass = 0; pass < 8; pass++) {
+      const next = flat.replace(/\([^()]*\)/g, group => ' '.repeat(group.length));
+      if (next === flat) break;
+      flat = next;
+    }
+    // Only `||` BEFORE `&&` reads differently in X++ than in C#. The reverse
+    // order groups identically in both, so it is not worth a word.
+    const firstOr = flat.indexOf('||');
+    const lastAnd = flat.lastIndexOf('&&');
+    if (firstOr < 0 || lastAnd < 0 || firstOr > lastAnd) continue;
+
+    violations.push({
+      rule: 'OP001',
+      severity: 'warning',
+      line: i + 1,
+      excerpt: original[i]?.trim().slice(0, 120) ?? line.trim(),
+      fix:
+        '&& and || have EQUAL precedence in X++ and evaluate left to right — unlike C#, Java and SQL, ' +
+        'where && binds tighter. So "a || b && c" is (a || b) && c HERE and a || (b && c) almost ' +
+        'everywhere else, and the line reads correct under both. Parenthesise the intended grouping ' +
+        'so it means the same thing to the compiler and to the next reader. ' +
+        '("a && b || c" needs nothing — that order groups the same in every language.)',
+    });
+  }
+  return violations;
+}
+
 const XPP_RULES = [
   checkTodayDeprecated,
+  checkDocCommentXml,
+  checkSetBasedWithoutWhere,
+  checkMixedBooleanOperators,
   checkForceLiterals,
   checkCrossCompanyPlacement,
   checkNestedWhileSelect,
@@ -2083,12 +2594,17 @@ const XPP_RULES = [
   checkSelectExpressionAndValidTimeState,
   checkAttributeArguments,
   checkExtensionMethodClassShape,
+  checkStackedMethodAttributes,
+  checkAssertExpectedException,
+  checkTestMethodWithoutBase,
+  checkTestMethodWithoutAssert,
   checkReservedIdentifiers,
 ];
 
 const REPORT_XML_RULES = [
   checkReportHasDesign,
   checkReportDatasetShape,
+  checkReportParameterVisibility,
 ];
 
 /**
@@ -2198,10 +2714,134 @@ function checkNonExistentTableProperties(code: string): ValidationViolation[] {
   return violations;
 }
 
+/**
+ * XML008 — an AxTableExtension carrying a `<Methods>` element.
+ *
+ * It reads perfectly and it is not a thing: not one shipped table extension in
+ * ApplicationSuite has `<Methods>`, and the deserializer ignores the block, so
+ * the build stays green and the method simply does not exist. The failure then
+ * lands somewhere else entirely — at the call site, as "the method is not found".
+ *
+ * Display, edit and helper methods for a table you do not own belong in an
+ * `[ExtensionOf(tableStr(…))] final class`. This cost a captured eval case its
+ * first run (G-VM, 2026-08-30).
+ */
+function checkTableExtensionMethods(code: string): ValidationViolation[] {
+  if (!/<AxTableExtension[\s>]/.test(code)) return [];
+  const at = code.search(/<Methods\b/);
+  if (at < 0) return [];
+  const name = /<Name>([^<]+)<\/Name>/.exec(code)?.[1] ?? 'the extension';
+  return [{
+    rule: 'XML008',
+    severity: 'error',
+    line: lineNumber(code, at),
+    excerpt: '<Methods> inside an AxTableExtension',
+    fix:
+      'An AxTableExtension has no <Methods> element — the deserializer drops the block SILENTLY, ' +
+      'the build stays green, and the method is missing only at its call site. Put the methods in ' +
+      `an extension class instead: [ExtensionOf(tableStr(${name.split('.')[0]}))] final class ` +
+      `${name.replace(/\./g, '')}_Extension. Display and edit methods work there too.`,
+  }];
+}
+
+/**
+ * XML009 — a form control bound to a field group the table does not declare.
+ *
+ * `<DataGroup>Overview</DataGroup>` on a grid names a field group by string. If
+ * the table has no such group the AOT reports
+ * "Field group 'Overview' does not exist" — but only on a FULL build. An
+ * incremental build passes it, which is how this survived several captures
+ * before it was found (PR #967).
+ *
+ * The rule can only see what is in front of it: a single document naming a group
+ * cannot be checked without the table. What it CAN catch is the shape that
+ * actually shipped broken — a generated document that declares the table's field
+ * groups AND references a different one.
+ */
+function checkDataGroupDeclared(code: string): ValidationViolation[] {
+  if (!/<DataGroup>/.test(code)) return [];
+  // Only decidable when the same document declares the groups (a table + its form,
+  // or a table document). Otherwise stay quiet rather than guess.
+  const groupBlock = /<FieldGroups>([\s\S]*?)<\/FieldGroups>/.exec(code);
+  if (!groupBlock) return [];
+  const declared = new Set(
+    [...groupBlock[1].matchAll(/<AxTableFieldGroup>[\s\S]*?<Name>([^<]+)<\/Name>/g)].map(m => m[1]),
+  );
+  if (declared.size === 0) return [];
+
+  const violations: ValidationViolation[] = [];
+  const seen = new Set<string>();
+  for (const m of code.matchAll(/<DataGroup>([^<]+)<\/DataGroup>/g)) {
+    const group = m[1].trim();
+    if (!group || declared.has(group) || seen.has(group)) continue;
+    seen.add(group);
+    violations.push({
+      rule: 'XML009',
+      severity: 'error',
+      line: lineNumber(code, m.index ?? 0),
+      excerpt: `<DataGroup>${group}</DataGroup>`,
+      fix:
+        `The table declares no field group named "${group}" (it has: ` +
+        `${[...declared].join(', ')}). A full build answers "Field group '${group}' does not exist"; ` +
+        'an INCREMENTAL build passes it silently, so this is easy to ship. Either add the group to ' +
+        'the table or point the control at one that exists.',
+    });
+  }
+  return violations;
+}
+
+/**
+ * XML010 — a form control element written out of the order shipped metadata uses.
+ *
+ * Same failure as XML006 one level down, and with the same silence: the
+ * deserializer skips the misplaced element and carries on. When the element is a
+ * container's `<Controls>`, every control under it is in the file and invisible
+ * to the platform — verified against the live metadata provider in #979, where a
+ * scaffolded form held 16 controls of which the compiler could reach 14.
+ *
+ * The canonical order is not written here. It is mined per control `i:type` from
+ * 309,668 shipped controls by scripts/capture-form-element-order.ts; over that
+ * whole corpus this rule fires three times, each on a file where Microsoft
+ * itself put an element where the deserializer drops it.
+ *
+ * Only the `order` kind is reported. The checker's weaker `unknown` kind ("no
+ * shipped control of this type carries this element") is useful in the scaffold
+ * self-test but too soft for a caller-facing validator.
+ */
+function checkFormControlElementOrder(code: string): ValidationViolation[] {
+  if (!/<(?:AxFormControl|FormControl)[\s>]/.test(code)) return [];
+  return findControlElementOrderViolations(code)
+    .filter(v => v.kind === 'order')
+    .map(v => ({
+      rule: 'XML010',
+      severity: 'error' as const,
+      line: v.line,
+      excerpt: `${v.controlType} "${v.controlName}": <${v.element}> is written after <${v.beforeElement}>`,
+      fix:
+        `AxForm XML is order-sensitive and a misordered element is dropped SILENTLY — ` +
+        `anything under a dropped <Controls> is in the file and invisible to the compiler. ` +
+        `Move <${v.element}> BEFORE <${v.beforeElement}> (equivalently: move <${v.beforeElement}> ` +
+        `down past it). The canonical sequence per control ` +
+        `type is in src/validation/formControlElementOrder.generated.ts (e.g. on a group ` +
+        `control, <DataGroup> and <DataSource> come AFTER </Controls>).`,
+    }));
+}
+
 const XML_RULES = [
   checkMissingAlternateKey,
   checkTableElementOrder,
   checkNonExistentTableProperties,
+  checkTableExtensionMethods,
+  checkDataGroupDeclared,
+];
+
+/**
+ * Rules for a form document. The table rules do not apply, and the X++ keyword
+ * rules would only produce noise over metadata XML.
+ */
+const FORM_XML_RULES = [
+  checkFormControlElementOrder,
+  checkDataGroupDeclared,
 ];
 
 const XML_PROPERTY_RULES = [
@@ -2211,7 +2851,7 @@ const XML_PROPERTY_RULES = [
 
 export function runRules(
   code: string,
-  codeType: 'xpp' | 'xml-table' | 'xml-any' | 'xml-report',
+  codeType: 'xpp' | 'xml-table' | 'xml-form' | 'xml-any' | 'xml-report',
   stats?: PropertyStatsProvider,
 ): ValidationViolation[] {
   const violations: ValidationViolation[] = [];
@@ -2223,6 +2863,12 @@ export function runRules(
     // AxReport XML embeds RDL in CDATA — running the X++ keyword rules over it
     // would only produce noise, so the report document gets its own rule set.
     for (const rule of REPORT_XML_RULES) {
+      violations.push(...rule(code));
+    }
+  } else if (codeType === 'xml-form') {
+    // The route an agent needs to check a form BEFORE handing it to
+    // d365fo_file(action="create"), which now refuses this shape (#989).
+    for (const rule of FORM_XML_RULES) {
       violations.push(...rule(code));
     }
   } else if (codeType === 'xml-table') {

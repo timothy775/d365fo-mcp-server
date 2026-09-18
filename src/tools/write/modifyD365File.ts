@@ -38,6 +38,12 @@ import {
   bridgeRefreshProvider,
 } from '../../bridge/index.js';
 import * as debouncedRefresh from '../../bridge/debouncedRefresh.js';
+import {
+  claimedMarkerFor,
+  preserveDroppedProperties,
+  renderClaimCheck,
+  renderPreservationNote,
+} from './preserveMetadataElements.js';
 import { ProjectFileFinder, registerFileInActiveProject } from '../../workspace/projectFile.js';
 import { heuristicEdtBaseType, resolveEdtBaseType, isEnumName, resolveEdtEnumType, bridgeEdtBaseType } from '../smart/generateSmartTable.js';
 import { normalizeD365Xml } from '../../utils/d365XmlNormalizer.js';
@@ -55,7 +61,7 @@ import {
 } from '../analysis/validateFormPattern.js';
 import { validateEdtExtensionChange } from '../../utils/edtExtensionValidator.js';
 import { upsertWrittenFileIntoIndex } from './inlineIndexUpsert.js';
-import { verifyWrittenFile, renderWriteVerification, runInlineBpCheck, membershipOf, renderBatchEditHint } from './inlineWriteVerification.js';
+import { verifyWrittenFile, renderWriteVerification, runInlineBpCheck, membershipOf, renderBatchEditHint, verifyFormElementOrder } from './inlineWriteVerification.js';
 import { lintXppSelect } from '../../utils/xppSelectLint.js';
 import { validateWrittenXpp } from './inlineXppValidation.js';
 import { createPhaseTimer } from '../../utils/phaseTimer.js';
@@ -65,8 +71,11 @@ import {
   paramCorrectionCandidates, canonicalParamForAlias, D365FO_FILE_OP_SPECS,
 } from '../specs/d365foFileOpSpecs.js';
 import { lookupSymbolNocase } from '../../utils/symbolLookup.js';
+import { isValidModuleReferenceName } from '../../metadata/modelDescriptor.js';
 import { decodeXmlEntitiesFromXppSource } from '../../utils/xmlEscape.js';
-import { findD365FileOnDisk, expectedD365FilePath } from '../../utils/objectFileLookup.js';
+import {
+  findD365FileOnDisk, expectedD365FilePath, findModelDescriptorPath, moduleExistenceNote,
+} from '../../utils/objectFileLookup.js';
 import {
   crossModelWriteRefusal, standDownNotice, baseObjectOf, type ExistingExtension,
 } from '../../utils/crossModelWriteGuard.js';
@@ -94,8 +103,11 @@ import {
   directXmlRemoveEntryPoint,
   directXmlRemoveDiagnosticSuppression,
   directXmlAddDiagnosticSuppression,
+  directXmlAddModuleReference,
+  directXmlRemoveModuleReference,
   directXmlEnsureRelationProperties,
 } from './directXmlWriters.js';
+import { addReportParameter, refreshReportDataset } from './reportDesignXml.js';
 
 
 /**
@@ -491,6 +503,7 @@ export const ModifyD365FileArgsSchema = z.object({
     'menu', 'menu-extension',
     'security-privilege', 'security-duty', 'security-role',
     'ignore-diagnostic-list',
+    'model-descriptor',
   ]).describe('Type of D365FO object'),
   objectName: z.string().optional().describe(
     'Name of the object to modify. Optional when filePath is provided — it is then ' +
@@ -512,9 +525,11 @@ export const ModifyD365FileArgsSchema = z.object({
     'add-control', 'remove-control',
     'add-entry-point', 'remove-entry-point',
     'remove-diagnostic-suppression', 'add-diagnostic-suppression',
+    'add-module-reference', 'remove-module-reference',
     'add-enum-value', 'modify-enum-value', 'remove-enum-value',
     'add-display-method', 'add-table-method', 'add-menu-item-to-menu',
     'add-query-range', 'remove-query-range',
+    'report-design',
   ]).describe(
     'Operation to perform. ' +
     'replace-code REQUIRES parameters: oldCode (exact code to find) + newCode (replacement). ' +
@@ -658,7 +673,7 @@ export const ModifyD365FileArgsSchema = z.object({
   fieldNewName: z.string().optional().describe('New name for the field (required for rename-field operation)'),
   fieldType: z.string().optional().describe('EDT name for the field (for add-field: required — pass the EDT name, e.g. "InventQty", "WHSZoneId"). For modify-field: new EDT to set.'),
   fieldBaseType: z.string().optional().describe(
-    'Base type that determines the XML element for add-field: String | Integer | Real | Date | DateTime | Int64 | GUID | Enum. ' +
+    'Base type that determines the XML element for add-field: String | Integer | Real | Date | DateTime | Int64 | GUID | Enum | Container. ' +
     'REQUIRED when fieldType is an EDT — pass the EDT base type so the correct AxTableFieldReal/AxTableFieldDate/… is used. ' +
     'Examples: fieldType="InventQty" fieldBaseType="Real"; fieldType="TransDate" fieldBaseType="Date"; fieldType="ItemId" fieldBaseType="String". ' +
     'Without this, all EDT fields default to AxTableFieldString which is WRONG for numeric/date types.'
@@ -735,6 +750,10 @@ export const ModifyD365FileArgsSchema = z.object({
   ),
   deleteActionType: z.enum(DELETE_ACTION_TYPES).optional().describe(
     'None | Restricted (default) | Cascade | CascadeRestricted.'
+  ),
+  deleteActionRelation: z.string().optional().describe(
+    'Relation on this table the delete action follows. Without it xppbp reports ' +
+    'BPUpgradeMetadataDeleteAction ("has no explicit relation set").'
   ),
 
   // For add-field-group / remove-field-group / add-field-to-field-group (table, table-extension)
@@ -817,6 +836,13 @@ export const ModifyD365FileArgsSchema = z.object({
     'diagnosticElementName.'
   ),
 
+  // For add-module-reference / remove-module-reference (model-descriptor).
+  moduleReference: z.string().optional().describe(
+    'add-module-reference / remove-module-reference: REQUIRED — the module (package) name to add to or ' +
+    'remove from the descriptor\'s <ModuleReferences>, spelled exactly as its package folder is ' +
+    '(e.g. "ApplicationSuite", "Ledger", or an ISV package name).'
+  ),
+
   // For add-field-modification (table-extension only)
   // uses fieldName, fieldLabel, fieldMandatory (already defined above)
 
@@ -839,6 +865,39 @@ export const ModifyD365FileArgsSchema = z.object({
     'add-query-range: filter value, REQUIRED (e.g. "1" for NoYes, "Sales" for an enum, "1..99" for an ' +
     'interval). Pass the two characters "" for the empty-string filter — a range with no value at all ' +
     'filters nothing and is not a shape D365FO ships.'
+  ),
+  // ── report-design ─────────────────────────────────────────────────────────
+  // Declared here so a strict MCP client can send them: these are top-level keys,
+  // and an undeclared one is dropped before it reaches the handler.
+  reportAction: z.enum(['refresh-dataset', 'add-parameter']).optional().describe(
+    'report-design: which half to do. "refresh-dataset" copies the temp table fields into the ' +
+    'dataset (needs tableName); "add-parameter" declares a parameter and binds it (needs parameterName). ' +
+    'There is deliberately no "add-column" — that edits the RDL, whose failures surface only in the ' +
+    'SSRS renderer.'
+  ),
+  tableName: z.string().optional().describe(
+    'report-design(refresh-dataset): the temp table whose fields the dataset should carry. Read off ' +
+    'disk, so it must exist; only MISSING fields are added, never rewritten or removed.'
+  ),
+  datasetName: z.string().optional().describe(
+    'report-design: which dataset to act on. Optional when the report has exactly one — required when ' +
+    'it has several, because guessing puts the field on the wrong dataset.'
+  ),
+  parameterName: z.string().optional().describe(
+    'report-design(add-parameter): the parameter to declare and bind.'
+  ),
+  parameterDataType: z.string().optional().describe(
+    'report-design(add-parameter): .NET type name, default System.String. The vocabulary shipped ' +
+    'reports use is System.String / System.Boolean / System.DateTime / System.Int32 / System.Int64.'
+  ),
+  parameterHidden: z.boolean().optional().describe(
+    'report-design(add-parameter): true writes <UserVisibility>Hidden</UserVisibility>. Leave it off ' +
+    'for a VISIBLE parameter — there is no "Visible" value in any of the 8,977 shipped parameters, a ' +
+    'visible one omits the element, and an unknown value is dropped silently.'
+  ),
+  promptString: z.string().optional().describe(
+    'report-design(add-parameter): the dialog caption. Pass a LABEL id ("@MyModel:FromDate") — it is ' +
+    'user-visible text in metadata, which no BP rule checks.'
   ),
   joinSource: z.string().optional().describe(
     'Optional name of an existing data source on the form to join the new data source to (add-data-source).'
@@ -1225,7 +1284,17 @@ export async function modifyD365FileTool(
     if (!args.objectName) {
       if (args.filePath) {
         (args as any).objectName = path.win32.basename(args.filePath, '.xml');
-      } else {
+      } else if (args.objectType === 'model-descriptor') {
+        // A descriptor has no name of its own — the file is <Model>.xml, so the
+        // model IS the object name. Requiring it to be repeated as objectName
+        // would be the only place in this tool where the caller spells one value
+        // twice, and getting them to disagree is a refusal, not a write.
+        (args as any).objectName =
+          (args.modelName && args.modelName !== 'any' ? args.modelName : null)
+          || getConfigManager().getModelName()
+          || undefined;
+      }
+      if (!(args as any).objectName) {
         return {
           content: [{
             type: 'text',
@@ -1239,6 +1308,16 @@ export async function modifyD365FileTool(
     // Grounding enforcement: modifying an extension changes the behaviour of an
     // existing base object — when GROUNDING_ENFORCE=true the model must prove
     // (via prepare_change) that it inspected the real object first.
+    //
+    // objectType="model-descriptor" is DELIBERATELY not gated, the same way
+    // ignore-diagnostic-list is not. Grounding asks the agent to prove it read a
+    // base object before changing that object's behaviour, and `prepare` has no
+    // mode that produces a token for a descriptor — there is no base object, no
+    // signature and no CoC eligibility to inspect. Gating it would make every
+    // descriptor edit unreachable under GROUNDING_ENFORCE=true, which is exactly
+    // the hand-edited-XML hole this operation closes. What DOES gate it is the
+    // containment + cross-model guard below: only the active model's own
+    // descriptor is writable.
     if (args.objectType.endsWith('-extension')) {
       const groundingError = enforceGrounding(
         args.groundingToken,
@@ -1478,7 +1557,33 @@ export async function modifyD365FileTool(
       objectType === 'ignore-diagnostic-list' && operation === 'add-diagnostic-suppression';
 
     // 1. Find the file
-    let filePath = await findD365File(symbolIndex, objectType, objectName, modelName, workspacePath, explicitFilePath, args.packagePath);
+    //
+    // A descriptor is not in the symbol index (it is not an AOT object) and does
+    // not live at the AOT layout findD365File searches, so it gets its own
+    // resolver. An explicit filePath still wins, as everywhere else.
+    let filePath: string | null;
+    if (objectType === 'model-descriptor') {
+      if (explicitFilePath) {
+        filePath = explicitFilePath;
+      } else {
+        const found = await findModelDescriptorPath(modelName || objectName, args.packagePath);
+        filePath = found?.filePath ?? null;
+        if (!filePath) {
+          throw new Error(
+            `No descriptor found for model "${modelName || objectName}".\n\n` +
+            `A descriptor lives at <root>\\<Package>\\Descriptor\\<Model>.xml and is NOT created ` +
+            `here — a model without one is a wrong model name or a packages root this server is not ` +
+            `configured for, not a model waiting to be given a manifest.\n` +
+            `  1. Check the model name (get_workspace_info reports the configured one).\n` +
+            `  2. Pass packagePath="<root that contains the package>" if the metadata lives outside ` +
+            `the configured PackagesLocalDirectory.\n` +
+            `  3. Pass filePath="<...>\\Descriptor\\<Model>.xml" to bypass lookup.`,
+          );
+        }
+      }
+    } else {
+      filePath = await findD365File(symbolIndex, objectType, objectName, modelName, workspacePath, explicitFilePath, args.packagePath);
+    }
 
     // Lookup gates every candidate on existence, so for that one operation a miss
     // is the ordinary first-suppression case rather than a failure. Fall back to
@@ -1566,6 +1671,25 @@ export async function modifyD365FileTool(
           `  • Table: d365fo_file(action="create", objectType="table-extension", objectName="${objectName}.${configuredModel || 'YourModel'}Extension")\n` +
           `  • Class: d365fo_file(action="create", objectType="class-extension", objectName="${objectName}_Extension")\n` +
           `  • Form:  d365fo_file(action="create", objectType="form-extension", objectName="${objectName}.${configuredModel || 'YourModel'}Extension")`
+        );
+      }
+    }
+
+    // 1b-i. The same ownership guard for a descriptor, which 1b cannot see:
+    //       extractModelFromFilePath keys on the `/<Model>/Ax<Type>/` segment an
+    //       AOT path has and a descriptor path does not, so it returns null here
+    //       and 1b stands down — leaving ApplicationSuite's own manifest writable.
+    //       The model a descriptor describes is its own basename, which
+    //       assertWritePathAllowed has already put in modelSegment.
+    if (objectType === 'model-descriptor') {
+      const descriptorModel = containment.modelSegment ?? objectName;
+      if (isStandardModel(descriptorModel) && (!modelName || modelName !== descriptorModel)) {
+        throw new Error(
+          `⛔ Refusing to modify the descriptor of standard Microsoft model "${descriptorModel}".\n\n` +
+          `Module references are declared by the model that NEEDS them. To use a type from ` +
+          `"${descriptorModel}", add "${descriptorModel}" to YOUR model's <ModuleReferences> instead:\n` +
+          `  d365fo_file(action="modify", objectType="model-descriptor", modelName="<YourModel>", ` +
+          `operation="add-module-reference", params: { moduleReference: "${descriptorModel}" })`,
         );
       }
     }
@@ -1741,6 +1865,14 @@ export async function modifyD365FileTool(
     let bridgeResult: { success: boolean; message: string; viaXmlFallback?: boolean } | null = null;
     /** File content captured before a replace-code, to diff the reply against. */
     let replaceCodeBefore: string | null = null;
+    /**
+     * The whole file as it stood before this operation, for the preservation
+     * guard below. Read once, and only for the XML shapes it can reason about —
+     * see preserveMetadataElements.ts for why a write that drops a property
+     * nobody asked about has to be caught here rather than at the next build.
+     */
+    const preImage: string | null = await timer.time('pre-write image',
+      async () => readForMatching(actualFilePath).catch(() => null));
     let _bridgeRetried = false;
     // Retry loop: on the first null result with all required params present,
     // refresh the bridge provider (picks up objects created this session) and
@@ -1976,6 +2108,29 @@ export async function modifyD365FileTool(
           }
         }
 
+        // Container field with NO EDT — the minority spelling (52 of 332 shipped
+        // container fields; the other 280 name a container EDT and never reach here,
+        // the ladder below resolves AxEdtContainer on its own). `container` is a
+        // primitive, never an EDT name, so it used to be refused with "extended data
+        // type 'Container' does not exist — create the EDT first". The bridge has
+        // handled it all along; only this side never routed to it. See
+        // tests/tools/addFieldContainer.test.ts for the census and the BP cost.
+        const containerRequested =
+          /^container$/i.test((((args as Record<string, unknown>).fieldBaseType as string | undefined) ?? '').trim())
+          || /^container$/i.test((args.fieldType ?? '').trim());
+        if (args.fieldName && containerRequested && !enumTypeArg) {
+          bridgeResult = await bridgeAddField(
+            context.bridge,
+            objectName,
+            args.fieldName,
+            'Container',
+            undefined,           // a container field takes no EDT
+            args.fieldMandatory,
+            args.fieldLabel,
+          );
+          break;
+        }
+
         if (args.fieldName && !args.fieldType && !enumTypeArg) {
           const mappedOnly = (args as any).dataField || (args as any).dataSource;
           return {
@@ -1987,8 +2142,8 @@ export async function modifyD365FileTool(
                     `objectType="${objectType}" — nothing was written.\n` +
                     `On a table or table-extension a field needs fieldType (its EDT), or ` +
                     `fieldEnumType for an enum field.\n`
-                  : `❌ add-field on objectType="${objectType}" requires fieldType (the EDT), or ` +
-                    `fieldEnumType for an enum field — nothing was written.\n`) +
+                  : `❌ add-field on objectType="${objectType}" requires fieldType (the EDT), ` +
+                    `fieldEnumType for an enum field, or fieldBaseType="Container" for a container field — nothing was written.\n`) +
                 `\n${renderOpSpec('add-field')}`,
             }],
             isError: true,
@@ -2335,6 +2490,7 @@ export async function modifyD365FileTool(
             daName,
             (args as any).deleteActionTable,
             (args as any).deleteActionType,
+            (args as any).deleteActionRelation,
           ));
         }
         break;
@@ -2747,6 +2903,46 @@ export async function modifyD365FileTool(
         }
         break;
       }
+      case 'add-module-reference':
+      case 'remove-module-reference': {
+        // Not an AOT object at all — no bridge write path exists (see the writer).
+        //
+        // The objectType is re-checked here, and not left to canBridgeModify:
+        // that gate is `op ∈ OPS && (type ∈ TYPES || pair)`, so an operation
+        // listed for the XML-only pair is ALSO admitted on every ordinary bridge
+        // type. Without this, add-module-reference against a table would reach
+        // the writer, be refused for having no <ModuleReferences> element, and
+        // report the descriptor's message about a table — true, and useless.
+        if (objectType !== 'model-descriptor') {
+          bridgeResult = viaXmlFallback({
+            success: false,
+            message:
+              `'${operation}' applies to objectType="model-descriptor" only — it edits a model's ` +
+              `<ModuleReferences>, which a ${objectType} does not have. ` +
+              `Re-run with objectType="model-descriptor" and modelName="<the model that needs the reference>".`,
+          });
+          break;
+        }
+        const moduleRef = String((args as any).moduleReference ?? '').trim();
+        if (!isValidModuleReferenceName(moduleRef)) {
+          // Refused before the existence probe, which would otherwise join an
+          // arbitrary string onto every packages root.
+          bridgeResult = viaXmlFallback({
+            success: false,
+            message:
+              `${operation} needs params.moduleReference spelled exactly as a package folder is ` +
+              `(letters, digits, '_', '-' or '.', no spaces) — got ${JSON.stringify((args as any).moduleReference ?? null)}. ` +
+              `Nothing was written.`,
+          });
+        } else {
+          bridgeResult = operation === 'add-module-reference'
+            ? viaXmlFallback(await directXmlAddModuleReference(
+                actualFilePath, moduleRef, await moduleExistenceNote(moduleRef, args.packagePath),
+              ))
+            : viaXmlFallback(await directXmlRemoveModuleReference(actualFilePath, moduleRef));
+        }
+        break;
+      }
       case 'add-data-source': {
         if ((args as any).dataSourceName && (args as any).dataSourceTable) {
           bridgeResult = await bridgeAddDataSource(
@@ -2758,6 +2954,42 @@ export async function modifyD365FileTool(
             (args as any).joinSource,
             (args as any).linkType,
           );
+        }
+        break;
+      }
+      case 'report-design': {
+        // The first write path an AxReport has ever had, and deliberately a
+        // narrow one: metadata only, additive only, and the RDL inside the
+        // <![CDATA[…]]> block is never touched. A malformed RDL fails in the
+        // SSRS renderer at run time, where no build and no test can see it.
+        const reportAction = String((args as any).reportAction ?? '').trim();
+        if (reportAction === 'refresh-dataset') {
+          bridgeResult = viaXmlFallback(await refreshReportDataset(
+            actualFilePath,
+            String((args as any).tableName ?? ''),
+            (args as any).datasetName,
+          ));
+        } else if (reportAction === 'add-parameter') {
+          bridgeResult = viaXmlFallback(await addReportParameter(
+            actualFilePath,
+            String((args as any).parameterName ?? ''),
+            {
+              dataType: (args as any).parameterDataType,
+              hidden: (args as any).parameterHidden === true,
+              promptString: (args as any).promptString,
+              datasetName: (args as any).datasetName,
+            },
+          ));
+        } else {
+          bridgeResult = viaXmlFallback({
+            success: false,
+            message:
+              `❌ report-design: reportAction '${reportAction || '(missing)'}' is not one this operation ` +
+              'knows. Pass "refresh-dataset" (sync the dataset with its temp table) or "add-parameter". ' +
+              'There is deliberately no "add-column": placing a column edits the RDL, and a malformed ' +
+              'RDL fails in the SSRS renderer at run time rather than at build time — that half stays ' +
+              'with the Report Designer.',
+          });
         }
         break;
       }
@@ -2969,8 +3201,12 @@ export async function modifyD365FileTool(
     // contain the object cannot build or hand over the change just made to it.
     // The previous gate stopped at 'registered somewhere', which left an edited
     // object missing from the very project it was edited in.
+    // A descriptor belongs to the PACKAGE, not to any project inside it: no
+    // .rnrproj lists it, Visual Studio edits it through the model's properties
+    // dialog, and registering it would put a file in a project that has no
+    // element type for it.
     let projectMessage = '';
-    if (args.addToProject) {
+    if (args.addToProject && objectType !== 'model-descriptor') {
       const configManager = getConfigManager();
       await configManager.ensureLoaded();
 
@@ -3002,6 +3238,43 @@ export async function modifyD365FileTool(
           `\n\n⚠️ "${objectName}" is in no project of model "${model}" either ` +
             `(no projectPath configured — see above).`,
         );
+      }
+    }
+
+    // Did this write drop a property it was never asked about? Both halves of the
+    // 2026-08-31 L4-headerlines-document-slice defect looked exactly like a
+    // successful write from here — the note is what turns that silence into an
+    // answer, and the restore is what keeps the value.
+    let preservationNote = '';
+    if (preImage) {
+      try {
+        let postImage = await readForMatching(actualFilePath);
+        if (postImage) {
+          const preserved = preserveDroppedProperties(
+            preImage,
+            postImage,
+            operation,
+            (args as any).propertyPath,
+          );
+          if (preserved.restored.length > 0) {
+            await writeFileAtomic(actualFilePath, normalizeD365Xml(preserved.xml));
+            console.error(
+              `[modify_d365fo_file] 🔧 restored after '${operation}': ${preserved.restored.join(', ')}`,
+            );
+            preservationNote = renderPreservationNote(preserved.restored);
+            postImage = preserved.xml;
+          }
+          // …and did the thing the caller actually asked for survive? Same file
+          // read, the other half of the question.
+          preservationNote += renderClaimCheck(
+            claimedMarkerFor(operation, args as unknown as Record<string, unknown>),
+            postImage,
+          );
+        }
+      } catch (e) {
+        // Advisory. A guard that turns a good write into a reported failure is a
+        // worse defect than the one it guards against.
+        console.error(`[modify_d365fo_file] preservation guard skipped: ${e}`);
       }
     }
 
@@ -3129,6 +3402,10 @@ export async function modifyD365FileTool(
     // .rnrproj check still happens (config reads are cached).
     const verifyProjectPath =
       args.projectPath || (await getConfigManager().getProjectPath()) || undefined;
+    // membershipOf returns undefined for a type with no Ax* folder (a model
+    // descriptor), so no .rnrproj question is asked about one. The guard lives
+    // there rather than here because this is not the only call site — the batch
+    // wrapper in d365foFile.ts asks the same question.
     const verifyNote = inBatch ? '' : renderWriteVerification(
       await timer.time('write verification', () => verifyWrittenFile(
         actualFilePath,
@@ -3138,6 +3415,11 @@ export async function modifyD365FileTool(
     );
     const bpNote = await timer.time('inline BP check',
       () => runInlineBpCheck((args as any).bpCheck, objectType, objectName, context));
+    // A modify can INTRODUCE an out-of-order element — an insertion at the wrong
+    // offset is exactly the #979 defect — and the deserializer drops those in
+    // silence. Only checkable after the operation has applied (#989).
+    const formOrderNote = await timer.time('form element order',
+      () => verifyFormElementOrder(actualFilePath, objectType));
 
     return {
       content: [
@@ -3148,7 +3430,7 @@ export async function modifyD365FileTool(
               ? "this server's XML writer (no bridge path for this operation)"
               : 'IMetadataProvider.Update()'}${crossModelNotice}${autoCorrectNote}\n\n` +
             `**File:** ${actualFilePath}${addControlNote}${generationNote}${bridgeValidation}${projectMessage}\n` +
-            `🔧 API: ${bridgeResult.message}${changedLinesNote}${xppLintNote}${xppRuleNote}${addFieldBpNote}${fieldGroupRenderNote}${backupNote}${verifyNote}${indexNote}${bpNote}${timer.render()}` +
+            `🔧 API: ${bridgeResult.message}${preservationNote}${changedLinesNote}${xppLintNote}${xppRuleNote}${addFieldBpNote}${fieldGroupRenderNote}${backupNote}${verifyNote}${indexNote}${bpNote}${formOrderNote}${timer.render()}` +
             // "Review changes in Visual Studio" is not something the caller can act
             // on, and it rode along on every write.
             (ignoredParamsWarning ? `\n\n${ignoredParamsWarning}` : '') +
